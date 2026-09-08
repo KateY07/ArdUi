@@ -128,6 +128,13 @@ def dispatch(path, endpoint, data, ip, envelope):
             db.execute('UPDATE devices SET enabled=?,epoch=epoch+1,seen=? WHERE endpoint=?',(int(enabled),now,endpoint))
             db.execute('DELETE FROM requests WHERE target=?',(endpoint,))
         return {'enabled':enabled}
+    if path == '/api/v1/offline':
+        if data: raise ApiError(400,'离线请求不接受参数。')
+        with database() as db:
+            registered(db,endpoint)
+            db.execute('UPDATE devices SET seen=0 WHERE endpoint=?',(endpoint,))
+            db.execute('DELETE FROM requests WHERE target=?',(endpoint,))
+        return {'offline':True}
     if path == '/api/v1/poll':
         enabled=data.get('enabled')
         if type(enabled) is not bool or set(data)!={'enabled'}: raise ApiError(400,'无效访问开关；服务器不接收密码。')
@@ -199,7 +206,7 @@ def application(environ,start_response):
     status=200
     try:
         path=environ.get('PATH_INFO','')
-        if path=='/api/health' and environ['REQUEST_METHOD']=='GET': result={'service':'arduiserver','version':'v1.pre5-console','ok':True}
+        if path=='/api/health' and environ['REQUEST_METHOD']=='GET': result={'service':'arduiserver','version':'v1.pre6-console','ok':True}
         elif environ['REQUEST_METHOD']!='POST': raise ApiError(405,'此接口仅接受 POST。')
         else:
             try: length=int(environ.get('CONTENT_LENGTH') or 0)

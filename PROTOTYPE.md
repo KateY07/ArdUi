@@ -1,4 +1,4 @@
-# Python 控制台原型 v1.pre5
+# Python 控制台原型 v1.pre6
 
 当前版本以最小控制台界面验证 ArdUi 的身份、授权、远程桌面、SMB、多设备和断线重连流程。客户端核心位于单个 `prototype.py`，协调服务位于 `server/arduiserver.py`。NJ 的 ARD Relay 保持 8080，下载服务保持 8090。
 
@@ -10,7 +10,7 @@
 irm https://f.visnova.cn/ardui/install.ps1 | iex
 ```
 
-脚本安装到 `%LOCALAPPDATA%\ArdUi`，不请求管理员权限，也不安装 Wintun。它下载经过固定 SHA-256 校验的发布包，内含 Python 3.13.15、cryptography 50.0.1、ARD 与原型。重复执行同一命令会验证并修复程序文件，保留 `data\identity`、EndpointId、机器编号和授权状态。以后可运行 `%LOCALAPPDATA%\ArdUi\ArdUi.cmd`。
+脚本安装到 `%LOCALAPPDATA%\ArdUi`，不请求管理员权限，也不安装 Wintun。它下载经过固定 SHA-256 校验的发布包，内含 Python 3.13.15、cryptography 50.0.1、ARD 与原型。重复执行同一命令会验证并修复程序文件，保留 `data\identity`、EndpointId、机器编号、已授权设备、访问密码和“允许被控”设置。以后可运行 `%LOCALAPPDATA%\ArdUi\ArdUi.cmd`。
 
 安装脚本将安装目录 ACL 限制为当前用户、SYSTEM 和 Administrators。身份文件不存在时才创建；无效文件会令安装停止，绝不自动覆盖。本阶段不使用 TPM，也不承诺系统重装后自动恢复身份。
 

@@ -3,17 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ArdUi v1.pre5</title>
+<title>ArdUi v1.pre6</title>
 <style>
 :root{color-scheme:dark;--bg:#0b0d10;--card:#15191f;--line:#2a313b;--text:#eef2f6;--muted:#a8b2bf;--accent:#7dd3fc}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.65 system-ui,"Microsoft YaHei",sans-serif}.wrap{max-width:850px;margin:auto;padding:56px 22px 80px}h1{font-size:42px;margin:0 0 4px}.tag{color:var(--accent);font-weight:700}.muted{color:var(--muted)}section{margin-top:34px;padding:24px;background:var(--card);border:1px solid var(--line);border-radius:14px}h2{margin:0 0 12px;font-size:21px}pre{overflow:auto;padding:16px;background:#080a0d;border:1px solid var(--line);border-radius:9px;color:#d8f4ff}button{border:0;border-radius:8px;padding:10px 15px;background:var(--accent);color:#06202b;font-weight:700;cursor:pointer}li{margin:.45em 0}code{color:#c8ebff}a{color:var(--accent)}@media(max-width:520px){h1{font-size:34px}.wrap{padding-top:36px}section{padding:18px}}
 </style>
 </head>
 <body><main class="wrap">
 <div class="tag">预发布控制台原型</div>
-<h1>ArdUi v1.pre5</h1>
+<h1>ArdUi v1.pre6</h1>
 <p class="muted">通过永久设备身份与 ARD 端到端连接，访问已授权 Windows 设备的远程桌面和 SMB 文件共享。</p>
 <section><h2>一键安装</h2><p>在普通 PowerShell 窗口执行：</p><pre id="cmd">irm https://f.visnova.cn/ardui/install.ps1 | iex</pre><button onclick="navigator.clipboard.writeText(document.querySelector('#cmd').textContent).then(()=>this.textContent='已复制')">复制命令</button><p class="muted">支持 Windows 11 24H2 / Windows Server 2025 x64 及以上。不请求管理员权限，不安装 Wintun；内置 Python 3.13、ARD 和所需依赖。</p></section>
 <section><h2>使用流程</h2><ol><li>启动后先查看被控状态；仅在开启被控时显示本机 6 位设备 ID 与 EndpointId。</li><li>选择 <code>B</code> 设置访问密码并开启被控。</li><li>另一端选择 <code>A</code>，输入 6 位设备 ID 与访问密码。</li><li>双方通过独立渠道核对完整 EndpointId；申请到达后，被控端可在任意菜单按 <code>T</code> 回车直接信任。</li><li>授权设备显示在编号列表中。按数字进入设备菜单，打开远程桌面或 SMB，也可连接、断开；活动连接显示直连/中继类型、TCP/PsPing RTT 与 UDP 往返延迟。</li></ol></section>
-<section><h2>身份与安全</h2><p>安装脚本首次创建 <code>%LOCALAPPDATA%\ArdUi\data\identity</code>，修复和升级不会覆盖。EndpointId 是永久公钥指纹；访问密码只在经过身份验证的端到端连接中发送，协调服务器不接收密码或密码哈希。</p><p>首次安装仍需信任本站提供的脚本与发布包。首次设备核对请使用电话、当面等独立渠道。</p></section>
-<section><h2>当前范围</h2><p>这是用于跑通流程的控制台预览版，内置 ARD 2.0.0-pre.5，并固定 ArdRelay 公钥。TCP、真实本机 SMB、多设备和强制断线重连已纳入自动回归；跨两台真实 Windows 设备的 RDP 登录仍需继续验收。</p><p><a href="ArdUi-console-v1.pre5.zip">下载包</a> · SHA-256 <code>26973c22ef87e505fd3565c6320a2af76b19a878c1beaf20c5ef6586962bdb9f</code></p></section>
+<section><h2>身份与安全</h2><p>安装脚本首次创建 <code>%LOCALAPPDATA%\ArdUi\data\identity</code>；修复和升级保留身份、机器编号、已授权设备、访问密码和“允许被控”设置。EndpointId 是永久公钥指纹；访问密码只在经过身份验证的端到端连接中发送，协调服务器不接收密码或密码哈希。</p><p>首次安装仍需信任本站提供的脚本与发布包。首次设备核对请使用电话、当面等独立渠道。</p></section>
+<section><h2>当前范围</h2><p>这是用于跑通流程的控制台预览版，内置 ARD 2.0.0-pre.5，并固定 ArdRelay 公钥。TCP、真实本机 SMB、多设备和强制断线重连已纳入自动回归；跨两台真实 Windows 设备的 RDP 登录仍需继续验收。</p><p><a href="ArdUi-console-v1.pre6.zip">下载包</a> · SHA-256 <code>dd7eb9310e0f38686f16aac38ea47dfc32b5a832c824587d793baf33b4086e92</code></p></section>
 </main></body></html>

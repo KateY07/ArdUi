@@ -287,15 +287,19 @@ class Node:
         self.key = identity(self.root)
         self.endpoint = self.key.public_key().public_bytes_raw().hex()
         path = self.root/'state.json'
-        self.state = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {'acl': {}, 'peers': {}, 'pins': {}, 'controllers': {}}
+        self.state = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {'acl': {}, 'peers': {}, 'pins': {}, 'controllers': {}, 'enabled': False}
         if not isinstance(self.state,dict) or any(not isinstance(self.state.get(name),dict) for name in ('acl','peers','pins')):
             raise ValueError('state.json is invalid; restore state.json.bak or remove the corrupt state file.')
         self.state.setdefault('controllers',{})
         if not isinstance(self.state['controllers'],dict):
             raise ValueError('state.json controllers are invalid; restore state.json.bak.')
-        self.code, self.enabled, self.password = '', False, None
+        if type(self.state.setdefault('enabled',False)) is not bool:
+            raise ValueError('state.json enabled setting is invalid; restore state.json.bak.')
+        self.code, self.enabled, self.password = '', self.state['enabled'], None
         if 'password' in self.state:
             self.password = tuple(bytes.fromhex(part) for part in self.state['password'])
+        if self.enabled and self.password is None:
+            raise ValueError('state.json enables host access without a password.')
         self.incoming, self.outgoing, self.forwards, self.jobs, self.seen = {}, {}, {}, set(), {}
         self.desired, self.supervisors, self.connect_locks = set(), {}, {}
         self.confirm = None
@@ -333,6 +337,7 @@ class Node:
         if result['endpoint'] != self.endpoint or (self.state.get('code') and self.state['code'] != result['code']):
             raise ValueError('Machine identity changed.')
         self.code = self.state['code'] = result['code']; self.save()
+        await self.call('/api/v1/access', {'enabled': self.enabled})
 
     async def access(self, enabled, password=None):
         async with self.control:
@@ -352,6 +357,7 @@ class Node:
             self.state['acl'].clear(); self.state['controllers'].clear(); self.save()
         if enabled and self.password is None:
             raise ValueError('Set a password before enabling host access.')
+        self.state['enabled']=bool(enabled); self.save()
         await self.call('/api/v1/access', {'enabled': enabled}); self.enabled = enabled
 
     async def poll(self):
@@ -587,7 +593,6 @@ class Node:
             await self.incoming.pop(peer).close()
 
     async def close(self):
-        self.enabled = False
         self.desired.clear()
         for task in self.supervisors.values(): task.cancel()
         await asyncio.gather(*self.supervisors.values(),return_exceptions=True)
@@ -600,7 +605,7 @@ class Node:
         for session in list(self.incoming.values())+list(self.outgoing.values()):
             await session.close()
         with contextlib.suppress(Exception):
-            await self.call('/api/v1/access', {'enabled':False})
+            await self.call('/api/v1/offline', {})
 
 
 async def powershell(script, data):
@@ -663,7 +668,7 @@ async def console(args):
             print('\n连接失败：',str(error),flush=True)
 
     def show():
-        print('\n'+'='*66+'\nArdUi v1.pre5 | 被控：'+('允许' if node.enabled else '关闭')+f' | 正在被控：{sum(s.admitted and not s.closed for s in node.incoming.values())} 台')
+        print('\n'+'='*66+'\nArdUi v1.pre6 | 被控：'+('允许' if node.enabled else '关闭')+f' | 正在被控：{sum(s.admitted and not s.closed for s in node.incoming.values())} 台')
         if node.enabled:
             print('设备 ID：'+node.code+' | EndpointId：'+node.endpoint)
             active=[(node.state['controllers'].get(peer,'未知设备'),peer) for peer,session in node.incoming.items() if session.admitted and not session.closed]
@@ -833,12 +838,16 @@ async def regression(args):
             assert incoming and endpoint==client.endpoint
             return True
         host.confirm=host_confirm; other.confirm=other_confirm; client.confirm=client_confirm
-        loops=[]
+        loops=[]; persistence_ready=False
         try:
             for node in nodes: await node.register()
             original=client.code; await client.register(); assert original==client.code
             print('PASS NJ HTTPS: stable six-character machine codes',flush=True)
             await host.access(True,'Prototype-Password-8362'); await other.access(True,'Other-Password-5318')
+            restored=Node(roots[0],args.ard,args.server,args.relay,args.relay_key)
+            assert restored.enabled and restored.password==host.password
+            persistence_ready=True
+            print('PASS enabled setting and access password survive restart',flush=True)
             loops=[asyncio.create_task(n.poll()) for n in (host,other)]
             connecting=asyncio.create_task(client.connect(host.code,'Prototype-Password-8362'))
             await asyncio.wait_for(pending.wait(),120)
@@ -904,6 +913,7 @@ async def regression(args):
             assert len(checks)==before
             print('PASS revoke rejects reconnect; wrong password never prompts host',flush=True)
             await client.disconnect(other.code); await other.access(False)
+            assert not Node(roots[1],args.ard,args.server,args.relay,args.relay_key).enabled
             try: await client.connect(other.code)
             except urllib.error.HTTPError as error: assert error.code==403
             else: raise AssertionError('Disabled host admitted connection')
@@ -912,6 +922,10 @@ async def regression(args):
             for task in loops: task.cancel()
             await asyncio.gather(*loops,return_exceptions=True)
             for node in nodes: await node.close()
+            if persistence_ready:
+                assert Node(roots[0],args.ard,args.server,args.relay,args.relay_key).enabled
+                assert not Node(roots[1],args.ard,args.server,args.relay,args.relay_key).enabled
+                print('PASS normal shutdown preserves configured host-access state',flush=True)
             listener.close(); await listener.wait_closed()
 
 

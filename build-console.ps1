@@ -1,7 +1,7 @@
 param([string]$ArdPath = (Join-Path $PSScriptRoot 'tools\ard.exe'))
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-$version='v1.pre5'
+$version='v1.pre6'
 $pythonVersion='3.13.15'
 $pythonUrl="https://www.python.org/ftp/python/$pythonVersion/python-$pythonVersion-embed-amd64.zip"
 $pythonSha256='d1f04d990aee1253d8569e8e5104e30fa9f5fa830899f14843448872d936a2cf'
