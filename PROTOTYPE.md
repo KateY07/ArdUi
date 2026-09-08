@@ -4,7 +4,15 @@
 
 ## 运行
 
-需要 Python 3.11+、`cryptography`（41+）和已构建的 ARD 2 客户端。默认读取 `tools/ard.exe`，也可用 `--ard` 指定路径。
+普通用户直接运行唯一安装命令，无需预装 Python、.NET 或 ARD，也不请求管理员权限：
+
+```powershell
+irm https://f.visnova.cn/ardui/install.ps1 | iex
+```
+
+脚本安装到当前用户的 `%LOCALAPPDATA%\ArdUi`，创建或保留 `%LOCALAPPDATA%\ArdUi\data\identity`，随后打开控制台。以后可运行 `%LOCALAPPDATA%\ArdUi\ArdUi.cmd`。重复执行安装命令用于修复或升级，不覆盖 `data`。
+
+源码开发需要 Python 3.11+、`cryptography`（41+）和已构建的 ARD 2 客户端。默认读取 `tools/ard.exe`，也可用 `--ard` 指定路径。
 
 ```powershell
 py -m pip install cryptography
@@ -31,7 +39,9 @@ py prototype.py run
 | `off` | 关闭被控功能、断开所有入站连接；保留授权，不影响出站连接 |
 | `quit` | 退出并清理会话及本原型创建的 SMB 映射 |
 
-多设备连接使用不同的本机 `127.77.x.x` 回环地址及动态端口，不创建虚拟网卡、虚拟 IP 或系统路由。SMB 使用 Windows 11 24H2 / Server 2025 的 `New-SmbMapping -TcpPort`。不用管理员权限，不自动修改系统服务或防火墙。
+多设备的 RDP 连接使用不同的本机 `127.77.x.x` 回环地址及动态端口；SMB 因 Windows 重定向器会拒绝非标准回环别名，使用 `127.0.0.1` 加每台设备独立的动态 `TcpPort` 隔离映射。程序不创建虚拟网卡、虚拟 IP 或系统路由。SMB 使用 Windows 11 24H2 / Server 2025 的 `New-SmbMapping -TcpPort`。不用管理员权限，不自动修改系统服务或防火墙。
+
+ARD 自身在 Iroh Connection 关闭时退出，控制台原型监视该进程并重新向双方协调一个签名会话；已有授权重连不重复询问密码或指纹。底层路径迁移由 Iroh 处理。已经中断的 TCP 流不会由 ArdUi 伪造续传，RDP/SMB 按各自协议恢复；重连后的新流继续使用原设备身份和授权。
 
 ## 回归
 
@@ -39,8 +49,8 @@ py prototype.py run
 py prototype.py test
 ```
 
-回归创建三个临时身份，实际访问 NJ HTTPS 目录与 ARD Relay，验证稳定机器码、批准前不落授权、双方身份、签名授权、真实 TCP 转发、多设备隔离、免密码重连、签名篡改、撤销、错误密码、关闭被控。临时私钥在结束后清理。
+回归创建三个临时身份，实际访问 NJ HTTPS 目录与 ARD Relay，验证稳定机器码、批准前不落授权、双方身份、签名授权、真实 TCP 转发、本机 SMB 共享读取、多设备隔离、ARD 进程断线自动重连、免密码重连、签名篡改、撤销、错误密码、关闭被控。临时私钥在结束后清理。
 
 2026-09-08 首次实测：上述回归全部通过，使用 NJ 真实 HTTPS 服务及现有 8080 ARD Relay。
 
-这属于开发原型：尚未作为 `v1pre.1` 正式发布，不替代完整安全审查。自动回归使用 TCP 回显服务；实际 RDP 登录和 SMB 文件读写需两台具备相应 Windows 服务和账户的机器完成验收。暂不做二维码、安装更新签名或 UI 布局。最终 `irm .../install.ps1 | iex` 入口仍按 README 的产品方案交付。
+这属于 `v1pre.1-console` 开发原型，不替代完整安全审查。自动回归使用 TCP 回显服务，并已通过本机真实 SMB 共享读取；实际远端 RDP 登录仍需两台具备相应 Windows 服务和账户的机器完成验收。暂不做二维码、独立更新签名或 UI 布局。

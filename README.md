@@ -2,7 +2,7 @@
 
 ArdUi 是基于 ARD 的 Windows 远程访问应用，使用 Avalonia 和 .NET 8，以简约的“已授权设备”列表为主界面。用户通过 6 位机器编号添加设备，经密码验证、双方身份核对和被控端同意后，即可从列表打开远程桌面或 SMB 文件共享。
 
-当前开发阶段先以单文件 Python 控制台原型验证必要功能，再接回 Avalonia。运行方式与实测范围见 [PROTOTYPE.md](PROTOTYPE.md)。以下内容描述最终产品形态，不表示完整版本已交付。
+当前发布的是单文件 Python 控制台原型，用来验证必要功能，再接回 Avalonia。它同样只向用户提供 `irm https://f.visnova.cn/ardui/install.ps1 | iex`：脚本安装内置 Python 运行环境、原型和 ARD，不要求用户预装 Python。运行方式与实测范围见 [PROTOTYPE.md](PROTOTYPE.md)。以下其余内容描述最终产品形态，不表示 Avalonia 完整版本已交付。
 
 ## 产品组成
 

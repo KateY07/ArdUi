@@ -142,7 +142,11 @@ class Session:
                 await bridge((reader, writer), await self.open(target))
             except (OSError, EOFError, ValueError, ExceptionGroup):
                 writer.close()
-        listener = await asyncio.start_server(lambda r, w: self.spawn(serve(r, w)), self.address, 0)
+        # Windows SMB accepts its own loopback name; 127.77 aliases are rejected
+        # by the redirector before a connection is attempted. TcpPort still keeps
+        # each remote mapping on its own listener.
+        bind='127.0.0.1' if target==445 else self.address
+        listener = await asyncio.start_server(lambda r, w: self.spawn(serve(r, w)), bind, 0)
         self.listeners.append(listener)
         return listener.sockets[0].getsockname()[1]
 
@@ -177,6 +181,7 @@ class Node:
         if 'password' in self.state:
             self.password = tuple(bytes.fromhex(part) for part in self.state['password'])
         self.incoming, self.outgoing, self.jobs, self.seen = {}, {}, set(), set()
+        self.desired, self.supervisors, self.connect_locks = set(), {}, {}
         self.confirm = None
         self.attempts = []
         self.control = asyncio.Lock()
@@ -311,7 +316,19 @@ class Node:
             with contextlib.suppress(Exception):
                 await self.call('/api/v1/tickets/'+ticket['id']+'/reject',{})
 
-    async def connect(self, code, password=None):
+    async def connect(self, code, password=None, supervise=True):
+        code=code.upper()
+        if supervise:
+            self.desired.add(code)
+        lock=self.connect_locks.setdefault(code,asyncio.Lock())
+        async with lock:
+            session=await self.connect_once(code,password)
+        if supervise and code not in self.supervisors:
+            task=asyncio.create_task(self.supervise(code,session.peer)); self.supervisors[code]=task
+            task.add_done_callback(lambda done,c=code:self.supervisors.pop(c,None))
+        return session
+
+    async def connect_once(self, code, password=None):
         target = await self.call('/api/v1/lookup', {'code': code})
         peer = target['endpoint']; pinned = self.state['pins'].get(code)
         if pinned and pinned != peer:
@@ -363,6 +380,41 @@ class Node:
         except BaseException:
             await session.close(); raise
 
+    async def supervise(self, code, peer):
+        delay=1
+        while code in self.desired:
+            session=self.outgoing.get(peer)
+            if session is None:
+                return
+            await session.process.wait()
+            if code not in self.desired:
+                return
+            # ARD deliberately exits when its Iroh Connection closes. The upper
+            # layer creates a fresh signed session; the permanent ACL avoids a
+            # repeated password or consent prompt.
+            while code in self.desired:
+                lock=self.connect_locks.setdefault(code,asyncio.Lock())
+                try:
+                    async with lock:
+                        current=self.outgoing.get(peer)
+                        if current is not session:
+                            session=current
+                            break
+                        await session.close(); self.outgoing.pop(peer,None)
+                        replacement=await self.connect_once(code,None)
+                    print(f'\nRECONNECTED: {code}',flush=True)
+                    session=replacement; delay=1; break
+                except (PermissionError,ValueError):
+                    self.desired.discard(code); print(f'\nRECONNECT STOPPED: {code} authorization changed',flush=True); return
+                except Exception:
+                    await asyncio.sleep(delay); delay=min(delay*2,30)
+
+    async def disconnect(self,code):
+        code=code.upper(); self.desired.discard(code)
+        record=self.state['peers'].get(code)
+        if record and (session:=self.outgoing.pop(record['endpoint'],None)):
+            await session.close()
+
     async def revoke(self, peer):
         self.state['acl'].pop(peer,None); self.save()
         if peer in self.incoming:
@@ -370,6 +422,9 @@ class Node:
 
     async def close(self):
         self.enabled = False
+        self.desired.clear()
+        for task in self.supervisors.values(): task.cancel()
+        await asyncio.gather(*self.supervisors.values(),return_exceptions=True)
         for task in list(self.jobs):
             task.cancel()
         await asyncio.gather(*self.jobs, return_exceptions=True)
@@ -394,7 +449,8 @@ async def powershell(script, data):
         if process.returncode is None: process.kill(); await process.wait()
         raise
     if process.returncode:
-        raise OSError('Windows SMB mapping failed; check Windows version, share name and Windows credentials.')
+        detail=error.decode(errors='replace').strip().splitlines()
+        raise OSError('Windows SMB mapping failed: '+(detail[-1] if detail else 'unknown Windows error'))
     return output.decode().strip()
 
 
@@ -444,7 +500,7 @@ async def console(args):
                 elif command in ('rdp','smb','disconnect'):
                     peer=node.state['peers'][words[1].upper()]['endpoint']
                     if command=='disconnect':
-                        if peer in node.outgoing: await node.outgoing.pop(peer).close()
+                        await node.disconnect(words[1])
                         continue
                     session=node.outgoing.get(peer)
                     if not session: raise ValueError('Run connect CODE first.')
@@ -457,7 +513,7 @@ async def console(args):
                             raise ValueError('Enter a share name without a path.')
                         user=await asyncio.to_thread(input,'Windows user (empty = current account): ')
                         password=await asyncio.to_thread(getpass.getpass,'Windows password: ') if user else ''
-                        remote=f'\\\\{session.address}\\{share}'
+                        remote=f'\\\\{("127.0.0.1" if command=="smb" else session.address)}\\{share}'
                         script="""$drive=90..68 | ForEach-Object { [char]$_ } | Where-Object { -not (Get-PSDrive -Name $_ -ErrorAction SilentlyContinue) } | Select-Object -First 1;
 if(-not $drive){throw 'No drive letter available'}; $local=([string]$drive)+':';
 $p=@{LocalPath=$local; RemotePath=$d.remote; TcpPort=[int]$d.port; Persistent=$false};
@@ -512,6 +568,7 @@ async def regression(args):
         listener=await asyncio.start_server(echo,'127.0.0.1',0)
         port=listener.sockets[0].getsockname()[1]
         for node in nodes: node.allowed_ports=[port]
+        host.allowed_ports.append(445)
         pending=asyncio.Event(); consent=asyncio.get_running_loop().create_future(); checks=[]
         async def host_confirm(code,endpoint,incoming):
             assert incoming and endpoint==client.endpoint
@@ -543,6 +600,16 @@ async def regression(args):
                 writer.close(); await writer.wait_closed()
             await check_flow(first)
             print('PASS actual ARD relay + loopback TCP forwarding',flush=True)
+            if os.name=='nt':
+                smb_port=await first.forward(445)
+                remote='\\\\127.0.0.1\\scan'
+                script="New-SmbMapping -RemotePath $d.remote -TcpPort ([int]$d.port) -Persistent $false | Out-Null; Get-ChildItem $d.remote -ErrorAction Stop | Out-Null; [Console]::Write('SMB_OK')"
+                try:
+                    assert await powershell(script,dict(remote=remote,port=smb_port))=='SMB_OK'
+                finally:
+                    with contextlib.suppress(Exception):
+                        await powershell("Remove-SmbMapping -RemotePath $d.remote -Force -Confirm:$false",dict(remote=remote))
+                print('PASS Windows SMB read through ARD and New-SmbMapping -TcpPort',flush=True)
             second=await client.connect(other.code,'Other-Password-5318')
             assert first.address!=second.address
             await asyncio.gather(check_flow(first),check_flow(second))
@@ -551,6 +618,15 @@ async def regression(args):
             assert len(checks)==before
             await check_flow(first)
             print('PASS reconnect without enrollment password or repeated consent',flush=True)
+            before=len(checks); broken=first
+            broken.process.kill(); await broken.process.wait()
+            async with asyncio.timeout(120):
+                while client.outgoing.get(host.endpoint) in (None,broken): await asyncio.sleep(.25)
+            recovered=client.outgoing[host.endpoint]
+            assert len(checks)==before
+            await check_flow(recovered)
+            first=recovered
+            print('PASS automatic reconnect after ARD connection loss; new flows work without prompts',flush=True)
             # Forged directory session data cannot pass the endpoint signature check.
             envelope=host.sign('/test',{'ok':True}); envelope['payload']=base64.b64encode(b'{"ok":false}').decode()
             try: verify(envelope,'/test',host.endpoint)
