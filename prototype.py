@@ -21,6 +21,8 @@ import urllib.request
 import uuid
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
+DEFAULT_RELAY_KEY = 'spki:3059301306072a8648ce3d020106082a8648ce3d0301070342000462f8877cf66d813f17028e3d1cf44443c481586a04219326d752623dd72ce3b005a7c3a8ea3db565b75f4e7a72209d17f29d30cbfaea2be0c48384672bb2f01f'
+
 
 def encode(value):
     return json.dumps(value, separators=(',', ':')).encode()
@@ -112,7 +114,8 @@ class Session:
     async def start(self, mode, port, peer):
         env = dict(os.environ); env.pop('RUST_LOG', None); env['NO_COLOR'] = '1'
         self.process = await asyncio.create_subprocess_exec(str(self.node.ard), mode, str(port), 'to', peer,
-            '--relay', self.node.relay, cwd=self.folder.name, env=env,
+            '--relay', self.node.relay, '--relay-key', self.node.relay_key,
+            cwd=self.folder.name, env=env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
         ready = b'relay online' if mode == 'open' else b'READY:'
@@ -203,10 +206,13 @@ class Forward:
 
 
 class Node:
-    def __init__(self, root, ard, server='https://f.visnova.cn', relay='http://175.27.160.144:8080'):
+    def __init__(self, root, ard, server='https://f.visnova.cn', relay='http://175.27.160.144:8080', relay_key=DEFAULT_RELAY_KEY):
         self.root, self.ard, self.server, self.relay = Path(root).resolve(), Path(ard).resolve(), server.rstrip('/'), relay
+        self.relay_key = relay_key
         if not self.server.startswith('https://'):
             raise ValueError('HTTPS directory required.')
+        if not self.relay_key.startswith('spki:') or len(self.relay_key) <= 5:
+            raise ValueError('ArdRelay public key is invalid.')
         self.key = identity(self.root)
         self.endpoint = self.key.public_key().public_bytes_raw().hex()
         path = self.root/'state.json'
@@ -534,7 +540,7 @@ async def powershell(script, data):
 
 
 async def console(args):
-    node = Node(args.data,args.ard,args.server,args.relay); node.allowed_ports=[3389,445]
+    node = Node(args.data,args.ard,args.server,args.relay,args.relay_key); node.allowed_ports=[3389,445]
     await node.register()
     approvals, background = {}, set()
     async def confirm(code, endpoint, incoming):
@@ -557,7 +563,7 @@ async def console(args):
             print('\n连接失败：',str(error),flush=True)
 
     def show():
-        print('\n'+'='*66+'\nArdUi v1.pre4 | 被控：'+('允许' if node.enabled else '关闭')+f' | 正在被控：{sum(s.admitted and not s.closed for s in node.incoming.values())} 台')
+        print('\n'+'='*66+'\nArdUi v1.pre5 | 被控：'+('允许' if node.enabled else '关闭')+f' | 正在被控：{sum(s.admitted and not s.closed for s in node.incoming.values())} 台')
         if node.enabled:
             print('设备 ID：'+node.code+' | EndpointId：'+node.endpoint)
             active=[(node.state['controllers'].get(peer,'未知设备'),peer) for peer,session in node.incoming.items() if session.admitted and not session.closed]
@@ -669,6 +675,7 @@ def main():
     parser.add_argument('--ard',type=Path,default=Path(__file__).parent/'tools'/'ard.exe')
     parser.add_argument('--server',default='https://f.visnova.cn')
     parser.add_argument('--relay',default='http://175.27.160.144:8080')
+    parser.add_argument('--relay-key',default=DEFAULT_RELAY_KEY)
     args=parser.parse_args()
     if args.command=='init':
         print('EndpointId:',identity(args.data,True).public_key().public_bytes_raw().hex())
@@ -695,7 +702,7 @@ async def regression(args):
         else: raise AssertionError('Invalid identity accepted')
         assert (broken/'identity').read_bytes()==b'bad'
         print('PASS identity: create, reuse, no corrupt overwrite',flush=True)
-        nodes=[Node(root,args.ard,args.server,args.relay) for root in roots]
+        nodes=[Node(root,args.ard,args.server,args.relay,args.relay_key) for root in roots]
         host,other,client=nodes
         async def echo(reader,writer):
             try:

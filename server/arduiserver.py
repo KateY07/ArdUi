@@ -199,7 +199,7 @@ def application(environ,start_response):
     status=200
     try:
         path=environ.get('PATH_INFO','')
-        if path=='/api/health' and environ['REQUEST_METHOD']=='GET': result={'service':'arduiserver','version':'v1.pre4-console','ok':True}
+        if path=='/api/health' and environ['REQUEST_METHOD']=='GET': result={'service':'arduiserver','version':'v1.pre5-console','ok':True}
         elif environ['REQUEST_METHOD']!='POST': raise ApiError(405,'此接口仅接受 POST。')
         else:
             try: length=int(environ.get('CONTENT_LENGTH') or 0)

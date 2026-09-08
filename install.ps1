@@ -1,7 +1,7 @@
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-$version='v1.pre4'
-$expectedSha256='cf7b3bd5cece730210778fd91c4fbc5367d67801c210718bcf5618725a1baf06'
+$version='v1.pre5'
+$expectedSha256='558c739a489ae795fc1b0a50553f4cb3b9e98ae2d2d43a7c3a0fe8a2622f967e'
 $base='https://f.visnova.cn/ardui'
 $root=Join-Path $env:LOCALAPPDATA 'ArdUi'
 $versions=Join-Path $root 'versions'
@@ -63,13 +63,13 @@ try {
         else {
             $quarantine=$destination+'.replaced-'+(Get-Date -Format 'yyyyMMddHHmmss')
             try { Move-Item -LiteralPath $destination -Destination $quarantine }
-            catch { throw 'Existing v1.pre4 files need repair. Close ArdUi and run the install command again.' }
+            catch { throw 'Existing v1.pre5 files need repair. Close ArdUi and run the install command again.' }
             Move-Item -LiteralPath $stage -Destination $destination
         }
     } else { Move-Item -LiteralPath $stage -Destination $destination }
     Protect-ArdUiTree $root
     $launcher=Join-Path $root 'ArdUi.cmd'
-    $lines=@('@echo off','"%~dp0versions\v1.pre4\python.exe" "%~dp0versions\v1.pre4\prototype.py" run --data "%~dp0data" --ard "%~dp0versions\v1.pre4\ard.exe"')
+    $lines=@('@echo off','"%~dp0versions\v1.pre5\python.exe" "%~dp0versions\v1.pre5\prototype.py" run --data "%~dp0data" --ard "%~dp0versions\v1.pre5\ard.exe"')
     [IO.File]::WriteAllLines($launcher,$lines,[Text.Encoding]::ASCII)
     Protect-ArdUiTree $root
     & (Join-Path $destination 'python.exe') (Join-Path $destination 'prototype.py') init --data (Join-Path $root 'data') --ard (Join-Path $destination 'ard.exe')

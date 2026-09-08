@@ -1,4 +1,4 @@
-# Python 控制台原型 v1.pre4
+# Python 控制台原型 v1.pre5
 
 当前版本以最小控制台界面验证 ArdUi 的身份、授权、远程桌面、SMB、多设备和断线重连流程。客户端核心位于单个 `prototype.py`，协调服务位于 `server/arduiserver.py`。NJ 的 ARD Relay 保持 8080，下载服务保持 8090。
 

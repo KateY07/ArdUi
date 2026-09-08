@@ -1,7 +1,7 @@
 param([string]$ArdPath = (Join-Path $PSScriptRoot 'tools\ard.exe'))
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-$version='v1.pre4'
+$version='v1.pre5'
 $pythonVersion='3.13.15'
 $pythonUrl="https://www.python.org/ftp/python/$pythonVersion/python-$pythonVersion-embed-amd64.zip"
 $pythonSha256='d1f04d990aee1253d8569e8e5104e30fa9f5fa830899f14843448872d936a2cf'
@@ -37,6 +37,8 @@ $pth=Get-ChildItem $stage -Filter 'python*._pth' -File -ErrorAction Stop | Selec
 [IO.File]::AppendAllText($pth.FullName,"`r`nLib\site-packages`r`nimport site`r`n",[Text.UTF8Encoding]::new($false))
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'prototype.py') -Destination $stage
 Copy-Item -LiteralPath (Resolve-Path $ArdPath).Path -Destination (Join-Path $stage 'ard.exe')
+$ardVersion=(& (Join-Path $stage 'ard.exe') --version | Out-String).Trim()
+if($LASTEXITCODE -ne 0 -or $ardVersion -ne 'ard 2.0.0-pre.5'){throw "ARD 2.0.0-pre.5 is required; got '$ardVersion'."}
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'PROTOTYPE.md') -Destination $stage
 [IO.File]::WriteAllText((Join-Path $stage 'VERSION'),$version+"`n",[Text.UTF8Encoding]::new($false))
 & (Join-Path $stage 'python.exe') -c "import cryptography; print(cryptography.__version__)"
