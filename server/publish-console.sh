@@ -1,15 +1,17 @@
 #!/bin/sh
 set -eu
-cat /tmp/ardui-upload/part-000 /tmp/ardui-upload/part-001 /tmp/ardui-upload/part-002 \
-    /tmp/ardui-upload/part-003 /tmp/ardui-upload/part-004 /tmp/ardui-upload/part-005 \
-    /tmp/ardui-upload/part-006 /tmp/ardui-upload/part-007 /tmp/ardui-upload/part-008 \
-    > /tmp/ArdUi-console-v1pre.1.zip
-actual=$(sha256sum /tmp/ArdUi-console-v1pre.1.zip | cut -d' ' -f1)
-test "$actual" = bc51288a641303ec47e1f182336e9896858539ff498ec050e91721e54c1dcc60
-install -m 644 /tmp/ArdUi-console-v1pre.1.zip /var/www/f.visnova.cn/ardui/ArdUi-console-v1pre.1.zip
-install -m 644 /tmp/install.ps1 /var/www/f.visnova.cn/ardui/install.ps1
-install -m 644 /tmp/arduiserver.py /opt/arduiserver/arduiserver.py
+cat /tmp/ardui-upload-v4/part-* > /tmp/ArdUi-console-v1.pre4.zip
+actual=$(sha256sum /tmp/ArdUi-console-v1.pre4.zip | cut -d' ' -f1)
+test "$actual" = cf7b3bd5cece730210778fd91c4fbc5367d67801c210718bcf5618725a1baf06
+install -d -m 755 /var/www/f.visnova.cn/ardui
+install -m 644 /tmp/ArdUi-console-v1.pre4.zip /var/www/f.visnova.cn/ardui/ArdUi-console-v1.pre4.zip
+install -m 644 /tmp/install-v1.pre4.ps1 /var/www/f.visnova.cn/ardui/install.ps1
+install -m 644 /tmp/ardui-index-v1.pre4.html /var/www/f.visnova.cn/ardui/index.html
+install -m 644 /tmp/arduiserver-v1.pre4.py /opt/arduiserver/arduiserver.py
 systemctl restart arduiserver
-rm -rf /tmp/ardui-upload
-rm -f /tmp/ArdUi-console-v1pre.1.zip
-curl -fsS http://127.0.0.1:8091/api/health
+rm -rf /tmp/ardui-upload-v4
+rm -f /tmp/ArdUi-console-v1.pre4.zip /tmp/install-v1.pre4.ps1 /tmp/ardui-index-v1.pre4.html /tmp/arduiserver-v1.pre4.py
+i=0
+until curl -fsS http://127.0.0.1:8091/api/health; do
+    i=$((i+1)); test "$i" -lt 10; sleep 1
+done

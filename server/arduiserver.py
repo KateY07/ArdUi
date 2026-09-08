@@ -130,7 +130,7 @@ def dispatch(path, endpoint, data, ip, envelope):
         return {'enabled':enabled}
     if path == '/api/v1/poll':
         enabled=data.get('enabled')
-        if type(enabled) is not bool: raise ApiError(400,'缺少访问开关。')
+        if type(enabled) is not bool or set(data)!={'enabled'}: raise ApiError(400,'无效访问开关；服务器不接收密码。')
         with database() as db:
             db.execute('BEGIN IMMEDIATE')
             row=registered(db,endpoint)
@@ -199,7 +199,7 @@ def application(environ,start_response):
     status=200
     try:
         path=environ.get('PATH_INFO','')
-        if path=='/api/health' and environ['REQUEST_METHOD']=='GET': result={'service':'arduiserver','version':'v1pre.1-console','ok':True}
+        if path=='/api/health' and environ['REQUEST_METHOD']=='GET': result={'service':'arduiserver','version':'v1.pre4-console','ok':True}
         elif environ['REQUEST_METHOD']!='POST': raise ApiError(405,'此接口仅接受 POST。')
         else:
             try: length=int(environ.get('CONTENT_LENGTH') or 0)

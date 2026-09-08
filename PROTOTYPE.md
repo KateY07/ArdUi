@@ -1,56 +1,49 @@
-# Python 控制台原型
+# Python 控制台原型 v1.pre4
 
-先验证实际端到端链路，再开发 Avalonia 界面和正式一键安装。客户端全部在 `prototype.py`；协调服务在 `server/arduiserver.py`，已部署 NJ。既有 ARD 8080/8090 端口保持不变。
+当前版本以最小控制台界面验证 ArdUi 的身份、授权、远程桌面、SMB、多设备和断线重连流程。客户端核心位于单个 `prototype.py`，协调服务位于 `server/arduiserver.py`。NJ 的 ARD Relay 保持 8080，下载服务保持 8090。
 
-## 运行
+## 安装与启动
 
-普通用户直接运行唯一安装命令，无需预装 Python、.NET 或 ARD，也不请求管理员权限：
+在普通 PowerShell 窗口执行：
 
 ```powershell
 irm https://f.visnova.cn/ardui/install.ps1 | iex
 ```
 
-脚本安装到当前用户的 `%LOCALAPPDATA%\ArdUi`，创建或保留 `%LOCALAPPDATA%\ArdUi\data\identity`，随后打开控制台。以后可运行 `%LOCALAPPDATA%\ArdUi\ArdUi.cmd`。重复执行安装命令用于修复或升级，不覆盖 `data`。
+脚本安装到 `%LOCALAPPDATA%\ArdUi`，不请求管理员权限，也不安装 Wintun。它下载经过固定 SHA-256 校验的发布包，内含 Python 3.13.15、cryptography 50.0.1、ARD 与原型。重复执行同一命令会验证并修复程序文件，保留 `data\identity`、EndpointId、机器编号和授权状态。以后可运行 `%LOCALAPPDATA%\ArdUi\ArdUi.cmd`。
 
-源码开发需要 Python 3.11+、`cryptography`（41+）和已构建的 ARD 2 客户端。默认读取 `tools/ard.exe`，也可用 `--ard` 指定路径。
+安装脚本将安装目录 ACL 限制为当前用户、SYSTEM 和 Administrators。身份文件不存在时才创建；无效文件会令安装停止，绝不自动覆盖。本阶段不使用 TPM，也不承诺系统重装后自动恢复身份。
+
+## 控制台界面
+
+启动后直接显示：
+
+- 是否允许被控，以及当前正在访问本机的设备 ID 和 EndpointId；
+- 开启被控时显示本机 6 位设备 ID 与完整 EndpointId；
+- 已获得授权的远程设备列表，以及连接、重连或离线状态。
+
+按设备前的数字进入操作菜单，可打开远程桌面、SMB 文件共享、连接或断开。主菜单还提供：
+
+- `A`：添加设备，输入对方 6 位设备 ID 和访问密码；
+- `H`：开启或关闭被控；
+- `V`：处理首次身份核对；
+- `R`：撤销允许控制本机的设备；
+- `Q`：退出。
+
+首次连接时双方必须通过独立渠道核对完整 EndpointId，被控端还要明确同意。密码只在经过身份验证的端到端连接中发送，中央服务器不接收密码或密码哈希。Windows RDP 和 SMB 账户仍由 Windows 自身验证。
+
+RDP 使用每台设备固定的本机 `127.77.x.x` 地址；SMB 使用 `127.0.0.1` 和每台设备独立的动态 `TcpPort`。ARD 会话断开后，控制层重新协调签名会话，同时保留原来的本地监听地址和端口，以便 RDP/SMB 自身重连。
+
+## 开发与回归
+
+源码运行需要 Python 3.11+、cryptography 41+ 和已构建的 ARD 2 客户端：
 
 ```powershell
-py -m pip install cryptography
 py prototype.py init
 py prototype.py run
-```
-
-`init` 仅在 `prototype-data/identity` 不存在时创建密钥，已有文件绝不覆盖。`run` 只读取已有密钥。该目录与程序放在一起；重复初始化和升级保持身份。删除或丢失密钥会产生新身份；本阶段无 TPM 恢复。不要将该目录提交到 Git 或分享给他人。
-
-## 两端操作
-
-1. 两端分别执行 `init`、`run`，各自显示机器码及完整 EndpointId，默认关闭被控功能。
-2. 被控端输入 `on`，设置至少 8 位的访问密码。以后 `on` 时密码留空可保留原密码及授权；输入新密码会撤销已有被控授权。
-3. 主控端输入 `add 对方机器码`，输入访问密码。先独立核对显示的被控端 EndpointId，再输入 `approve 提示中的令牌`；拒绝用 `deny 令牌`。
-4. 被控端只有密码验证成功才显示主控端完整 EndpointId。通过独立渠道核对后输入 `approve 令牌`。主控端收到签名授权后，设备才加入 `list`。
-5. 主控端输入 `rdp 机器码` 打开远程桌面，或 `smb 机器码` 输入共享名和 Windows 账户，映射空闲盘符并打开资源管理器。Windows 自身远程桌面和 SMB 服务须已经启用；ArdUi 密码不代替 Windows 凭据。
-
-| 命令 | 功能 |
-| --- | --- |
-| `list` | 显示已授权的目标及允许访问本机的公钥 |
-| `connect 机器码` | 已授权设备重新建连，不重复输入 ArdUi 密码或确认 |
-| `disconnect 机器码` | 断开此目标并清理该会话创建的 SMB 映射 |
-| `revoke 完整EndpointId` | 被控端撤销该主控端并断开已有连接 |
-| `off` | 关闭被控功能、断开所有入站连接；保留授权，不影响出站连接 |
-| `quit` | 退出并清理会话及本原型创建的 SMB 映射 |
-
-多设备的 RDP 连接使用不同的本机 `127.77.x.x` 回环地址及动态端口；SMB 因 Windows 重定向器会拒绝非标准回环别名，使用 `127.0.0.1` 加每台设备独立的动态 `TcpPort` 隔离映射。程序不创建虚拟网卡、虚拟 IP 或系统路由。SMB 使用 Windows 11 24H2 / Server 2025 的 `New-SmbMapping -TcpPort`。不用管理员权限，不自动修改系统服务或防火墙。
-
-ARD 自身在 Iroh Connection 关闭时退出，控制台原型监视该进程并重新向双方协调一个签名会话；已有授权重连不重复询问密码或指纹。底层路径迁移由 Iroh 处理。已经中断的 TCP 流不会由 ArdUi 伪造续传，RDP/SMB 按各自协议恢复；重连后的新流继续使用原设备身份和授权。
-
-## 回归
-
-```powershell
 py prototype.py test
 ```
 
-回归创建三个临时身份，实际访问 NJ HTTPS 目录与 ARD Relay，验证稳定机器码、批准前不落授权、双方身份、签名授权、真实 TCP 转发、本机 SMB 共享读取、多设备隔离、ARD 进程断线自动重连、免密码重连、签名篡改、撤销、错误密码、关闭被控。临时私钥在结束后清理。
+回归实际访问 NJ HTTPS 目录与 8080 Relay，验证稳定设备 ID、批准前不落授权、双方身份、签名授权、真实 TCP、本机 SMB、多设备隔离、相同本地端口上的断线重连、免密码重连、篡改拒绝、撤销、错误密码和关闭被控。
 
-2026-09-08 首次实测：上述回归全部通过，使用 NJ 真实 HTTPS 服务及现有 8080 ARD Relay。
-
-这属于 `v1pre.1-console` 开发原型，不替代完整安全审查。自动回归使用 TCP 回显服务，并已通过本机真实 SMB 共享读取；实际远端 RDP 登录仍需两台具备相应 Windows 服务和账户的机器完成验收。暂不做二维码、独立更新签名或 UI 布局。
+这是控制台预览版。跨两台真实 Windows 设备的 RDP 登录仍需继续验收，二维码、独立更新签名和 Avalonia 界面留给后续版本。

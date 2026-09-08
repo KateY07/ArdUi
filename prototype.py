@@ -102,8 +102,7 @@ class Session:
         self.listeners, self.tasks = [], set()
         self.token, self.port, self.ports = b'', 0, []
         self.closed = False
-        self.address = '127.0.0.1'
-        self.mappings = []
+        self.admitted = False
 
     def spawn(self, coroutine):
         task = asyncio.create_task(coroutine); self.tasks.add(task)
@@ -136,27 +135,10 @@ class Session:
             writer.close(); raise ConnectionError('Remote service is not listening.')
         return reader, writer
 
-    async def forward(self, target):
-        async def serve(reader, writer):
-            try:
-                await bridge((reader, writer), await self.open(target))
-            except (OSError, EOFError, ValueError, ExceptionGroup):
-                writer.close()
-        # Windows SMB accepts its own loopback name; 127.77 aliases are rejected
-        # by the redirector before a connection is attempted. TcpPort still keeps
-        # each remote mapping on its own listener.
-        bind='127.0.0.1' if target==445 else self.address
-        listener = await asyncio.start_server(lambda r, w: self.spawn(serve(r, w)), bind, 0)
-        self.listeners.append(listener)
-        return listener.sockets[0].getsockname()[1]
-
     async def close(self):
         if self.closed:
             return
         self.closed = True
-        for drive,remote in self.mappings:
-            with contextlib.suppress(Exception):
-                await powershell("$m=Get-SmbMapping -LocalPath $d.drive -ErrorAction SilentlyContinue; if($m -and $m.RemotePath -eq $d.remote){Remove-SmbMapping -LocalPath $d.drive -Force -Confirm:$false}",dict(drive=drive,remote=remote))
         for listener in self.listeners:
             listener.close(); await listener.wait_closed()
         if self.process and self.process.returncode is None:
@@ -168,6 +150,58 @@ class Session:
         self.folder.cleanup()
 
 
+class Forward:
+    def __init__(self,node,code,peer,target,address):
+        self.node,self.code,self.peer,self.target,self.address=node,code,peer,target,address
+        self.listener=None
+        self.tasks=set()
+        self.mappings=[]
+        self.closed=False
+
+    def spawn(self,coroutine):
+        task=asyncio.create_task(coroutine); self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        return task
+
+    async def start(self):
+        async def serve(reader,writer):
+            deadline=time.monotonic()+150
+            try:
+                while not self.closed and self.code in self.node.desired:
+                    session=self.node.outgoing.get(self.peer)
+                    if session and not session.closed and session.process and session.process.returncode is None:
+                        try:
+                            await bridge((reader,writer),await session.open(self.target)); return
+                        except (OSError,EOFError,ConnectionError):
+                            pass
+                    if time.monotonic()>=deadline:
+                        break
+                    await asyncio.sleep(.25)
+            except (ValueError,ExceptionGroup):
+                pass
+            finally:
+                writer.close()
+        bind='127.0.0.1' if self.target==445 else self.address
+        self.listener=await asyncio.start_server(lambda r,w:self.spawn(serve(r,w)),bind,0)
+        return self
+
+    @property
+    def port(self):
+        return self.listener.sockets[0].getsockname()[1]
+
+    async def close(self):
+        if self.closed:
+            return
+        self.closed=True
+        for drive,remote in self.mappings:
+            with contextlib.suppress(Exception):
+                await powershell("$m=Get-SmbMapping -LocalPath $d.drive -ErrorAction SilentlyContinue; if($m -and $m.RemotePath -eq $d.remote){Remove-SmbMapping -LocalPath $d.drive -Force -Confirm:$false}",dict(drive=drive,remote=remote))
+        if self.listener:
+            self.listener.close(); await self.listener.wait_closed()
+        for task in list(self.tasks): task.cancel()
+        await asyncio.gather(*self.tasks,return_exceptions=True)
+
+
 class Node:
     def __init__(self, root, ard, server='https://f.visnova.cn', relay='http://175.27.160.144:8080'):
         self.root, self.ard, self.server, self.relay = Path(root).resolve(), Path(ard).resolve(), server.rstrip('/'), relay
@@ -176,11 +210,16 @@ class Node:
         self.key = identity(self.root)
         self.endpoint = self.key.public_key().public_bytes_raw().hex()
         path = self.root/'state.json'
-        self.state = json.loads(path.read_text()) if path.exists() else {'acl': {}, 'peers': {}, 'pins': {}}
+        self.state = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {'acl': {}, 'peers': {}, 'pins': {}, 'controllers': {}}
+        if not isinstance(self.state,dict) or any(not isinstance(self.state.get(name),dict) for name in ('acl','peers','pins')):
+            raise ValueError('state.json is invalid; restore state.json.bak or remove the corrupt state file.')
+        self.state.setdefault('controllers',{})
+        if not isinstance(self.state['controllers'],dict):
+            raise ValueError('state.json controllers are invalid; restore state.json.bak.')
         self.code, self.enabled, self.password = '', False, None
         if 'password' in self.state:
             self.password = tuple(bytes.fromhex(part) for part in self.state['password'])
-        self.incoming, self.outgoing, self.jobs, self.seen = {}, {}, set(), set()
+        self.incoming, self.outgoing, self.forwards, self.jobs, self.seen = {}, {}, {}, set(), {}
         self.desired, self.supervisors, self.connect_locks = set(), {}, {}
         self.confirm = None
         self.attempts = []
@@ -188,7 +227,12 @@ class Node:
 
     def save(self):
         path = self.root/'state.json'
-        temporary = path.with_suffix('.tmp'); temporary.write_bytes(encode(self.state)); temporary.replace(path)
+        temporary = path.with_suffix('.tmp')
+        with temporary.open('wb') as file:
+            file.write(encode(self.state)); file.flush(); os.fsync(file.fileno())
+        if path.exists():
+            path.with_suffix('.json.bak').write_bytes(path.read_bytes())
+        temporary.replace(path)
 
     def sign(self, route, data):
         envelope = dict(endpoint=self.endpoint, issuedAt=int(time.time()), nonce=uuid.uuid4().hex,
@@ -228,7 +272,7 @@ class Node:
             salt = secrets.token_bytes(16)
             self.password = (salt, hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 600000))
             self.state['password'] = [part.hex() for part in self.password]
-            self.state['acl'].clear(); self.save()
+            self.state['acl'].clear(); self.state['controllers'].clear(); self.save()
         if enabled and self.password is None:
             raise ValueError('Set a password before enabling host access.')
         await self.call('/api/v1/access', {'enabled': enabled}); self.enabled = enabled
@@ -238,10 +282,11 @@ class Node:
             try:
                 async with self.control:
                     reply = await self.call('/api/v1/poll', {'enabled': self.enabled})
+                now=time.time(); self.seen={key:expires for key,expires in self.seen.items() if expires>=now}
                 for ticket in reply['tickets']:
                     if ticket['id'] in self.seen:
                         continue
-                    self.seen.add(ticket['id'])
+                    self.seen[ticket['id']]=ticket['expires']
                     task = asyncio.create_task(self.accept(ticket)); self.jobs.add(task)
                     task.add_done_callback(self.jobs.discard)
             except Exception as error:
@@ -284,9 +329,10 @@ class Node:
                                 elif not grant and self.confirm and await self.confirm(ticket['controllerCode'],peer,True):
                                     if self.enabled and not session.closed:
                                         grant = self.sign('/grant/v1',dict(controllerEndpoint=peer,targetEndpoint=self.endpoint,grantId=uuid.uuid4().hex))
-                                        self.state['acl'][peer] = grant; self.save()
+                                        self.state['acl'][peer] = grant; self.state['controllers'][peer]=ticket['controllerCode']; self.save()
                             if not self.enabled or session.closed:
                                 grant = None
+                            session.admitted=bool(grant)
                             await write_json(writer, dict(accepted=bool(grant), error=None if grant else 'Access denied',
                                 token=session.token.hex() if grant else None, tcpPorts=session.ports if grant else [], udpPorts=[], grant=grant))
                             return
@@ -309,12 +355,22 @@ class Node:
             await session.start('open',listener.sockets[0].getsockname()[1],ticket['clientSessionId'])
             await self.call('/api/v1/tickets/'+ticket['id']+'/ready',dict(sessionId=session.endpoint,requestId=ticket['id'],
                 controllerEndpoint=peer,targetEndpoint=self.endpoint,clientSessionId=ticket['clientSessionId'],expires=ticket['expires']))
+            task=asyncio.create_task(self.expire_incoming(peer,session,ticket['expires'])); self.jobs.add(task)
+            task.add_done_callback(self.jobs.discard)
         except Exception as error:
             print('Incoming:',type(error).__name__, flush=True)
             if session:
                 await session.close()
             with contextlib.suppress(Exception):
                 await self.call('/api/v1/tickets/'+ticket['id']+'/reject',{})
+
+    async def expire_incoming(self,peer,session,expires):
+        while session.process and session.process.returncode is None:
+            if not session.admitted and time.time()>=expires:
+                break
+            await asyncio.sleep(.5)
+        if self.incoming.get(peer) is session:
+            self.incoming.pop(peer,None); await session.close()
 
     async def connect(self, code, password=None, supervise=True):
         code=code.upper()
@@ -372,9 +428,9 @@ class Node:
                     raise ValueError('Grant identity mismatch.')
                 session.token = bytes.fromhex(reply['token']); session.ports = reply['tcpPorts']
                 addresses={p.get('address') for p in self.state['peers'].values()}
-                session.address=self.state['peers'].get(code,{}).get('address') or next(
+                address=self.state['peers'].get(code,{}).get('address') or next(
                     f'127.77.{i//250}.{i%250+1}' for i in range(64000) if f'127.77.{i//250}.{i%250+1}' not in addresses)
-                self.state['peers'][code] = dict(endpoint=peer,grant=reply['grant'],address=session.address); self.save()
+                self.state['peers'][code] = dict(endpoint=peer,grant=reply['grant'],address=address); self.save()
                 self.outgoing[peer] = session
                 return session
         except BaseException:
@@ -406,17 +462,37 @@ class Node:
                     session=replacement; delay=1; break
                 except (PermissionError,ValueError):
                     self.desired.discard(code); print(f'\nRECONNECT STOPPED: {code} authorization changed',flush=True); return
+                except urllib.error.HTTPError as error:
+                    if error.code in (403,404,410):
+                        self.desired.discard(code); print(f'\nRECONNECT STOPPED: {code} host unavailable',flush=True); return
+                    await asyncio.sleep(delay); delay=min(delay*2,30)
                 except Exception:
                     await asyncio.sleep(delay); delay=min(delay*2,30)
 
+    async def forward(self,code,target):
+        code=code.upper(); record=self.state['peers'].get(code)
+        if not record or record['endpoint'] not in self.outgoing:
+            raise ValueError('Run connect CODE first.')
+        key=(code,target)
+        if key not in self.forwards:
+            forward=Forward(self,code,record['endpoint'],target,record['address'])
+            self.forwards[key]=await forward.start()
+        return self.forwards[key]
+
+    async def close_forwards(self,code):
+        selected=[key for key in self.forwards if key[0]==code]
+        for key in selected:
+            await self.forwards.pop(key).close()
+
     async def disconnect(self,code):
         code=code.upper(); self.desired.discard(code)
+        await self.close_forwards(code)
         record=self.state['peers'].get(code)
         if record and (session:=self.outgoing.pop(record['endpoint'],None)):
             await session.close()
 
     async def revoke(self, peer):
-        self.state['acl'].pop(peer,None); self.save()
+        self.state['acl'].pop(peer,None); self.state['controllers'].pop(peer,None); self.save()
         if peer in self.incoming:
             await self.incoming.pop(peer).close()
 
@@ -428,6 +504,9 @@ class Node:
         for task in list(self.jobs):
             task.cancel()
         await asyncio.gather(*self.jobs, return_exceptions=True)
+        for forward in list(self.forwards.values()):
+            await forward.close()
+        self.forwards.clear()
         for session in list(self.incoming.values())+list(self.outgoing.values()):
             await session.close()
         with contextlib.suppress(Exception):
@@ -457,11 +536,14 @@ async def powershell(script, data):
 async def console(args):
     node = Node(args.data,args.ard,args.server,args.relay); node.allowed_ports=[3389,445]
     await node.register()
-    print(f'Machine: {node.code}\nEndpointId: {node.endpoint}\nHost access: OFF',flush=True)
     approvals, background = {}, set()
     async def confirm(code, endpoint, incoming):
-        token=secrets.token_hex(3); future=asyncio.get_running_loop().create_future(); approvals[token]=future
-        print(f'\n{"Incoming" if incoming else "Target"}: {code}\nEndpointId: {endpoint}\nVerify independently, then: approve {token} (or deny {token})',flush=True)
+        if not incoming:
+            print(f'\n核对远程设备 {code} | EndpointId: {endpoint}')
+            answer=await asyncio.to_thread(input,'已通过独立渠道核对一致？[y/N] ')
+            return answer.strip().lower()=='y'
+        token=secrets.token_hex(3); future=asyncio.get_running_loop().create_future(); approvals[token]=(future,code,endpoint)
+        print(f'\n收到被控申请：{code} | EndpointId: {endpoint} | 返回主菜单选择 V 处理。',flush=True)
         try:
             return await asyncio.wait_for(future,180)
         finally:
@@ -470,59 +552,108 @@ async def console(args):
     poll=asyncio.create_task(node.poll())
     async def connect(code,password):
         try:
-            await node.connect(code,password); print('\nAUTHORIZED:',code,flush=True)
+            await node.connect(code,password); print('\n已授权并连接：',code,flush=True)
         except Exception as error:
-            print('\nConnect failed:',str(error),flush=True)
-    print('Commands: on, off, add CODE, connect CODE, approve TOKEN, deny TOKEN, list, rdp CODE, smb CODE, disconnect CODE, revoke ENDPOINT, quit')
-    try:
+            print('\n连接失败：',str(error),flush=True)
+
+    def show():
+        print('\n'+'='*66+'\nArdUi v1.pre4 | 被控：'+('允许' if node.enabled else '关闭')+f' | 正在被控：{sum(s.admitted and not s.closed for s in node.incoming.values())} 台')
+        if node.enabled:
+            print('设备 ID：'+node.code+' | EndpointId：'+node.endpoint)
+            active=[(node.state['controllers'].get(peer,'未知设备'),peer) for peer,session in node.incoming.items() if session.admitted and not session.closed]
+            if active:
+                print('正在访问本机：'+'；'.join(f'{code} | {endpoint}' for code,endpoint in active))
+        print('已授权设备（本机可主动访问）：')
+        peers=list(node.state['peers'].items())
+        if not peers:
+            print('  （暂无）')
+        for index,(code,record) in enumerate(peers,1):
+            session=node.outgoing.get(record['endpoint'])
+            status='已连接' if session and not session.closed else ('重连中' if code in node.desired else '离线')
+            print(f'  [{index}] {code}  {status}')
+        settings='被控设置'+(f'（{len(approvals)} 个待确认）' if approvals else '')
+        options='[A] 添加设备  [B] '+(settings if node.enabled else '开启被控')
+        print(options+'  [Q] 退出')
+        return peers
+
+    async def open_device(code,record):
         while True:
-            words=(await asyncio.to_thread(input,'ardui> ')).split()
-            if not words:
+            session=node.outgoing.get(record['endpoint'])
+            status='已连接' if session and not session.closed else ('重连中' if code in node.desired else '离线')
+            print(f'\n{code} | {status} | EndpointId: {record["endpoint"]}')
+            print('[1] 远程桌面  [2] 文件共享  [0] 返回')
+            choice=(await asyncio.to_thread(input,'选择：')).strip()
+            if choice=='0': return
+            if choice not in ('1','2'):
+                print('无效选择。'); continue
+            if record['endpoint'] not in node.outgoing:
+                print('正在连接…'); await node.connect(code)
+            forward=await node.forward(code,3389 if choice=='1' else 445)
+            if choice=='1':
+                subprocess.Popen(['mstsc',f'/v:{forward.address}:{forward.port}']); print('已打开远程桌面。')
                 continue
-            try:
-                command=words[0]
-                if command=='quit':
-                    break
-                if command=='on':
-                    await node.access(True,(await asyncio.to_thread(getpass.getpass,'New password (resets grants); empty keeps existing: ')) or None)
-                elif command=='off':
-                    await node.access(False)
-                elif command in ('approve','deny'):
-                    approvals[words[1]].set_result(command=='approve')
-                elif command in ('add','connect'):
-                    password=await asyncio.to_thread(getpass.getpass,'Enrollment password: ') if command=='add' else None
-                    task=asyncio.create_task(connect(words[1].upper(),password)); background.add(task); task.add_done_callback(background.discard)
-                elif command=='list':
-                    print('Authorized targets:',json.dumps({c:p['endpoint'] for c,p in node.state['peers'].items()},indent=2))
-                    print('Allowed controllers:',*node.state['acl'],sep='\n')
-                elif command=='revoke':
-                    await node.revoke(words[1])
-                elif command in ('rdp','smb','disconnect'):
-                    peer=node.state['peers'][words[1].upper()]['endpoint']
-                    if command=='disconnect':
-                        await node.disconnect(words[1])
-                        continue
-                    session=node.outgoing.get(peer)
-                    if not session: raise ValueError('Run connect CODE first.')
-                    port=await session.forward(3389 if command=='rdp' else 445)
-                    if command=='rdp':
-                        subprocess.Popen(['mstsc',f'/v:{session.address}:{port}'])
-                    else:
-                        share=await asyncio.to_thread(input,'Share name: ')
-                        if not share or any(c in share for c in '\\/\0'):
-                            raise ValueError('Enter a share name without a path.')
-                        user=await asyncio.to_thread(input,'Windows user (empty = current account): ')
-                        password=await asyncio.to_thread(getpass.getpass,'Windows password: ') if user else ''
-                        remote=f'\\\\{("127.0.0.1" if command=="smb" else session.address)}\\{share}'
-                        script="""$drive=90..68 | ForEach-Object { [char]$_ } | Where-Object { -not (Get-PSDrive -Name $_ -ErrorAction SilentlyContinue) } | Select-Object -First 1;
+            share=(await asyncio.to_thread(input,'共享名：')).strip()
+            if not share or any(c in share for c in '\\/\0'):
+                raise ValueError('共享名不能包含路径。')
+            user=(await asyncio.to_thread(input,'Windows 用户（留空使用当前账户）：')).strip()
+            password=await asyncio.to_thread(getpass.getpass,'Windows 密码：') if user else ''
+            remote=f'\\\\localhost\\{share}'
+            script="""$drive=90..68 | ForEach-Object { [char]$_ } | Where-Object { -not (Get-PSDrive -Name $_ -ErrorAction SilentlyContinue) } | Select-Object -First 1;
 if(-not $drive){throw 'No drive letter available'}; $local=([string]$drive)+':';
 $p=@{LocalPath=$local; RemotePath=$d.remote; TcpPort=[int]$d.port; Persistent=$false};
 if($d.user){$p.Credential=[pscredential]::new($d.user,(ConvertTo-SecureString $d.password -AsPlainText -Force))};
 New-SmbMapping @p | Out-Null; [Console]::Write($local)"""
-                        drive=await powershell(script,dict(remote=remote,port=port,user=user,password=password))
-                        session.mappings.append((drive,remote)); subprocess.Popen(['explorer.exe',drive+'\\'])
+            drive=await powershell(script,dict(remote=remote,port=forward.port,user=user,password=password))
+            forward.mappings.append((drive,remote)); subprocess.Popen(['explorer.exe',drive+'\\'])
+            print('已打开文件共享：'+drive)
+
+    async def host_settings():
+        if not node.enabled:
+            password=await asyncio.to_thread(getpass.getpass,'设置访问密码（至少 8 位）：')
+            await node.access(True,password); print('已开启被控。'); return
+        while True:
+            active=sum(s.admitted and not s.closed for s in node.incoming.values())
+            print(f'\n被控设置 | 正在被控：{active} 台 | 已授权主控：{len(node.state["acl"])} 台')
+            print('[1] 处理待确认申请  [2] 管理主控授权  [3] 修改访问密码  [4] 关闭被控  [0] 返回')
+            choice=(await asyncio.to_thread(input,'选择：')).strip()
+            if choice=='0': return
+            if choice=='1':
+                pending=list(approvals.items())
+                if not pending: print('目前没有待确认申请。'); continue
+                for index,(token,(_,code,endpoint)) in enumerate(pending,1): print(f'  [{index}] {code} | EndpointId: {endpoint}')
+                index=int((await asyncio.to_thread(input,'申请编号（0 返回）：')).strip())
+                if not index: continue
+                token,(future,_,_)=pending[index-1]
+                answer=(await asyncio.to_thread(input,'已通过独立渠道核对完整 EndpointId？[y/N] ')).strip().lower()
+                if not future.done(): future.set_result(answer=='y')
+            elif choice=='2':
+                allowed=list(node.state['acl'])
+                if not allowed: print('没有已授权主控。'); continue
+                for index,endpoint in enumerate(allowed,1): print(f'  [{index}] {node.state["controllers"].get(endpoint,"未知设备")} | {endpoint}')
+                index=int((await asyncio.to_thread(input,'输入编号撤销，0 返回：')).strip())
+                if index: await node.revoke(allowed[index-1]); print('已撤销。')
+            elif choice=='3':
+                password=await asyncio.to_thread(getpass.getpass,'新访问密码（修改后撤销全部主控授权）：')
+                await node.access(True,password); print('密码已修改，原主控授权已撤销。'); continue
+            elif choice=='4': await node.access(False); print('已关闭被控。'); return
+            elif choice not in ('1','2','3','4'): print('无效选择。')
+
+    try:
+        while True:
+            peers=show(); choice=(await asyncio.to_thread(input,'选择：')).strip().upper()
+            try:
+                if choice=='Q': break
+                if choice=='B':
+                    await host_settings()
+                elif choice=='A':
+                    code=(await asyncio.to_thread(input,'对方 6 位设备 ID：')).strip().upper()
+                    if len(code)!=6: raise ValueError('设备 ID 必须为 6 位。')
+                    password=await asyncio.to_thread(getpass.getpass,'对方访问密码：')
+                    await connect(code,password)
+                elif choice.isdigit() and 1<=int(choice)<=len(peers):
+                    await open_device(*peers[int(choice)-1])
                 else:
-                    print('Unknown command.')
+                    print('无效选择。')
             except Exception as error:
                 print(type(error).__name__+': '+str(error))
     finally:
@@ -544,7 +675,12 @@ def main():
     elif args.command=='test':
         asyncio.run(regression(args))
     else:
-        asyncio.run(console(args))
+        try:
+            asyncio.run(console(args))
+        except Exception as error:
+            print('启动失败：'+str(error))
+            with contextlib.suppress(EOFError): input('按 Enter 关闭…')
+            raise SystemExit(1)
 
 
 async def regression(args):
@@ -592,31 +728,32 @@ async def regression(args):
             assert not connecting.done() and not client.state['peers']
             consent.set_result(True); first=await connecting
             print('PASS password + both fingerprints + explicit consent + signed grant',flush=True)
-            async def check_flow(session):
-                forwarded=await session.forward(port)
-                reader,writer=await asyncio.open_connection(session.address,forwarded)
+            async def check_flow(code,forward=None):
+                forward=forward or await client.forward(code,port)
+                reader,writer=await asyncio.open_connection(forward.address,forward.port)
                 payload=secrets.token_bytes(16384); writer.write(payload); await writer.drain()
                 assert await asyncio.wait_for(reader.readexactly(len(payload)),15)==payload
                 writer.close(); await writer.wait_closed()
-            await check_flow(first)
+                return forward
+            stable=await check_flow(host.code)
             print('PASS actual ARD relay + loopback TCP forwarding',flush=True)
             if os.name=='nt':
-                smb_port=await first.forward(445)
-                remote='\\\\127.0.0.1\\scan'
+                smb=await client.forward(host.code,445)
+                remote='\\\\localhost\\scan'
                 script="New-SmbMapping -RemotePath $d.remote -TcpPort ([int]$d.port) -Persistent $false | Out-Null; Get-ChildItem $d.remote -ErrorAction Stop | Out-Null; [Console]::Write('SMB_OK')"
                 try:
-                    assert await powershell(script,dict(remote=remote,port=smb_port))=='SMB_OK'
+                    assert await powershell(script,dict(remote=remote,port=smb.port))=='SMB_OK'
                 finally:
                     with contextlib.suppress(Exception):
                         await powershell("Remove-SmbMapping -RemotePath $d.remote -Force -Confirm:$false",dict(remote=remote))
                 print('PASS Windows SMB read through ARD and New-SmbMapping -TcpPort',flush=True)
             second=await client.connect(other.code,'Other-Password-5318')
-            assert first.address!=second.address
-            await asyncio.gather(check_flow(first),check_flow(second))
+            assert client.state['peers'][host.code]['address']!=client.state['peers'][other.code]['address']
+            await asyncio.gather(check_flow(host.code),check_flow(other.code))
             print('PASS simultaneous remote devices with isolated loopback addresses',flush=True)
             before=len(checks); first=await client.connect(host.code)
             assert len(checks)==before
-            await check_flow(first)
+            await check_flow(host.code,stable)
             print('PASS reconnect without enrollment password or repeated consent',flush=True)
             before=len(checks); broken=first
             broken.process.kill(); await broken.process.wait()
@@ -624,9 +761,10 @@ async def regression(args):
                 while client.outgoing.get(host.endpoint) in (None,broken): await asyncio.sleep(.25)
             recovered=client.outgoing[host.endpoint]
             assert len(checks)==before
-            await check_flow(recovered)
+            assert await client.forward(host.code,port) is stable
+            await check_flow(host.code,stable)
             first=recovered
-            print('PASS automatic reconnect after ARD connection loss; new flows work without prompts',flush=True)
+            print('PASS automatic reconnect keeps the same local forwarding endpoint',flush=True)
             # Forged directory session data cannot pass the endpoint signature check.
             envelope=host.sign('/test',{'ok':True}); envelope['payload']=base64.b64encode(b'{"ok":false}').decode()
             try: verify(envelope,'/test',host.endpoint)
@@ -644,7 +782,7 @@ async def regression(args):
             else: raise AssertionError('Wrong password admitted')
             assert len(checks)==before
             print('PASS revoke rejects reconnect; wrong password never prompts host',flush=True)
-            await other.access(False)
+            await client.disconnect(other.code); await other.access(False)
             try: await client.connect(other.code)
             except urllib.error.HTTPError as error: assert error.code==403
             else: raise AssertionError('Disabled host admitted connection')

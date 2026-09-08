@@ -2,7 +2,7 @@
 
 ArdUi 是基于 ARD 的 Windows 远程访问应用，使用 Avalonia 和 .NET 8，以简约的“已授权设备”列表为主界面。用户通过 6 位机器编号添加设备，经密码验证、双方身份核对和被控端同意后，即可从列表打开远程桌面或 SMB 文件共享。
 
-当前发布的是单文件 Python 控制台原型，用来验证必要功能，再接回 Avalonia。它同样只向用户提供 `irm https://f.visnova.cn/ardui/install.ps1 | iex`：脚本安装内置 Python 运行环境、原型和 ARD，不要求用户预装 Python。运行方式与实测范围见 [PROTOTYPE.md](PROTOTYPE.md)。以下其余内容描述最终产品形态，不表示 Avalonia 完整版本已交付。
+当前发布的是 v1.pre4 单文件 Python 控制台原型，用来验证必要功能，再接回 Avalonia。用户可在 [https://f.visnova.cn/ardui/](https://f.visnova.cn/ardui/) 查看说明，并通过 `irm https://f.visnova.cn/ardui/install.ps1 | iex` 安装。脚本内置 Python 运行环境、原型和 ARD，不要求用户预装 Python。运行方式与实测范围见 [PROTOTYPE.md](PROTOTYPE.md)。以下其余内容描述最终产品形态，不表示 Avalonia 完整版本已交付。
 
 ## 产品组成
 
@@ -23,7 +23,7 @@ ArdUi 是基于 ARD 的 Windows 远程访问应用，使用 Avalonia 和 .NET 8�
 
 `install.ps1` 负责创建与保留本地身份，客户端普通运行模式不负责生成身份。本阶段不使用 TPM：
 
-1. 每次安装或升级都检查安装目录中的 `data\device\identity`。文件不存在时才生成新的 Ed25519 私钥。
+1. 每次安装或升级都检查安装目录中的 `data\identity`。文件不存在时才生成新的 Ed25519 私钥。
 2. 已有密钥直接沿用，绝不覆盖；已有文件无效或无法读取时停止并提示，不以新身份掩盖错误。
 3. 密钥保存在安装目录的身份子目录中，并限制 Windows 文件访问权限；不得打印或上传私钥。
 4. 日常启动只读取已有文件；文件缺失时提示重新运行安装脚本。
@@ -120,13 +120,13 @@ ArdUi 访问密码是首次添加设备的授权口令。Windows 远程桌面和
 
 ## NJ 分发与一键安装
 
-以下是计划发布的地址，当前 README 更新不表示新二进制或脚本已经上线：
+当前控制台预览版使用以下发布地址：
 
 | 地址 | 内容 |
 | --- | --- |
-| `https://f.visnova.cn/ardui/ArdUi.exe` | 由安装脚本自动获取的客户端二进制，不作为另一个用户安装步骤。 |
+| `https://f.visnova.cn/ardui/` | 安装命令、使用流程、安全边界和当前限制。 |
+| `https://f.visnova.cn/ardui/ArdUi-console-v1.pre4.zip` | 由安装脚本自动获取的控制台原型包，不作为另一个用户安装步骤。 |
 | `https://f.visnova.cn/ardui/install.ps1` | 一键下载、安装/修复并启动的 PowerShell 脚本。 |
-| `https://f.visnova.cn/ardui/release.json` | 版本、文件大小、哈希及发布签名等元数据。 |
 
 预期使用方式：
 
