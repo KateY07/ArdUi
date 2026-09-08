@@ -2,7 +2,7 @@
 set -eu
 cat /tmp/ardui-upload-v5/part-* > /tmp/ArdUi-console-v1.pre5.zip
 actual=$(sha256sum /tmp/ArdUi-console-v1.pre5.zip | cut -d' ' -f1)
-test "$actual" = 558c739a489ae795fc1b0a50553f4cb3b9e98ae2d2d43a7c3a0fe8a2622f967e
+test "$actual" = 26973c22ef87e505fd3565c6320a2af76b19a878c1beaf20c5ef6586962bdb9f
 install -d -m 755 /var/www/f.visnova.cn/ardui
 install -m 644 /tmp/ArdUi-console-v1.pre5.zip /var/www/f.visnova.cn/ardui/ArdUi-console-v1.pre5.zip
 install -m 644 /tmp/install-v1.pre5.ps1 /var/www/f.visnova.cn/ardui/install.ps1

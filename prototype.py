@@ -11,8 +11,10 @@ import hmac
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import socket
+import statistics
 import struct
 import subprocess
 import tempfile
@@ -101,8 +103,11 @@ class Session:
         self.key = identity(Path(self.folder.name), True)
         self.endpoint = self.key.public_key().public_bytes_raw().hex()
         self.process = None
-        self.listeners, self.tasks = [], set()
+        self.listeners, self.datagrams, self.tasks = [], [], set()
         self.token, self.port, self.ports = b'', 0, []
+        self.network_type, self.tcp_rtt_ms, self.udp_rtt_ms = '建立中', None, None
+        self.udp_socket = None
+        self.probe_lock = asyncio.Lock()
         self.closed = False
         self.admitted = False
 
@@ -110,6 +115,24 @@ class Session:
         task = asyncio.create_task(coroutine); self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
         return task
+
+    def network_log(self, line):
+        text = line.decode('utf-8', errors='replace').strip()
+        transport=re.search(r'transport="?([^"\s]+)',text)
+        network=re.search(r'network="?([^"\s]+)',text)
+        if transport:
+            if transport.group(1)=='relay': kind='ArdRelay 中继'
+            elif transport.group(1)=='direct':
+                family={'ipv4':'IPv4','ipv6':'IPv6'}.get(network.group(1) if network else '', '未知网络')
+                kind='P2P 直连 / '+family
+            else: kind=transport.group(1)
+            self.network_type=kind
+            event='路径已断开' if 'closed' in text else ('路径已切换' if 'selected' in text else '已连接')
+            print(f'\n[ARD 网络] {event}：{kind} | {text}',flush=True)
+        elif 'relay online' in text or 'READY:' in text:
+            print('\n[ARD 网络] 转发入口已就绪 | '+text,flush=True)
+        elif 'Connection closed' in text:
+            print('\n[ARD 网络] 连接已断开 | '+text,flush=True)
 
     async def start(self, mode, port, peer):
         env = dict(os.environ); env.pop('RUST_LOG', None); env['NO_COLOR'] = '1'
@@ -121,13 +144,17 @@ class Session:
         ready = b'relay online' if mode == 'open' else b'READY:'
         async with asyncio.timeout(75):
             while line := await self.process.stdout.readline():
+                self.network_log(line)
                 if ready in line:
                     self.spawn(self.drain()); return
             raise RuntimeError('ARD exited before connection was ready.')
 
     async def drain(self):
-        while await self.process.stdout.readline():
-            pass
+        while line := await self.process.stdout.readline():
+            self.network_log(line)
+        await self.process.wait()
+        if not self.closed:
+            print(f'\n[ARD 网络] 会话已断开，退出码 {self.process.returncode}；正在自动重连。', flush=True)
 
     async def open(self, target):
         if target not in self.ports:
@@ -138,12 +165,56 @@ class Session:
             writer.close(); raise ConnectionError('Remote service is not listening.')
         return reader, writer
 
+    async def tcp_ping(self):
+        nonce=secrets.token_bytes(2); began=time.perf_counter_ns()
+        reader,writer=await asyncio.open_connection('127.0.0.1',self.port)
+        try:
+            writer.write(b'AUI1'+self.token+b'\x03'+nonce); await writer.drain()
+            if await asyncio.wait_for(reader.readexactly(3),3)!=b'\0'+nonce:
+                raise ConnectionError('TCP latency probe was rejected.')
+            return (time.perf_counter_ns()-began)/1e6
+        finally:
+            writer.close(); await writer.wait_closed()
+
+    async def udp_ping(self):
+        if self.udp_socket is None:
+            self.udp_socket=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+            self.udp_socket.setblocking(False); self.udp_socket.bind(('127.0.0.1',0))
+        nonce=secrets.token_bytes(8); request=b'AUI1'+self.token+b'\x03'+nonce
+        loop=asyncio.get_running_loop(); began=time.perf_counter_ns()
+        await loop.sock_sendto(self.udp_socket,request,('127.0.0.1',self.port))
+        async with asyncio.timeout(3):
+            while True:
+                reply,_=await loop.sock_recvfrom(self.udp_socket,64)
+                if reply==b'AUP1'+nonce:
+                    return (time.perf_counter_ns()-began)/1e6
+
+    async def measure_latency(self):
+        async with self.probe_lock:
+            tcp=[]; udp=[]
+            for _ in range(3):
+                tcp.append(await self.tcp_ping())
+                try: udp.append(await self.udp_ping())
+                except (OSError,TimeoutError): pass
+            self.tcp_rtt_ms=statistics.median(tcp)
+            self.udp_rtt_ms=statistics.median(udp) if udp else None
+            udp_text=f'{self.udp_rtt_ms:.2f} ms' if self.udp_rtt_ms is not None else '不可用'
+            print(f'\n[ARD 延迟] {self.network_type} | TCP/PsPing {self.tcp_rtt_ms:.2f} ms | UDP 往返 {udp_text}',flush=True)
+
+    async def monitor_latency(self):
+        while not self.closed:
+            try: await self.measure_latency()
+            except (OSError,EOFError,ConnectionError,TimeoutError): pass
+            await asyncio.sleep(10)
+
     async def close(self):
         if self.closed:
             return
         self.closed = True
         for listener in self.listeners:
             listener.close(); await listener.wait_closed()
+        for transport in self.datagrams: transport.close()
+        if self.udp_socket: self.udp_socket.close()
         if self.process and self.process.returncode is None:
             self.process.kill(); await self.process.wait()
         tasks = list(self.tasks)
@@ -344,6 +415,8 @@ class Node:
                             return
                         if peer not in self.state['acl'] or not hmac.compare_digest(header[4:20],session.token):
                             return
+                        if command == 3:
+                            writer.write(b'\0'+header[21:23]); await writer.drain(); return
                         if command != 1 or port not in session.ports:
                             return
                         try:
@@ -358,6 +431,16 @@ class Node:
                     writer.close()
             listener = await asyncio.start_server(lambda r,w: session.spawn(serve(r,w)), '127.0.0.1',0)
             session.listeners.append(listener)
+            class PingProtocol(asyncio.DatagramProtocol):
+                def connection_made(self,transport): self.transport=transport
+                def datagram_received(self,data,address):
+                    if (len(data)==29 and data[:4]==b'AUI1' and data[20]==3 and session.admitted
+                            and peer in self_node.state['acl'] and hmac.compare_digest(data[4:20],session.token)):
+                        self.transport.sendto(b'AUP1'+data[21:],address)
+            self_node=self
+            transport,_=await asyncio.get_running_loop().create_datagram_endpoint(
+                PingProtocol,local_addr=('127.0.0.1',listener.sockets[0].getsockname()[1]))
+            session.datagrams.append(transport)
             await session.start('open',listener.sockets[0].getsockname()[1],ticket['clientSessionId'])
             await self.call('/api/v1/tickets/'+ticket['id']+'/ready',dict(sessionId=session.endpoint,requestId=ticket['id'],
                 controllerEndpoint=peer,targetEndpoint=self.endpoint,clientSessionId=ticket['clientSessionId'],expires=ticket['expires']))
@@ -433,6 +516,7 @@ class Node:
                 if grant['controllerEndpoint']!=self.endpoint or grant['targetEndpoint']!=peer:
                     raise ValueError('Grant identity mismatch.')
                 session.token = bytes.fromhex(reply['token']); session.ports = reply['tcpPorts']
+                session.spawn(session.monitor_latency())
                 addresses={p.get('address') for p in self.state['peers'].values()}
                 address=self.state['peers'].get(code,{}).get('address') or next(
                     f'127.77.{i//250}.{i%250+1}' for i in range(64000) if f'127.77.{i//250}.{i%250+1}' not in addresses)
@@ -543,13 +627,29 @@ async def console(args):
     node = Node(args.data,args.ard,args.server,args.relay,args.relay_key); node.allowed_ports=[3389,445]
     await node.register()
     approvals, background = {}, set()
+
+    async def trust_pending():
+        pending=next(iter(approvals.items()),None)
+        if pending is None:
+            print('\n目前没有待确认申请。',flush=True); return
+        token,(future,code,endpoint)=pending
+        print(f'\n已信任申请设备：{code} | EndpointId: {endpoint}',flush=True)
+        if not future.done(): future.set_result(True)
+
+    async def ask(prompt):
+        while True:
+            answer=(await asyncio.to_thread(input,prompt)).strip()
+            if answer.upper()=='T':
+                await trust_pending(); continue
+            return answer
+
     async def confirm(code, endpoint, incoming):
         if not incoming:
             print(f'\n核对远程设备 {code} | EndpointId: {endpoint}')
-            answer=await asyncio.to_thread(input,'已通过独立渠道核对一致？[y/N] ')
+            answer=await ask('已通过独立渠道核对一致？[y/N] ')
             return answer.strip().lower()=='y'
         token=secrets.token_hex(3); future=asyncio.get_running_loop().create_future(); approvals[token]=(future,code,endpoint)
-        print(f'\n收到被控申请：{code} | EndpointId: {endpoint} | 返回主菜单选择 V 处理。',flush=True)
+        print(f'\n收到被控申请：{code} | EndpointId: {endpoint} | 在任意菜单按 T 后回车即可信任。',flush=True)
         try:
             return await asyncio.wait_for(future,180)
         finally:
@@ -568,7 +668,7 @@ async def console(args):
             print('设备 ID：'+node.code+' | EndpointId：'+node.endpoint)
             active=[(node.state['controllers'].get(peer,'未知设备'),peer) for peer,session in node.incoming.items() if session.admitted and not session.closed]
             if active:
-                print('正在访问本机：'+'；'.join(f'{code} | {endpoint}' for code,endpoint in active))
+                print('正在访问本机：'+'；'.join(f'{code} | {endpoint} | {node.incoming[endpoint].network_type}' for code,endpoint in active))
         print('已授权设备（本机可主动访问）：')
         peers=list(node.state['peers'].items())
         if not peers:
@@ -576,19 +676,29 @@ async def console(args):
         for index,(code,record) in enumerate(peers,1):
             session=node.outgoing.get(record['endpoint'])
             status='已连接' if session and not session.closed else ('重连中' if code in node.desired else '离线')
-            print(f'  [{index}] {code}  {status}')
+            detail=''
+            if session and not session.closed:
+                tcp=f'{session.tcp_rtt_ms:.2f} ms' if session.tcp_rtt_ms is not None else '测量中'
+                udp=f'{session.udp_rtt_ms:.2f} ms' if session.udp_rtt_ms is not None else '测量中'
+                detail=f' | {session.network_type} | TCP/PsPing {tcp} | UDP {udp}'
+            print(f'  [{index}] {code}  {status}{detail}')
         settings='被控设置'+(f'（{len(approvals)} 个待确认）' if approvals else '')
         options='[A] 添加设备  [B] '+(settings if node.enabled else '开启被控')
-        print(options+'  [Q] 退出')
+        print(options+('  [T] 信任待确认' if approvals else '')+'  [Q] 退出')
         return peers
 
     async def open_device(code,record):
         while True:
             session=node.outgoing.get(record['endpoint'])
             status='已连接' if session and not session.closed else ('重连中' if code in node.desired else '离线')
-            print(f'\n{code} | {status} | EndpointId: {record["endpoint"]}')
+            diagnostics=''
+            if session and not session.closed:
+                tcp=f'{session.tcp_rtt_ms:.2f} ms' if session.tcp_rtt_ms is not None else '测量中'
+                udp=f'{session.udp_rtt_ms:.2f} ms' if session.udp_rtt_ms is not None else '测量中'
+                diagnostics=f' | {session.network_type} | TCP/PsPing {tcp} | UDP {udp}'
+            print(f'\n{code} | {status}{diagnostics} | EndpointId: {record["endpoint"]}')
             print('[1] 远程桌面  [2] 文件共享  [0] 返回')
-            choice=(await asyncio.to_thread(input,'选择：')).strip()
+            choice=await ask('选择：')
             if choice=='0': return
             if choice not in ('1','2'):
                 print('无效选择。'); continue
@@ -598,10 +708,10 @@ async def console(args):
             if choice=='1':
                 subprocess.Popen(['mstsc',f'/v:{forward.address}:{forward.port}']); print('已打开远程桌面。')
                 continue
-            share=(await asyncio.to_thread(input,'共享名：')).strip()
+            share=await ask('共享名：')
             if not share or any(c in share for c in '\\/\0'):
                 raise ValueError('共享名不能包含路径。')
-            user=(await asyncio.to_thread(input,'Windows 用户（留空使用当前账户）：')).strip()
+            user=await ask('Windows 用户（留空使用当前账户）：')
             password=await asyncio.to_thread(getpass.getpass,'Windows 密码：') if user else ''
             remote=f'\\\\localhost\\{share}'
             script="""$drive=90..68 | ForEach-Object { [char]$_ } | Where-Object { -not (Get-PSDrive -Name $_ -ErrorAction SilentlyContinue) } | Select-Object -First 1;
@@ -621,22 +731,22 @@ New-SmbMapping @p | Out-Null; [Console]::Write($local)"""
             active=sum(s.admitted and not s.closed for s in node.incoming.values())
             print(f'\n被控设置 | 正在被控：{active} 台 | 已授权主控：{len(node.state["acl"])} 台')
             print('[1] 处理待确认申请  [2] 管理主控授权  [3] 修改访问密码  [4] 关闭被控  [0] 返回')
-            choice=(await asyncio.to_thread(input,'选择：')).strip()
+            choice=await ask('选择：')
             if choice=='0': return
             if choice=='1':
                 pending=list(approvals.items())
                 if not pending: print('目前没有待确认申请。'); continue
                 for index,(token,(_,code,endpoint)) in enumerate(pending,1): print(f'  [{index}] {code} | EndpointId: {endpoint}')
-                index=int((await asyncio.to_thread(input,'申请编号（0 返回）：')).strip())
+                index=int(await ask('申请编号（0 返回）：'))
                 if not index: continue
                 token,(future,_,_)=pending[index-1]
-                answer=(await asyncio.to_thread(input,'已通过独立渠道核对完整 EndpointId？[y/N] ')).strip().lower()
+                answer=(await ask('已通过独立渠道核对完整 EndpointId？[y/N] ')).lower()
                 if not future.done(): future.set_result(answer=='y')
             elif choice=='2':
                 allowed=list(node.state['acl'])
                 if not allowed: print('没有已授权主控。'); continue
                 for index,endpoint in enumerate(allowed,1): print(f'  [{index}] {node.state["controllers"].get(endpoint,"未知设备")} | {endpoint}')
-                index=int((await asyncio.to_thread(input,'输入编号撤销，0 返回：')).strip())
+                index=int(await ask('输入编号撤销，0 返回：'))
                 if index: await node.revoke(allowed[index-1]); print('已撤销。')
             elif choice=='3':
                 password=await asyncio.to_thread(getpass.getpass,'新访问密码（修改后撤销全部主控授权）：')
@@ -646,13 +756,13 @@ New-SmbMapping @p | Out-Null; [Console]::Write($local)"""
 
     try:
         while True:
-            peers=show(); choice=(await asyncio.to_thread(input,'选择：')).strip().upper()
+            peers=show(); choice=(await ask('选择：')).upper()
             try:
                 if choice=='Q': break
                 if choice=='B':
                     await host_settings()
                 elif choice=='A':
-                    code=(await asyncio.to_thread(input,'对方 6 位设备 ID：')).strip().upper()
+                    code=(await ask('对方 6 位设备 ID：')).upper()
                     if len(code)!=6: raise ValueError('设备 ID 必须为 6 位。')
                     password=await asyncio.to_thread(getpass.getpass,'对方访问密码：')
                     await connect(code,password)
@@ -735,6 +845,10 @@ async def regression(args):
             assert not connecting.done() and not client.state['peers']
             consent.set_result(True); first=await connecting
             print('PASS password + both fingerprints + explicit consent + signed grant',flush=True)
+            async with asyncio.timeout(20):
+                while first.tcp_rtt_ms is None or first.udp_rtt_ms is None: await asyncio.sleep(.1)
+            assert first.tcp_rtt_ms >= 0 and first.udp_rtt_ms >= 0
+            print(f'PASS TCP/PsPing {first.tcp_rtt_ms:.2f} ms + UDP round-trip {first.udp_rtt_ms:.2f} ms',flush=True)
             async def check_flow(code,forward=None):
                 forward=forward or await client.forward(code,port)
                 reader,writer=await asyncio.open_connection(forward.address,forward.port)

@@ -1,12 +1,28 @@
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $version='v1.pre5'
-$expectedSha256='558c739a489ae795fc1b0a50553f4cb3b9e98ae2d2d43a7c3a0fe8a2622f967e'
+$expectedSha256='26973c22ef87e505fd3565c6320a2af76b19a878c1beaf20c5ef6586962bdb9f'
 $base='https://f.visnova.cn/ardui'
 $root=Join-Path $env:LOCALAPPDATA 'ArdUi'
 $versions=Join-Path $root 'versions'
 $destination=Join-Path $versions $version
 $temporary=Join-Path ([IO.Path]::GetTempPath()) ('ArdUi-'+[guid]::NewGuid().ToString('N'))
+
+function Set-ArdUiDirectoryAcl([string]$target,[Security.AccessControl.DirectorySecurity]$acl){
+    if($PSVersionTable.PSEdition -eq 'Core'){
+        [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($target),$acl)
+    } else {
+        [IO.Directory]::SetAccessControl($target,$acl)
+    }
+}
+
+function Set-ArdUiFileAcl([string]$target,[Security.AccessControl.FileSecurity]$acl){
+    if($PSVersionTable.PSEdition -eq 'Core'){
+        [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($target),$acl)
+    } else {
+        [IO.File]::SetAccessControl($target,$acl)
+    }
+}
 
 function Protect-ArdUiTree([string]$path){
     $user=[Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -19,16 +35,16 @@ function Protect-ArdUiTree([string]$path){
     foreach($sid in @($user,$system,$admins)){
         $directory.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl',$inherit,'None',$allow))
     }
-    [IO.Directory]::SetAccessControl($path,$directory)
+    Set-ArdUiDirectoryAcl $path $directory
     Get-ChildItem -LiteralPath $path -Recurse -Force | ForEach-Object {
         if($_.PSIsContainer){
-            [IO.Directory]::SetAccessControl($_.FullName,$directory)
+            Set-ArdUiDirectoryAcl $_.FullName $directory
         } else {
             $file=[Security.AccessControl.FileSecurity]::new(); $file.SetAccessRuleProtection($true,$false)
             foreach($sid in @($user,$system,$admins)){
                 $file.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','Allow'))
             }
-            [IO.File]::SetAccessControl($_.FullName,$file)
+            Set-ArdUiFileAcl $_.FullName $file
         }
     }
 }
@@ -50,7 +66,15 @@ try {
     Protect-ArdUiTree $root
     $zip=Join-Path $temporary 'release.zip'
     [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest "$base/ArdUi-console-$version.zip" -OutFile $zip
+    for($attempt=1;$attempt -le 3;$attempt++){
+        try {
+            Invoke-WebRequest "$base/ArdUi-console-$version.zip" -OutFile $zip
+            break
+        } catch {
+            if($attempt -eq 3){throw}
+            Start-Sleep -Seconds $attempt
+        }
+    }
     $actual=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
     if($actual -ne $expectedSha256){throw 'ArdUi release SHA-256 mismatch; installation stopped.'}
     $stage=Join-Path $temporary $version
