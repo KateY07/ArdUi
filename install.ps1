@@ -1,110 +1,95 @@
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-$version='v1.pre7'
-$expectedSha256='82c7b1d169d0c3832ea7efdc5171669d417e96fe58c243f3acefc007987d8aae'
+$version='v1.pre10'
+$expectedSha256='6dbf14112bfee90f21301fb9c2c3a4f5cea1b206ef11da2a806562003cab4fd1'
+$expectedArdSha256='04ebed96baecc2fd5b67318b1d02742f777b0351c84ee5b1c1b163a05dc98b5d'
 $base='https://f.visnova.cn/ardui'
 $root=Join-Path $env:LOCALAPPDATA 'ArdUi'
-$versions=Join-Path $root 'versions'
-$destination=Join-Path $versions $version
+$data=Join-Path $root 'data'
+$destination=Join-Path (Join-Path $root 'versions') $version
 $temporary=Join-Path ([IO.Path]::GetTempPath()) ('ArdUi-'+[guid]::NewGuid().ToString('N'))
 
-function Set-ArdUiDirectoryAcl([string]$target,[Security.AccessControl.DirectorySecurity]$acl){
-    if($PSVersionTable.PSEdition -eq 'Core'){
-        [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($target),$acl)
-    } else {
-        [IO.Directory]::SetAccessControl($target,$acl)
-    }
-}
-
-function Set-ArdUiFileAcl([string]$target,[Security.AccessControl.FileSecurity]$acl){
-    if($PSVersionTable.PSEdition -eq 'Core'){
-        [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($target),$acl)
-    } else {
-        [IO.File]::SetAccessControl($target,$acl)
-    }
-}
-
-function Protect-ArdUiTree([string]$path){
+function Protect-ArdUiDirectory([string]$path){
     $user=[Security.Principal.WindowsIdentity]::GetCurrent().User
     $system=[Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-    $admins=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
     $inherit=[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
-    $allow=[Security.AccessControl.AccessControlType]::Allow
-    $directory=[Security.AccessControl.DirectorySecurity]::new()
-    $directory.SetAccessRuleProtection($true,$false)
-    foreach($sid in @($user,$system,$admins)){
-        $directory.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl',$inherit,'None',$allow))
+    $acl=[Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetAccessRuleProtection($true,$false)
+    foreach($sid in @($user,$system)){
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl',$inherit,'None','Allow'))
     }
-    Set-ArdUiDirectoryAcl $path $directory
-    Get-ChildItem -LiteralPath $path -Recurse -Force | ForEach-Object {
-        if($_.PSIsContainer){
-            Set-ArdUiDirectoryAcl $_.FullName $directory
-        } else {
-            $file=[Security.AccessControl.FileSecurity]::new(); $file.SetAccessRuleProtection($true,$false)
-            foreach($sid in @($user,$system,$admins)){
-                $file.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','Allow'))
-            }
-            Set-ArdUiFileAcl $_.FullName $file
-        }
-    }
+    if($PSVersionTable.PSEdition -eq 'Core'){
+        [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($path),$acl)
+    }else{[IO.Directory]::SetAccessControl($path,$acl)}
 }
 
-function Test-SameTree([string]$left,[string]$right){
-    $a=@(Get-ChildItem -LiteralPath $left -File -Recurse | ForEach-Object { [pscustomobject]@{Path=$_.FullName.Substring($left.Length); Hash=(Get-FileHash $_.FullName -Algorithm SHA256).Hash} })
-    $b=@(Get-ChildItem -LiteralPath $right -File -Recurse | ForEach-Object { [pscustomobject]@{Path=$_.FullName.Substring($right.Length); Hash=(Get-FileHash $_.FullName -Algorithm SHA256).Hash} })
-    if($a.Count -ne $b.Count){return $false}
-    $lookup=@{}; foreach($item in $a){$lookup[$item.Path]=$item.Hash}
-    foreach($item in $b){if($lookup[$item.Path] -ne $item.Hash){return $false}}
-    return $true
-}
-
-try {
-    if(-not [Environment]::Is64BitOperatingSystem){throw 'ArdUi requires 64-bit Windows.'}
+try{
+    if(-not [Environment]::Is64BitOperatingSystem){throw 'ArdUi 需要 64 位 Windows。'}
     $build=[Environment]::OSVersion.Version.Build
-    if($build -lt 26100){throw "ArdUi requires Windows 11 24H2 / Server 2025 or later (build 26100+); current build is $build."}
-    New-Item -ItemType Directory -Force $root,$versions,$temporary | Out-Null
-    Protect-ArdUiTree $root
-    $zip=Join-Path $temporary 'release.zip'
+    if($build -lt 26100){throw "ArdUi 需要 Windows 11 24H2 / Server 2025 或更新版本（build 26100+）；当前为 $build。"}
+    if(-not (Get-Command dotnet -ErrorAction SilentlyContinue)){throw '缺少 .NET 8 Runtime。请先从 https://dotnet.microsoft.com/download/dotnet/8.0 安装 .NET Runtime x64，再重新执行此命令。'}
+    $runtime=@(& dotnet --list-runtimes 2>$null | Where-Object {$_ -match '^Microsoft\.NETCore\.App 8\.'})
+    if(-not $runtime){throw '缺少 .NET 8 Runtime。请先从 https://dotnet.microsoft.com/download/dotnet/8.0 安装 .NET Runtime x64，再重新执行此命令。'}
+    New-Item -ItemType Directory -Force $root,(Join-Path $root 'versions'),$data,$temporary | Out-Null
+    Protect-ArdUiDirectory $root
+    $download=Join-Path $temporary 'ArdUi.exe'
+    $ardDownload=Join-Path $temporary 'ard.exe'
     [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
     for($attempt=1;$attempt -le 3;$attempt++){
-        try {
-            Invoke-WebRequest "$base/ArdUi-console-$version.zip" -OutFile $zip
+        try{
+            Invoke-WebRequest "$base/ArdUi-$version.exe" -OutFile $download
+            Invoke-WebRequest "$base/ard-v2.0.0-pre.6.exe" -OutFile $ardDownload
             break
-        } catch {
-            if($attempt -eq 3){throw}
-            Start-Sleep -Seconds $attempt
+        }
+        catch{if($attempt -eq 3){throw};Start-Sleep -Seconds $attempt}
+    }
+    $actual=(Get-FileHash $download -Algorithm SHA256).Hash.ToLowerInvariant()
+    if($actual -ne $expectedSha256){throw 'ArdUi 发布文件 SHA-256 不匹配，安装已停止。'}
+    if((Get-FileHash $ardDownload -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedArdSha256){throw 'ARD 发布文件 SHA-256 不匹配，安装已停止。'}
+    New-Item -ItemType Directory -Force $destination | Out-Null
+    $installed=Join-Path $destination 'ArdUi.exe'
+    if(Test-Path $installed){
+        if((Get-FileHash $installed -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSha256){
+            try{Move-Item $installed ($installed+'.replaced-'+(Get-Date -Format 'yyyyMMddHHmmss'))}
+            catch{throw 'ArdUi 正在运行且需要修复。请关闭程序后再次执行安装命令。'}
         }
     }
-    $actual=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-    if($actual -ne $expectedSha256){throw 'ArdUi release SHA-256 mismatch; installation stopped.'}
-    $stage=Join-Path $temporary $version
-    Expand-Archive $zip $stage
-    foreach($name in 'python.exe','prototype.py','ard.exe','VERSION'){
-        if(-not (Test-Path (Join-Path $stage $name) -PathType Leaf)){throw "Release is missing $name."}
-    }
-    if(Test-Path $destination){
-        if(Test-SameTree $destination $stage){Remove-Item -LiteralPath $stage -Recurse -Force}
-        else {
-            $quarantine=$destination+'.replaced-'+(Get-Date -Format 'yyyyMMddHHmmss')
-            try { Move-Item -LiteralPath $destination -Destination $quarantine }
-            catch { throw 'Existing v1.pre7 files need repair. Close ArdUi and run the install command again.' }
-            Move-Item -LiteralPath $stage -Destination $destination
+    if(-not (Test-Path $installed)){Move-Item $download $installed}
+    $installedArd=Join-Path $destination 'ard.exe'
+    if(Test-Path $installedArd){
+        if((Get-FileHash $installedArd -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedArdSha256){
+            try{Move-Item $installedArd ($installedArd+'.replaced-'+(Get-Date -Format 'yyyyMMddHHmmss'))}
+            catch{throw 'ard.exe 正在运行且需要修复。请关闭 ArdUi 后再次执行安装命令。'}
         }
-    } else { Move-Item -LiteralPath $stage -Destination $destination }
-    Protect-ArdUiTree $root
+    }
+    if(-not (Test-Path $installedArd)){Move-Item $ardDownload $installedArd}
+    $legacy=Join-Path $data 'identity';$current=Join-Path (Join-Path $data 'device') 'identity'
+    if((Test-Path $legacy -PathType Leaf) -and -not (Test-Path $current)){
+        if((Get-Item $legacy).Length -ne 32){throw '已有身份文件无效，安装已停止，未覆盖原文件。'}
+        New-Item -ItemType Directory -Force (Split-Path $current) | Out-Null
+        Copy-Item $legacy $current
+    }
+    $config=Join-Path $data 'config.json'
+    if(-not (Test-Path $config)){
+        [IO.File]::WriteAllText($config,@'
+{
+  "server": "https://f.visnova.cn/",
+  "relay": "http://175.27.160.144:8080",
+  "relayKey": "spki:3059301306072a8648ce3d020106082a8648ce3d0301070342000462f8877cf66d813f17028e3d1cf44443c481586a04219326d752623dd72ce3b005a7c3a8ea3db565b75f4e7a72209d17f29d30cbfaea2be0c48384672bb2f01f",
+  "tcpPorts": [3389, 445],
+  "udpPorts": [3389]
+}
+'@,[Text.UTF8Encoding]::new($false))
+    }
+    $env:ARDUI_DATA_ROOT=$data
+    & $installed --identity-store $data
+    if($LASTEXITCODE){throw '身份初始化失败；已有身份未被覆盖。'}
     $launcher=Join-Path $root 'ArdUi.cmd'
-    $lines=@('@echo off','"%~dp0versions\v1.pre7\python.exe" "%~dp0versions\v1.pre7\prototype.py" run --data "%~dp0data" --ard "%~dp0versions\v1.pre7\ard.exe"')
-    [IO.File]::WriteAllLines($launcher,$lines,[Text.Encoding]::ASCII)
-    Protect-ArdUiTree $root
-    & (Join-Path $destination 'python.exe') (Join-Path $destination 'prototype.py') init --data (Join-Path $root 'data') --ard (Join-Path $destination 'ard.exe')
-    if($LASTEXITCODE){throw 'Identity initialization failed; existing identity was not overwritten.'}
-    Protect-ArdUiTree $root
-    Write-Host "ArdUi console $version installed at $root"
+    [IO.File]::WriteAllLines($launcher,@('@echo off','set "ARDUI_DATA_ROOT=%~dp0data"','start "" "%~dp0versions\v1.pre10\ArdUi.exe"'),[Text.Encoding]::ASCII)
+    Protect-ArdUiDirectory $root
+    Write-Host "ArdUi $version 已安装到 $root"
     if($env:ARDUI_INSTALL_NO_START -ne '1'){
-        Write-Host 'Starting ArdUi in a new console...'
-        Start-Process -FilePath $launcher -WorkingDirectory $root
+        Start-Process -FilePath $launcher -WorkingDirectory $root -WindowStyle Hidden
     }
 }
-finally {
-    if(Test-Path $temporary){Remove-Item -LiteralPath $temporary -Recurse -Force}
-}
+finally{if(Test-Path $temporary){Remove-Item -LiteralPath $temporary -Recurse -Force}}

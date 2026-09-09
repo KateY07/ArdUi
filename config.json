@@ -1,0 +1,7 @@
+{
+  "server": "https://f.visnova.cn/",
+  "relay": "http://175.27.160.144:8080",
+  "relayKey": "spki:3059301306072a8648ce3d020106082a8648ce3d0301070342000462f8877cf66d813f17028e3d1cf44443c481586a04219326d752623dd72ce3b005a7c3a8ea3db565b75f4e7a72209d17f29d30cbfaea2be0c48384672bb2f01f",
+  "tcpPorts": [3389, 445],
+  "udpPorts": [3389]
+}
