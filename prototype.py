@@ -511,7 +511,7 @@ class Node:
             task=asyncio.create_task(self.expire_incoming(peer,session,ticket['expires'])); self.jobs.add(task)
             task.add_done_callback(self.jobs.discard)
         except Exception as error:
-            print('Incoming:',type(error).__name__, flush=True)
+            print('Incoming:',type(error).__name__,str(error),flush=True)
             if session:
                 await session.close()
             with contextlib.suppress(Exception):

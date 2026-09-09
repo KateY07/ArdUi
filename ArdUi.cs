@@ -676,7 +676,7 @@ sealed class Engine : IAsyncDisposable
         string? dir = null; Gateway? gateway = null; Child? child = null; Session? session = null;
         try
         {
-            if (Incoming.ContainsKey(ticket.ControllerEndpoint)) throw new IOException("该设备已经连接本机。");
+            if(Incoming.TryRemove(ticket.ControllerEndpoint,out var previous))await previous.DisposeAsync();
             var peer = new Peer { Id = ticket.ControllerEndpoint, Code = ticket.ControllerCode };
             dir = State.NewSessionDirectory();
             var local = await Ard.Identity(dir, ct);
@@ -951,7 +951,7 @@ sealed class MainWindow : Window
         {
             await directory!.Connect(peer.Code,"",enrolling:false);
             var session=engine!.Outgoing[peer.Id];var bridge=session.Forward(3389);
-            await Launch("mstsc.exe","/v:"+session.Address+":"+bridge.Port);
+            await Launch("mstsc.exe","/v:127.0.0.1:"+bridge.Port);
         });
         Add("文件共享",async () =>
         {
@@ -1112,7 +1112,7 @@ static class SelfTest
                 var response = Echo();
                 var session = caller.Outgoing[host.Id];
                 using var local = new TcpClient();
-                await local.ConnectAsync(IPAddress.Parse(session.Address),session.Forward(port).Port,ct);
+                await local.ConnectAsync(IPAddress.Loopback,session.Forward(port).Port,ct);
                 var message = "ardui-e2e-ok"u8.ToArray();
                 await local.GetStream().WriteAsync(message,ct);
                 if (!(await Wire.Read(local.GetStream(),message.Length,ct)).SequenceEqual(message)) throw new Exception("TCP proxy corrupted data.");
@@ -1129,6 +1129,18 @@ static class SelfTest
             try { await cd.Connect(hd.Code,"",ct,enrolling:false); throw new Exception("Revoked caller admitted."); }
             catch (IOException) { }
             Console.WriteLine("PASS: revocation removes ACL and denies reconnect.");
+            hd.Confirm=(pair,token)=>Task.FromResult(pair.Incoming&&pair.Endpoint==caller.Id);
+            for(var round=1;round<=3;round++)
+            {
+                Console.WriteLine($"TEST: repeated add round {round} connecting.");
+                await cd.Connect(hd.Code,"Prototype-Access-7391",ct).WaitAsync(TimeSpan.FromSeconds(75),ct);
+                await VerifyFlow();
+                var saved=caller.State.Peers.Single();await cd.RemoveLocal(saved);
+                if(caller.State.Peers.Count!=0||caller.Outgoing.Count!=0)throw new Exception("Repeated local removal failed.");
+                Console.WriteLine($"TEST: repeated add round {round} removed.");
+            }
+            await hd.Revoke(caller.Id);
+            Console.WriteLine("PASS: three add, transfer, remove, and immediate re-add cycles.");
             await hd.SetAccess(false,null,ct);
             if (hd.Enabled || host.Incoming.Count != 0) throw new Exception("Disable failed.");
             Console.WriteLine("PASS: host disable stops incoming sessions.");
@@ -1579,8 +1591,8 @@ sealed class LocalForwarder : IAsyncDisposable
     public LocalForwarder(Session session,int target)
     {
         this.session=session;this.target=target;
-        listener=new TcpListener(IPAddress.Parse(session.Address),0);listener.Start();
-        if(session.UdpPorts.Contains(target)) udp=new UdpClient(new IPEndPoint(IPAddress.Parse(session.Address),Port));
+        listener=new TcpListener(IPAddress.Loopback,0);listener.Start();
+        if(session.UdpPorts.Contains(target)) udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,Port));
         accept=Accept();receive=udp == null ? Task.CompletedTask : ReceiveUdp();
     }
     async Task Accept()
@@ -1676,7 +1688,7 @@ static class WindowsShares
     {
         if(!Regex.IsMatch(share,@"\A[^\\/:*?\""<>|\x00-\x1f]{1,80}\z")) throw new InvalidDataException("请输入单个共享名，例如 Documents。");
         var bridge=session.Forward(445);
-        var remote=@"\\"+session.Address+"\\"+share;
+        var remote=@"\\localhost\"+share;
         var script="""
         $ErrorActionPreference='Stop'
         $d=[Console]::In.ReadToEnd() | ConvertFrom-Json
