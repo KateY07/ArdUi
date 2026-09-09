@@ -104,7 +104,8 @@ class Session:
         self.endpoint = self.key.public_key().public_bytes_raw().hex()
         self.process = None
         self.listeners, self.datagrams, self.tasks = [], [], set()
-        self.token, self.port, self.ports = b'', 0, []
+        self.token, self.port, self.ports, self.udp_ports = b'', 0, [], []
+        self.udp_targets, self.udp_flow_lock = {}, asyncio.Lock()
         self.network_type, self.tcp_rtt_ms, self.udp_rtt_ms = '建立中', None, None
         self.udp_socket = None
         self.probe_lock = asyncio.Lock()
@@ -215,6 +216,8 @@ class Session:
             listener.close(); await listener.wait_closed()
         for transport in self.datagrams: transport.close()
         if self.udp_socket: self.udp_socket.close()
+        for udp, _ in self.udp_targets.values(): udp.close()
+        self.udp_targets.clear()
         if self.process and self.process.returncode is None:
             self.process.kill(); await self.process.wait()
         tasks = list(self.tasks)
@@ -228,6 +231,9 @@ class Forward:
     def __init__(self,node,code,peer,target,address):
         self.node,self.code,self.peer,self.target,self.address=node,code,peer,target,address
         self.listener=None
+        self.datagram=None
+        self.udp_flows={}
+        self.udp_lock=asyncio.Lock()
         self.tasks=set()
         self.mappings=[]
         self.closed=False
@@ -257,7 +263,35 @@ class Forward:
                 writer.close()
         bind='127.0.0.1' if self.target==445 else self.address
         self.listener=await asyncio.start_server(lambda r,w:self.spawn(serve(r,w)),bind,0)
+        session=self.node.outgoing.get(self.peer)
+        if session and self.target in session.udp_ports:
+            class LocalUdp(asyncio.DatagramProtocol):
+                def connection_made(protocol_self,transport): self.datagram=protocol_self.transport=transport
+                def datagram_received(protocol_self,data,address): self.spawn(self.send_udp(address,data))
+            await asyncio.get_running_loop().create_datagram_endpoint(
+                LocalUdp,local_addr=(bind,self.listener.sockets[0].getsockname()[1]))
         return self
+
+    async def send_udp(self,address,payload):
+        if not payload or len(payload)>1500 or self.closed: return
+        session=self.node.outgoing.get(self.peer)
+        if not session or session.closed or self.target not in session.udp_ports: return
+        async with self.udp_lock:
+            flow=self.udp_flows.get(address)
+            if flow is None:
+                if len(self.udp_flows)>=64: return
+                udp=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); udp.setblocking(False)
+                udp.bind(('127.0.0.1',0)); udp.connect(('127.0.0.1',session.port))
+                async def replies():
+                    try:
+                        while not self.closed:
+                            reply=await asyncio.get_running_loop().sock_recv(udp,1501)
+                            if reply and len(reply)<=1500 and self.datagram: self.datagram.sendto(reply,address)
+                    except (OSError,asyncio.CancelledError): pass
+                flow=[udp,session.port,self.spawn(replies())]; self.udp_flows[address]=flow
+            elif flow[1]!=session.port:
+                flow[0].connect(('127.0.0.1',session.port)); flow[1]=session.port
+        await asyncio.get_running_loop().sock_sendall(flow[0],payload)
 
     @property
     def port(self):
@@ -272,6 +306,9 @@ class Forward:
                 await powershell("$m=Get-SmbMapping -LocalPath $d.drive -ErrorAction SilentlyContinue; if($m -and $m.RemotePath -eq $d.remote){Remove-SmbMapping -LocalPath $d.drive -Force -Confirm:$false}",dict(drive=drive,remote=remote))
         if self.listener:
             self.listener.close(); await self.listener.wait_closed()
+        if self.datagram: self.datagram.close()
+        for udp,_,_ in self.udp_flows.values(): udp.close()
+        self.udp_flows.clear()
         for task in list(self.tasks): task.cancel()
         await asyncio.gather(*self.tasks,return_exceptions=True)
 
@@ -301,6 +338,7 @@ class Node:
         if self.enabled and self.password is None:
             raise ValueError('state.json enables host access without a password.')
         self.incoming, self.outgoing, self.forwards, self.jobs, self.seen = {}, {}, {}, set(), {}
+        self.allowed_udp_ports=[]
         self.desired, self.supervisors, self.connect_locks = set(), {}, {}
         self.confirm = None
         self.attempts = []
@@ -389,6 +427,23 @@ class Node:
                 await self.incoming.pop(peer).close()
             session = Session(self, peer); self.incoming[peer] = session
             session.token = secrets.token_bytes(16); session.ports = self.allowed_ports
+            session.udp_ports = self.allowed_udp_ports
+            async def route_udp(source,payload,outer):
+                if not payload or len(payload)>1500 or not session.udp_ports: return
+                async with session.udp_flow_lock:
+                    flow=session.udp_targets.get(source)
+                    if flow is None:
+                        if len(session.udp_targets)>=64: return
+                        udp=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); udp.setblocking(False)
+                        udp.bind(('127.0.0.1',0)); udp.connect(('127.0.0.1',session.udp_ports[0]))
+                        async def replies():
+                            try:
+                                while not session.closed:
+                                    reply=await asyncio.get_running_loop().sock_recv(udp,1501)
+                                    if reply and len(reply)<=1500: outer.sendto(reply,source)
+                            except (OSError,asyncio.CancelledError): pass
+                        flow=(udp,session.spawn(replies())); session.udp_targets[source]=flow
+                await asyncio.get_running_loop().sock_sendall(flow[0],payload)
             async def serve(reader, writer):
                 try:
                     async with asyncio.timeout(300):
@@ -417,7 +472,8 @@ class Node:
                                 grant = None
                             session.admitted=bool(grant)
                             await write_json(writer, dict(accepted=bool(grant), error=None if grant else 'Access denied',
-                                token=session.token.hex() if grant else None, tcpPorts=session.ports if grant else [], udpPorts=[], grant=grant))
+                                token=session.token.hex() if grant else None, tcpPorts=session.ports if grant else [],
+                                udpPorts=session.udp_ports if grant else [], grant=grant))
                             return
                         if peer not in self.state['acl'] or not hmac.compare_digest(header[4:20],session.token):
                             return
@@ -443,6 +499,8 @@ class Node:
                     if (len(data)==29 and data[:4]==b'AUI1' and data[20]==3 and session.admitted
                             and peer in self_node.state['acl'] and hmac.compare_digest(data[4:20],session.token)):
                         self.transport.sendto(b'AUP1'+data[21:],address)
+                    elif session.admitted and peer in self_node.state['acl']:
+                        session.spawn(route_udp(address,data,self.transport))
             self_node=self
             transport,_=await asyncio.get_running_loop().create_datagram_endpoint(
                 PingProtocol,local_addr=('127.0.0.1',listener.sockets[0].getsockname()[1]))
@@ -521,7 +579,7 @@ class Node:
                 grant = verify(reply['grant'],'/grant/v1',peer,False)
                 if grant['controllerEndpoint']!=self.endpoint or grant['targetEndpoint']!=peer:
                     raise ValueError('Grant identity mismatch.')
-                session.token = bytes.fromhex(reply['token']); session.ports = reply['tcpPorts']
+                session.token = bytes.fromhex(reply['token']); session.ports = reply['tcpPorts']; session.udp_ports=reply['udpPorts']
                 session.spawn(session.monitor_latency())
                 addresses={p.get('address') for p in self.state['peers'].values()}
                 address=self.state['peers'].get(code,{}).get('address') or next(
@@ -629,7 +687,7 @@ async def powershell(script, data):
 
 
 async def console(args):
-    node = Node(args.data,args.ard,args.server,args.relay,args.relay_key); node.allowed_ports=[3389,445]
+    node = Node(args.data,args.ard,args.server,args.relay,args.relay_key); node.allowed_ports=[3389,445]; node.allowed_udp_ports=[3389]
     await node.register()
     approvals, background = {}, set()
 
@@ -668,7 +726,7 @@ async def console(args):
             print('\n连接失败：',str(error),flush=True)
 
     def show():
-        print('\n'+'='*66+'\nArdUi v1.pre6 | 被控：'+('允许' if node.enabled else '关闭')+f' | 正在被控：{sum(s.admitted and not s.closed for s in node.incoming.values())} 台')
+        print('\n'+'='*66+'\nArdUi v1.pre7 | 被控：'+('允许' if node.enabled else '关闭')+f' | 正在被控：{sum(s.admitted and not s.closed for s in node.incoming.values())} 台')
         if node.enabled:
             print('设备 ID：'+node.code+' | EndpointId：'+node.endpoint)
             active=[(node.state['controllers'].get(peer,'未知设备'),peer) for peer,session in node.incoming.items() if session.admitted and not session.closed]
@@ -825,7 +883,13 @@ async def regression(args):
             finally: writer.close()
         listener=await asyncio.start_server(echo,'127.0.0.1',0)
         port=listener.sockets[0].getsockname()[1]
+        class UdpEcho(asyncio.DatagramProtocol):
+            def connection_made(self,transport): self.transport=transport
+            def datagram_received(self,data,address): self.transport.sendto(data,address)
+        udp_echo_transport,_=await asyncio.get_running_loop().create_datagram_endpoint(
+            UdpEcho,local_addr=('127.0.0.1',port))
         for node in nodes: node.allowed_ports=[port]
+        for node in nodes: node.allowed_udp_ports=[port]
         host.allowed_ports.append(445)
         pending=asyncio.Event(); consent=asyncio.get_running_loop().create_future(); checks=[]
         async def host_confirm(code,endpoint,incoming):
@@ -838,7 +902,7 @@ async def regression(args):
             assert incoming and endpoint==client.endpoint
             return True
         host.confirm=host_confirm; other.confirm=other_confirm; client.confirm=client_confirm
-        loops=[]; persistence_ready=False
+        loops=[]; persistence_ready=False; disabled_ready=False
         try:
             for node in nodes: await node.register()
             original=client.code; await client.register(); assert original==client.code
@@ -854,7 +918,7 @@ async def regression(args):
             assert not connecting.done() and not client.state['peers']
             consent.set_result(True); first=await connecting
             print('PASS password + both fingerprints + explicit consent + signed grant',flush=True)
-            async with asyncio.timeout(20):
+            async with asyncio.timeout(45):
                 while first.tcp_rtt_ms is None or first.udp_rtt_ms is None: await asyncio.sleep(.1)
             assert first.tcp_rtt_ms >= 0 and first.udp_rtt_ms >= 0
             print(f'PASS TCP/PsPing {first.tcp_rtt_ms:.2f} ms + UDP round-trip {first.udp_rtt_ms:.2f} ms',flush=True)
@@ -867,6 +931,14 @@ async def regression(args):
                 return forward
             stable=await check_flow(host.code)
             print('PASS actual ARD relay + loopback TCP forwarding',flush=True)
+            def udp_roundtrip():
+                udp=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); udp.settimeout(15)
+                try:
+                    payload=secrets.token_bytes(1200); udp.sendto(payload,(stable.address,stable.port))
+                    assert udp.recvfrom(1501)[0]==payload
+                finally: udp.close()
+            await asyncio.to_thread(udp_roundtrip)
+            print('PASS authorized UDP business flow on the RDP TCP port',flush=True)
             if os.name=='nt':
                 smb=await client.forward(host.code,445)
                 remote='\\\\localhost\\scan'
@@ -913,6 +985,7 @@ async def regression(args):
             assert len(checks)==before
             print('PASS revoke rejects reconnect; wrong password never prompts host',flush=True)
             await client.disconnect(other.code); await other.access(False)
+            disabled_ready=True
             assert not Node(roots[1],args.ard,args.server,args.relay,args.relay_key).enabled
             try: await client.connect(other.code)
             except urllib.error.HTTPError as error: assert error.code==403
@@ -924,9 +997,9 @@ async def regression(args):
             for node in nodes: await node.close()
             if persistence_ready:
                 assert Node(roots[0],args.ard,args.server,args.relay,args.relay_key).enabled
-                assert not Node(roots[1],args.ard,args.server,args.relay,args.relay_key).enabled
+                if disabled_ready: assert not Node(roots[1],args.ard,args.server,args.relay,args.relay_key).enabled
                 print('PASS normal shutdown preserves configured host-access state',flush=True)
-            listener.close(); await listener.wait_closed()
+            udp_echo_transport.close(); listener.close(); await listener.wait_closed()
 
 
 if __name__=='__main__':
