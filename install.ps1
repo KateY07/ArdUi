@@ -1,7 +1,7 @@
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $version='v1.pre10'
-$expectedSha256='6dbf14112bfee90f21301fb9c2c3a4f5cea1b206ef11da2a806562003cab4fd1'
+$expectedSha256='74d20e92e1c534ba17ca4225c43c0d0a63f6da88b7bd1f93bdf2924012c2ec66'
 $expectedArdSha256='04ebed96baecc2fd5b67318b1d02742f777b0351c84ee5b1c1b163a05dc98b5d'
 $base='https://f.visnova.cn/ardui'
 $root=Join-Path $env:LOCALAPPDATA 'ArdUi'

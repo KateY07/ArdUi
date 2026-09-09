@@ -896,7 +896,7 @@ sealed class MainWindow : Window
         devices.Children.Clear();
         Peer[] peers;lock(engine.State.Peers)peers=engine.State.Peers.ToArray();
         foreach(var peer in peers)devices.Children.Add(Device(peer,engine.Outgoing.TryGetValue(peer.Id,out var active)&&active.Live));
-        if(peers.Length==0)devices.Children.Add(new TextBlock{Text="尚未添加已授权设备。",Foreground=Muted});
+        if(peers.Length==0)devices.Children.Add(new TextBlock{Text="尚未添加设备；请在右侧输入另一台设备的机器码和密码。",Foreground=Muted,TextWrapping=TextWrapping.Wrap});
         activeIncoming.Children.Clear();
         foreach(var session in engine.Incoming.Values.Where(s=>s.Live))
         {
@@ -918,6 +918,7 @@ sealed class MainWindow : Window
         {
             if(allow.IsChecked!=directory.Enabled){ready=false;allow.IsChecked=directory.Enabled;ready=true;}
             hostDetails.IsVisible=directory.Enabled;
+            Title="ArdUi "+Program.Version+(directory.Enabled&&directory.Code.Length!=0?" · "+directory.Code:"");
         }
     }
     async Task Connect()
