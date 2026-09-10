@@ -1,7 +1,7 @@
 param([string]$ArdPath)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-$version='v1.pre10'
+$version='v1.pre11'
 Push-Location $PSScriptRoot
 try {
     New-Item -ItemType Directory -Force tools,dist | Out-Null
@@ -26,6 +26,13 @@ try {
     if($extra.Count){throw 'Framework-dependent single-file publish produced unexpected sidecar files: '+(($extra.Name) -join ', ')}
     $test=Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru -NoNewWindow
     if($test.ExitCode -ne 0){throw 'Headless self-test failed.'}
+    $previousArdPath=$env:ARDUI_ARD_PATH
+    try{
+        $env:ARDUI_ARD_PATH=(Resolve-Path -LiteralPath 'tools/ard.exe').Path
+        $flow=Start-Process -FilePath $exe -ArgumentList '--prototype-test' -Wait -PassThru -NoNewWindow
+        if($flow.ExitCode -ne 0){throw 'Two-device end-to-end regression failed.'}
+    }
+    finally{$env:ARDUI_ARD_PATH=$previousArdPath}
     $hash=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-Host "Published: $exe"
     Write-Host "SHA-256: $hash"

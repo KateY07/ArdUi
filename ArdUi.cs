@@ -14,24 +14,23 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Avalonia;
 using Avalonia.Controls;
+using Ellipse = Avalonia.Controls.Shapes.Ellipse;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Headless;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
-using Avalonia.Platform.Storage;
-using Avalonia.Themes.Fluent;
+using Avalonia.Themes.Simple;
 using Avalonia.Threading;
 using Avalonia.Styling;
 using SkiaSharp;
-using ZXing;
 
 namespace ArdUi;
 
 // All application implementation lives in this file. ARD owns peer cryptography.
 static class Program
 {
-    public const string Version = "v1.pre10";
+    public const string Version = "v1.pre11";
     public static string DataRoot => Path.GetFullPath(Environment.GetEnvironmentVariable("ARDUI_DATA_ROOT") ?? Path.Combine(AppContext.BaseDirectory,"data"));
     [STAThread]
     public static int Main(string[] args)
@@ -93,6 +92,7 @@ sealed class Peer
     public string Code { get; set; } = "";
     public string Name { get; set; } = "";
     public SignedEnvelope? Grant { get; set; }
+    public bool AutoConnect { get; set; } = true;
 }
 
 sealed class State : IDisposable
@@ -128,7 +128,7 @@ sealed class State : IDisposable
             var address = Enumerable.Range(0, 64000).Select(i => $"127.77.{i / 250}.{i % 250 + 1}")
                 .FirstOrDefault(ip => Peers.All(p => p.Address != ip))
                 ?? throw new InvalidOperationException("已保存设备数量达到上限。");
-            var peer = new Peer { Id = id, Address = address, Code = code, Grant = grant };
+            var peer = new Peer { Id = id, Address = address, Code = code, Grant = grant, AutoConnect=false };
             var next = Peers.Append(peer).ToArray();
             var path = Path.Combine(Root, "peers.json");
             File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(next, Wire.Json));
@@ -159,6 +159,7 @@ sealed class State : IDisposable
 static class Wire
 {
     public const int MaxUdp = 1482; // 16-byte session capability + u16 target port, within ARD's 1500 bytes.
+    public const int BandwidthProbeSize=65536;
     public static readonly JsonSerializerOptions Json = new()
     { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
     public static string Endpoint(string value)
@@ -413,6 +414,12 @@ sealed class Gateway : IAsyncDisposable
                 if (!CryptographicOperations.FixedTimeEquals(head.AsSpan(4, 16), token)) return;
                 if (command == 0 && port == 0)
                 { Attached?.Invoke(); await stream.WriteAsync(new byte[] { 0 }, handshake.Token); return; }
+                if(command==3&&port==0)
+                {
+                    Attached?.Invoke();client.NoDelay=true;await stream.WriteAsync(new byte[]{0},handshake.Token);
+                    var block=new byte[8192];for(var sent=0;sent<Wire.BandwidthProbeSize;sent+=block.Length)await stream.WriteAsync(block,handshake.Token);
+                    return;
+                }
                 if (command != 1 || !settings.TcpPorts.Contains((int)port))
                 { await stream.WriteAsync(new byte[] { 2 }, handshake.Token); return; }
                 using var target = new TcpClient { NoDelay = true };
@@ -516,28 +523,20 @@ sealed class Session : IAsyncDisposable
     public string Network => Process.Network;
     public double? TcpRtt { get; set; }
     public double? UdpRtt { get; set; }
+    public double? BandwidthMbps { get; set; }
+    public ForwardHub? Hub { get; }
     readonly Gateway? gateway;
     readonly string directory;
     readonly CancellationTokenSource stop = new();
-    readonly Dictionary<int,LocalForwarder> forwards = new();
     Task metrics = Task.CompletedTask;
-    public Dictionary<string,string> Mappings { get; } = new();
-    public LocalForwarder Forward(int target)
-    {
-        lock(forwards)
-        {
-            if(!Live) throw new IOException("设备连接已断开。");
-            if(!forwards.TryGetValue(target,out var bridge)) forwards[target]=bridge=new LocalForwarder(this,target);
-            return bridge;
-        }
-    }
+    public LocalForwarder Forward(int target)=>Hub?.Forward(target)??throw new IOException("被控会话不提供本地转发入口。");
     int disposed;
     public Session(string peer, string address, int port, byte[] capability, int[] tcpPorts, int[] udpPorts,
-        Child process, string directory, Gateway? gateway = null)
+        Child process, string directory, Gateway? gateway = null, ForwardHub? hub = null)
     {
         PeerId = peer; Address = address; LocalPort = port; Capability = capability;
         TcpPorts = tcpPorts; UdpPorts = udpPorts; Process = process; this.directory = directory;
-        this.gateway = gateway; Host = gateway != null;
+        this.gateway = gateway; Hub=hub; Host = gateway != null;
     }
     public async Task<TcpClient> OpenTcp(int port, CancellationToken ct)
     {
@@ -559,11 +558,22 @@ sealed class Session : IAsyncDisposable
         }
         catch { tcp.Dispose(); throw; }
     }
+    async Task<double> MeasureBandwidth(CancellationToken ct)
+    {
+        using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct,Token);timeout.CancelAfter(TimeSpan.FromSeconds(12));
+        using var tcp=new TcpClient{NoDelay=true};await tcp.ConnectAsync(IPAddress.Loopback,LocalPort,timeout.Token);
+        var head=new byte[23];"AUI1"u8.CopyTo(head);Capability.CopyTo(head,4);head[20]=3;
+        var watch=Stopwatch.StartNew();await tcp.GetStream().WriteAsync(head,timeout.Token);
+        if((await Wire.Read(tcp.GetStream(),1,timeout.Token))[0]!=0)throw new IOException("带宽探测被拒绝。");
+        _=await Wire.Read(tcp.GetStream(),Wire.BandwidthProbeSize,timeout.Token);watch.Stop();
+        return Wire.BandwidthProbeSize*8d/Math.Max(watch.Elapsed.TotalSeconds,.001)/1_000_000d;
+    }
     public void StartMetrics(Action changed)
     {
         if (Host || metrics != Task.CompletedTask) return;
         metrics = Task.Run(async () =>
         {
+            var failures=0;var round=0;
             while (!stop.IsCancellationRequested)
             {
                 try
@@ -580,10 +590,21 @@ sealed class Session : IAsyncDisposable
                     watch.Stop();
                     UdpRtt = Wire.ValidPacket(reply.Buffer, Capability) && reply.Buffer.AsSpan(18).SequenceEqual(nonce)
                         ? watch.Elapsed.TotalMilliseconds : null;
+                    if(round++%12==0)
+                    {
+                        try{BandwidthMbps=await MeasureBandwidth(stop.Token);}
+                        catch(OperationCanceledException)when(stop.IsCancellationRequested){throw;}
+                        catch{BandwidthMbps=null;}
+                    }
+                    failures=0;
                     changed();
                 }
                 catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
-                catch { TcpRtt = null; UdpRtt = null; changed(); }
+                catch
+                {
+                    TcpRtt=null;UdpRtt=null;BandwidthMbps=null;changed();
+                    if(++failures>=2){try{await Process.DisposeAsync();}catch{}break;}
+                }
                 try { await Task.Delay(TimeSpan.FromSeconds(5), stop.Token); }
                 catch (OperationCanceledException) { break; }
             }
@@ -593,10 +614,7 @@ sealed class Session : IAsyncDisposable
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         stop.Cancel();
-        KeyValuePair<string,string>[] mappings;lock(Mappings){mappings=Mappings.ToArray();Mappings.Clear();}
-        foreach(var mapping in mappings) await WindowsShares.Remove(mapping.Key,mapping.Value);
-        LocalForwarder[] bridges;lock(forwards){bridges=forwards.Values.ToArray();forwards.Clear();}
-        foreach(var bridge in bridges)await bridge.DisposeAsync();
+        Hub?.Detach(this);
         try { await metrics; } catch { }
         await Process.DisposeAsync();
         if (gateway != null) await gateway.DisposeAsync();
@@ -616,6 +634,7 @@ sealed class Engine : IAsyncDisposable
     public ConcurrentQueue<string> Logs { get; } = new();
     public event Action? Changed;
     readonly SemaphoreSlim operation = new(1);
+    readonly ConcurrentDictionary<string,ForwardHub> hubs = new();
     Engine(State state, Settings settings, string id) { State=state; Settings=settings; Id=id; }
     public static async Task<Engine> Create(string root, Settings settings)
     {
@@ -626,10 +645,12 @@ sealed class Engine : IAsyncDisposable
         catch { state.Dispose(); throw; }
     }
     void Update(string id,string message) { Status[id]=message; Changed?.Invoke(); }
+    public void SetStatus(string id,string message)=>Update(id,message);
     string Describe(Session session, bool host)
     {
-        var metric = session.TcpRtt is { } tcp ? $" · TCP/PsPing {tcp:F1} ms" : "";
-        if (session.UdpRtt is { } udp) metric += $" · UDP {udp:F1} ms";
+        var metric=session.UdpRtt is{} udp?$" · RTT {udp:F1} ms":" · RTT -- ms";
+        metric+=session.BandwidthMbps is{} bandwidth?$" · ~{bandwidth:F1} Mbps":" · ~-- Mbps";
+        if(host)metric="";
         return (host ? "正在访问本机" : "已连接") + " · " + session.Network + metric;
     }
     void Observe(Session session, bool host)
@@ -663,6 +684,17 @@ sealed class Engine : IAsyncDisposable
             Update(id,"未连接");
         }
         finally { operation.Release(); }
+    }
+    public async Task DropOutgoing(string id)
+    {
+        await operation.WaitAsync();
+        try { if(Outgoing.TryRemove(id,out var session))await session.DisposeAsync();Update(id,"未连接"); }
+        finally { operation.Release(); }
+    }
+    public async Task RemoveOutgoing(string id)
+    {
+        await DropOutgoing(id);
+        if(hubs.TryRemove(id,out var hub))await hub.DisposeAsync();
     }
     public async Task StopIncoming()
     {
@@ -743,9 +775,11 @@ sealed class Engine : IAsyncDisposable
             var grant = DirectoryClient.Verify<GrantReceipt>(admission.Grant, "/grant/v1", target.Endpoint, false);
             if (grant.ControllerEndpoint != Id || grant.TargetEndpoint != target.Endpoint) throw new IOException("授权未绑定当前设备。");
             peer = State.GetOrAdd(target.Endpoint, target.Code, admission.Grant);
-            session = new Session(peer.Id, peer.Address, port, Convert.FromHexString(admission.Token), admission.TcpPorts, admission.UdpPorts, child, dir);
+            var hub=hubs.GetOrAdd(peer.Id,_=>new ForwardHub());
+            session = new Session(peer.Id, peer.Address, port, Convert.FromHexString(admission.Token), admission.TcpPorts, admission.UdpPorts, child, dir, hub:hub);
             using (await session.OpenTcp(0, ct)) { }
             if (!Outgoing.TryAdd(peer.Id, session)) throw new IOException("该设备已有连接。");
+            hub.Attach(session);
             Observe(session, false); _ = Monitor(session, false);
         }
         catch
@@ -764,87 +798,108 @@ sealed class Engine : IAsyncDisposable
         {
             foreach(var session in Outgoing.Values.Concat(Incoming.Values)) await session.DisposeAsync();
             Outgoing.Clear(); Incoming.Clear(); State.Dispose();
+            foreach(var hub in hubs.Values)await hub.DisposeAsync();hubs.Clear();
         }
         finally { operation.Release(); }
     }
 }
 
-static class Qr
+static class AppIcon
 {
-    public static byte[] Encode(string text)
+    public static WindowIcon Create()
     {
-        var matrix = new ZXing.QrCode.QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, 240, 240,
-            new Dictionary<EncodeHintType, object> { [EncodeHintType.MARGIN] = 2 });
-        using var bitmap = new SKBitmap(matrix.Width, matrix.Height);
-        using var canvas = new SKCanvas(bitmap); canvas.Clear(SKColors.White);
-        using var paint = new SKPaint { Color = SKColors.Black, IsAntialias = false };
-        for (var y = 0; y < matrix.Height; y++)
-            for (var x = 0; x < matrix.Width; x++) if (matrix[x, y]) canvas.DrawRect(x, y, 1, 1, paint);
-        using var image = SKImage.FromBitmap(bitmap); using var png = image.Encode(SKEncodedImageFormat.Png, 100);
-        return png.ToArray();
-    }
-    public static string Decode(Stream stream)
-    {
-        using var codec = SKCodec.Create(stream) ?? throw new InvalidDataException("无法读取二维码图片。");
-        if ((long)codec.Info.Width * codec.Info.Height > 24_000_000) throw new InvalidDataException("图片过大，请裁剪二维码后重试。");
-        using var bitmap = SKBitmap.Decode(codec, new SKImageInfo(codec.Info.Width, codec.Info.Height, SKColorType.Bgra8888));
-        var reader = new BarcodeReaderGeneric { AutoRotate = true, Options = new ZXing.Common.DecodingOptions
-            { TryHarder = true, PossibleFormats = [BarcodeFormat.QR_CODE] } };
-        var result = reader.Decode(new RGBLuminanceSource(bitmap.Bytes, bitmap.Width, bitmap.Height, RGBLuminanceSource.BitmapFormat.BGRA32));
-        return result is null ? throw new InvalidDataException("没有识别到二维码。") : (Regex.IsMatch(result.Text.Trim(), @"(?i)\A(?:ardui:/*)?[A-Z0-9]{6}\z") ? Wire.Machine(result.Text) : Wire.Endpoint(result.Text));
+        using var bitmap=new SKBitmap(64,64,true);using var canvas=new SKCanvas(bitmap);
+        canvas.Clear(SKColors.Transparent);
+        using var blue=new SKPaint{Color=new SKColor(42,96,210),IsAntialias=true};
+        using var white=new SKPaint{Color=SKColors.White,IsAntialias=true,StrokeWidth=5,StrokeCap=SKStrokeCap.Round};
+        canvas.DrawRoundRect(new SKRect(3,3,61,61),13,13,blue);
+        canvas.DrawLine(19,42,32,19,white);canvas.DrawLine(32,19,47,42,white);canvas.DrawLine(19,42,47,42,white);
+        canvas.DrawCircle(19,42,5,white);canvas.DrawCircle(32,19,5,white);canvas.DrawCircle(47,42,5,white);
+        using var image=SKImage.FromBitmap(bitmap);using var data=image.Encode(SKEncodedImageFormat.Png,100);
+        return new WindowIcon(new MemoryStream(data.ToArray(),false));
     }
 }
 
 sealed class MainWindow : Window
 {
-    static readonly IBrush Ink = Brush.Parse("#16243A"), Muted = Brush.Parse("#6A778A");
+    static readonly IBrush Ink = Brush.Parse("#16243A"), Muted = Brush.Parse("#6A778A"),
+        Online=Brush.Parse("#2E9D61"),Relay=Brush.Parse("#D09218"),Idle=Brush.Parse("#98A2B1");
     readonly TextBlock machine = new() { Text = "------", FontSize = 18, FontWeight = FontWeight.Bold, LetterSpacing = 2, VerticalAlignment=VerticalAlignment.Center, Margin=new Thickness(8,0) };
-    readonly TextBox endpoint = new() { IsReadOnly = true, FontFamily = new FontFamily("Consolas"), FontSize = 11, Height=28, VerticalContentAlignment=VerticalAlignment.Center };
-    readonly TextBox remote = new() { Watermark = "6 位机器编号", MaxLength = 6 };
-    readonly TextBox remotePassword = new() { Watermark = "对端访问密码", PasswordChar = '●', MaxLength = 128 };
+    readonly TextBox endpoint = new() { IsReadOnly = true,FontFamily=new FontFamily("Consolas"),FontSize=10,Height=25,Width=210,VerticalContentAlignment=VerticalAlignment.Center };
+    readonly TextBox remote = new() { Watermark = "ABC123", MaxLength = 6,Width=82 };
+    readonly TextBox remotePassword = new() { Watermark = "123456",MaxLength=6,Width=82 };
     readonly CheckBox allow = new() { Content = "正在读取被控状态…", IsEnabled=false };
-    readonly TextBox hostPassword = new() { Watermark = "被控密码", MaxLength = 128 };
-    readonly Grid hostDetails = new() { IsVisible=false, ColumnDefinitions=new ColumnDefinitions("105,*"),RowDefinitions=new RowDefinitions("Auto,Auto") };
-    readonly TextBlock status = new() { Text = "正在读取设备身份…", TextWrapping = TextWrapping.Wrap, Foreground = Muted };
+    readonly TextBox hostPassword = new() { Text="••••••",MaxLength=6,IsReadOnly=true,Width=70,FontFamily=new FontFamily("Consolas"),FontWeight=FontWeight.SemiBold };
+    readonly StackPanel hostDetails = new() { IsVisible=false,Spacing=3 };
+    readonly Expander identityExpander=new(){Header="ID",IsExpanded=false,HorizontalAlignment=HorizontalAlignment.Left};
+    readonly Border identityCard;
+    readonly TextBlock status = new() { Text = "正在读取设备身份…",TextTrimming=TextTrimming.CharacterEllipsis,Foreground = Muted,FontSize=10 };
     readonly StackPanel activeIncoming = new() { Spacing = 6 };
     readonly StackPanel incomingArea = new() { Spacing = 6, IsVisible = false };
     readonly StackPanel pendingIncoming = new() { Spacing = 6 };
     readonly StackPanel controllers = new() { Spacing = 6 };
     readonly Expander controllersExpander = new() { Header = "可访问本机的设备管理", IsExpanded = false };
-    readonly TextBlock networkLog = new() { TextWrapping = TextWrapping.Wrap, Foreground = Muted, FontFamily = new FontFamily("Consolas"), FontSize = 11 };
-    readonly StackPanel devices = new() { Spacing = 10 };
+    readonly TextBlock networkLog = new() { TextWrapping = TextWrapping.Wrap, Foreground = Muted, FontFamily = new FontFamily("Consolas"), FontSize = 9 };
+    readonly TextBlock networkSummary = new() { Text="暂无网络事件",TextTrimming=TextTrimming.CharacterEllipsis,Foreground=Muted,FontFamily=new FontFamily("Consolas"),FontSize=9,VerticalAlignment=VerticalAlignment.Center };
+    readonly StackPanel devices = new() { Spacing = 4 };
+    readonly TextBlock noDevices=new(){Text="尚未添加设备。",Foreground=Muted};
+    readonly Dictionary<string,DeviceDisplay> deviceViews=new();
+    readonly DispatcherTimer passwordTimer=new(){Interval=TimeSpan.FromSeconds(1)};
+    readonly DispatcherTimer undoTimer=new(){Interval=TimeSpan.FromSeconds(1)};
+    readonly ColumnDefinition dividerColumn,sideColumn;
+    readonly GridSplitter splitter;
+    readonly ScrollViewer sideScroll;
+    readonly Border diagnostics,undoBar;
+    readonly TextBlock undoText=new(){FontSize=10,VerticalAlignment=VerticalAlignment.Center};
     Engine? engine;
     DirectoryClient? directory;
-    bool closing, closed, busy, ready;
-    int passwordEdit;
+    bool closing,closed,busy,ready,passwordVisible;
+    DateTimeOffset passwordVisibleUntil;
+    DateTimeOffset undoUntil;
+    Peer? undoPeer;
+    double rememberedSideWidth=240;
+    sealed record DeviceDisplay(Border Card,Ellipse Indicator,TextBlock Title,TextBlock Status);
     public MainWindow(bool preview = false)
     {
         Title = "ArdUi " + Program.Version; Width = 660; Height = 420; MinWidth = 600; MinHeight = 360;
+        Icon=AppIcon.Create();
         Background = Brush.Parse("#F4F6FA"); FontFamily = new FontFamily("Microsoft YaHei UI"); Foreground = Ink; FontSize = 11;
         var root = new Grid { Margin = new Thickness(12), RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto") };
-        root.Children.Add(new TextBlock { Text = "ArdUi " + Program.Version, FontSize = 18, FontWeight = FontWeight.Bold, Margin = new Thickness(0,0,0,6) });
-        var identity = new StackPanel{Spacing=5};identity.Children.Add(allow);
-        hostDetails.Children.Add(machine);Grid.SetColumn(endpoint,1);hostDetails.Children.Add(endpoint);
-        var access = new StackPanel { Orientation=Orientation.Horizontal,Spacing=8,Children={hostPassword,
-            Button("复制机器码",async()=>await Clipboard!.SetTextAsync(directory?.Code??"")),Button("复制 EndpointId",async()=>await Clipboard!.SetTextAsync(engine?.Id??""))}};
+        var header=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto")};
+        header.Children.Add(new TextBlock { Text = "ArdUi " + Program.Version, FontSize = 18, FontWeight = FontWeight.Bold, Margin = new Thickness(0,0,0,6) });
+        Grid.SetColumn(allow,1);header.Children.Add(allow);root.Children.Add(header);
+        var reveal=Button("查看 10 秒",RevealPassword);reveal.FontSize=10;reveal.Padding=new Thickness(7,3);
+        var idDetails=new StackPanel{Orientation=Orientation.Horizontal,Spacing=4,Children={endpoint,
+            Button("复制码",async()=>await Clipboard!.SetTextAsync(directory?.Code??"")),Button("复制 ID",async()=>await Clipboard!.SetTextAsync(engine?.Id??""))}};
+        identityExpander.Content=idDetails;identityExpander.FontSize=10;identityExpander.Padding=new Thickness(4,1);
+        var access = new StackPanel { Orientation=Orientation.Horizontal,Spacing=6,Children={machine,new TextBlock{Text="首次密码",VerticalAlignment=VerticalAlignment.Center},hostPassword,reveal,identityExpander}};
         allow.PropertyChanged+=async(_,e)=>{if(e.Property==CheckBox.IsCheckedProperty && ready)await Guard(SaveAccess);};
-        hostPassword.TextChanged+=async(_,_)=>
-        {
-            var edit=Interlocked.Increment(ref passwordEdit);await Task.Delay(700);
-            if(edit==passwordEdit && hostPassword.IsFocused && directory!=null)await Guard(SaveAccess);
-        };
-        Grid.SetRow(access,1);Grid.SetColumnSpan(access,2);hostDetails.Children.Add(access);identity.Children.Add(hostDetails);
-        var identityCard=Card(identity);Grid.SetRow(identityCard,1);root.Children.Add(identityCard);
-        controllersExpander.Content=controllers;
-        var main = new Grid { Margin=new Thickness(0,7,0,0),ColumnDefinitions=new ColumnDefinitions("*,8,240") };
-        var deviceArea=new StackPanel{Spacing=5,Children={Label("设备列表（本机可主动控制）",14),devices}};
+        hostDetails.Children.Add(access);identityCard=Card(hostDetails);identityCard.IsVisible=false;Grid.SetRow(identityCard,1);root.Children.Add(identityCard);
+        controllersExpander.Content=controllers;controllersExpander.IsVisible=false;
+        var main = new Grid { Margin=new Thickness(0,7,0,0),ColumnDefinitions=new ColumnDefinitions("*,5,240") };
+        dividerColumn=main.ColumnDefinitions[1];sideColumn=main.ColumnDefinitions[2];
+        var addRow=new StackPanel{Orientation=Orientation.Horizontal,Spacing=5,Children={new TextBlock{Text="6位ID:",VerticalAlignment=VerticalAlignment.Center},remote,
+            new TextBlock{Text="6位密码:",VerticalAlignment=VerticalAlignment.Center},remotePassword,Button("连接",Connect)}};
+        devices.Children.Add(noDevices);
+        var undoButton=Button("撤销",UndoRemove);undoButton.FontSize=9;undoButton.Padding=new Thickness(5,1);
+        undoBar=Card(new StackPanel{Orientation=Orientation.Horizontal,Spacing=6,Children={undoText,undoButton}});
+        undoBar.IsVisible=false;undoBar.Padding=new Thickness(6,3);undoBar.Background=Brush.Parse("#FFF8E8");
+        var deviceArea=new StackPanel{Spacing=5,Children={addRow,Label("已获得授权连接（本机可主动控制）",13),undoBar,devices}};
         main.Children.Add(new ScrollViewer{Content=deviceArea});
+        splitter=new GridSplitter{ResizeDirection=GridResizeDirection.Columns,ResizeBehavior=GridResizeBehavior.PreviousAndNext,Background=Brush.Parse("#D8DEE8"),HorizontalAlignment=HorizontalAlignment.Stretch};
+        splitter.PointerReleased+=(_,_)=>SaveSideWidth();
+        Grid.SetColumn(splitter,1);main.Children.Add(splitter);
         incomingArea.Children.Add(Label("正在访问本机",14));incomingArea.Children.Add(activeIncoming);
-        var side=new StackPanel{Spacing=6,Children={incomingArea,pendingIncoming,controllersExpander,
-            Label("添加设备",14),remote,remotePassword,Button("添加并申请授权",Connect),Button("扫码",Scan)}};
-        var sideScroll=new ScrollViewer{Content=side};Grid.SetColumn(sideScroll,2);main.Children.Add(sideScroll);Grid.SetRow(main,2);root.Children.Add(main);
-        var footer=new StackPanel{Spacing=3,Margin=new Thickness(0,6,0,0),Children={status,networkLog}};
+        var side=new StackPanel{Spacing=6,Children={incomingArea,pendingIncoming,controllersExpander}};
+        sideScroll=new ScrollViewer{Content=side};Grid.SetColumn(sideScroll,2);main.Children.Add(sideScroll);Grid.SetRow(main,2);root.Children.Add(main);
+        var diagnosticButton=new Button{Content="诊断⌄",FontSize=9,Padding=new Thickness(5,1)};
+        diagnostics=Card(networkLog);diagnostics.IsVisible=false;diagnostics.Padding=new Thickness(5,3);
+        diagnosticButton.Click+=(_,_)=>{diagnostics.IsVisible=!diagnostics.IsVisible;diagnosticButton.Content=diagnostics.IsVisible?"诊断⌃":"诊断⌄";};
+        var networkRow=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto")};networkRow.Children.Add(networkSummary);
+        Grid.SetColumn(diagnosticButton,1);networkRow.Children.Add(diagnosticButton);
+        var footer=new StackPanel{Spacing=2,Margin=new Thickness(0,5,0,0),Children={status,networkRow,diagnostics}};
         Grid.SetRow(footer,3);root.Children.Add(footer);Content=root;
+        ToolTip.SetTip(endpoint,"本机永久 EndpointId，用于首次连接时核对身份。");
         Opened += async (_,_) =>
         {
             if(preview)return;
@@ -853,26 +908,28 @@ sealed class MainWindow : Window
                 var settings=JsonSerializer.Deserialize<Settings>(await File.ReadAllTextAsync(Path.Combine(Program.DataRoot,"config.json")),Wire.Json)!;
                 engine=await Engine.Create(Program.DataRoot,settings);endpoint.Text=engine.Id;
                 engine.Changed+=()=>Dispatcher.UIThread.Post(Refresh);
-                directory=new DirectoryClient(engine);hostPassword.Text=directory.AccessPassword;
+                directory=new DirectoryClient(engine);rememberedSideWidth=directory.SideWidth;
                 directory.Confirm=async(pair,ct)=>await Dispatcher.UIThread.InvokeAsync(()=>ConfirmPair(pair,ct));
                 directory.Changed+=()=>Dispatcher.UIThread.Post(Refresh);
                 directory.Notice+=message=>Dispatcher.UIThread.Post(()=>Say(message));
-                allow.IsChecked=directory.Enabled;hostDetails.IsVisible=directory.Enabled;allow.Content="允许被控";allow.IsEnabled=true;ready=true;directory.Start();Say("正在连接可信服务器…");
+                allow.IsChecked=directory.Enabled;hostDetails.IsVisible=directory.Enabled;identityCard.IsVisible=directory.Enabled;allow.Content="允许被控";allow.IsEnabled=true;ready=true;SetSideVisible(directory.Enabled);directory.Start();passwordTimer.Start();UpdatePassword();Say("正在连接可信服务器…");
             });
         };
         Closing+=async(_,e)=>
         {
             if(closed)return;e.Cancel=true;if(closing)return;closing=true;IsEnabled=false;
-            try{if(directory!=null)await directory.DisposeAsync();if(engine!=null)await engine.DisposeAsync();}
+            try{passwordTimer.Stop();undoTimer.Stop();if(directory!=null)await directory.DisposeAsync();if(engine!=null)await engine.DisposeAsync();}
             finally{closed=true;Close();}
         };
         if(preview)
         {
             machine.Text="A7B2K9";endpoint.Text="5889f4c2e3c89af503a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1";
             allow.Content="允许被控";allow.IsEnabled=true;allow.IsChecked=false;Say("可信服务器 · https://f.visnova.cn/ · 本机被控功能已关闭");
-            devices.Children.Add(Device(new Peer{Id=new string('a',64),Code="C8M3P6",Name="办公电脑"},true));
-            controllers.Children.Add(new TextBlock{Text="尚无授权",Foreground=Muted});
+            var sample=Device(new Peer{Id=new string('a',64),Code="C8M3P6",Name="办公电脑"});noDevices.IsVisible=false;devices.Children.Add(sample.Card);
+            controllers.Children.Add(new TextBlock{Text="尚无授权",Foreground=Muted});SetSideVisible(false);
         }
+        passwordTimer.Tick+=(_,_)=>UpdatePassword();
+        undoTimer.Tick+=(_,_)=>UpdateUndo();
     }
     static TextBlock Label(string text,double size)=>new(){Text=text,FontSize=size,FontWeight=FontWeight.SemiBold};
     static Border Card(Control content)=>new(){Child=content,Padding=new Thickness(9),Background=Brushes.White,CornerRadius=new CornerRadius(7),BorderThickness=new Thickness(1),BorderBrush=Brush.Parse("#E4E9F0")};
@@ -887,16 +944,48 @@ sealed class MainWindow : Window
         try{await action();}catch(OperationCanceledException){Say("操作已取消或等待确认超时。");}catch(Exception ex){Say(ex.Message);}
         finally{busy=false;Refresh();}
     }
-    void Say(string text)=>status.Text=text;
+    void Say(string text){status.Text=text;ToolTip.SetTip(status,text);}
+    static string PeerLabel(Peer peer)=>string.IsNullOrWhiteSpace(peer.Name)||peer.Name==peer.Code?peer.Code:peer.Name+" · "+peer.Code;
+    static IBrush ConnectionBrush(string text)
+    {
+        if(text.Contains("中继",StringComparison.OrdinalIgnoreCase)||text.Contains("relay",StringComparison.OrdinalIgnoreCase)||
+           text.Contains("正在",StringComparison.Ordinal)||text.Contains("重连",StringComparison.Ordinal)||text.Contains("等待",StringComparison.Ordinal))return Relay;
+        if(text.Contains("已连接",StringComparison.Ordinal)||text.Contains("直连",StringComparison.Ordinal))return Online;
+        return Idle;
+    }
+    void SetSideVisible(bool visible)
+    {
+        sideScroll.IsVisible=visible;splitter.IsVisible=visible;
+        dividerColumn.Width=new GridLength(visible?5:0);
+        sideColumn.Width=new GridLength(visible?rememberedSideWidth:0);
+    }
+    void SaveSideWidth()
+    {
+        if(directory?.Enabled!=true||sideColumn.ActualWidth<180)return;
+        rememberedSideWidth=Math.Clamp(sideColumn.ActualWidth,180,360);directory.SetSideWidth(rememberedSideWidth);
+    }
     void Refresh()
     {
         if(engine==null)return;
         if(directory!=null && directory.Code.Length!=0 && machine.Text!=directory.Code)
         {machine.Text=directory.Code;Say("设备已注册 · "+engine.Settings.Server);}
-        devices.Children.Clear();
         Peer[] peers;lock(engine.State.Peers)peers=engine.State.Peers.ToArray();
-        foreach(var peer in peers)devices.Children.Add(Device(peer,engine.Outgoing.TryGetValue(peer.Id,out var active)&&active.Live));
-        if(peers.Length==0)devices.Children.Add(new TextBlock{Text="尚未添加设备；请在右侧输入另一台设备的机器码和密码。",Foreground=Muted,TextWrapping=TextWrapping.Wrap});
+        var structural=deviceViews.Count!=peers.Length||peers.Any(p=>!deviceViews.ContainsKey(p.Id));
+        foreach(var stale in deviceViews.Keys.Except(peers.Select(p=>p.Id)).ToArray())deviceViews.Remove(stale);
+        foreach(var peer in peers)if(!deviceViews.ContainsKey(peer.Id))deviceViews[peer.Id]=Device(peer);
+        if(structural)
+        {
+            devices.Children.Clear();devices.Children.Add(noDevices);
+            foreach(var peer in peers)devices.Children.Add(deviceViews[peer.Id].Card);
+        }
+        noDevices.IsVisible=peers.Length==0;
+        foreach(var peer in peers)
+        {
+            var view=deviceViews[peer.Id];var title=PeerLabel(peer);
+            var stateText=engine.Status.GetValueOrDefault(peer.Id,peer.AutoConnect?"已授权 · 正在连接":"已授权 · 已暂停");
+            view.Title.Text=title;view.Status.Text=stateText;view.Indicator.Fill=ConnectionBrush(stateText);
+            ToolTip.SetTip(view.Title,title);ToolTip.SetTip(view.Status,stateText);
+        }
         activeIncoming.Children.Clear();
         foreach(var session in engine.Incoming.Values.Where(s=>s.Live))
         {
@@ -909,15 +998,19 @@ sealed class MainWindow : Window
         if(directory!=null)foreach(var pair in directory.Controllers)
         {
             var endpointId=pair.Key;var row=new StackPanel{Orientation=Orientation.Horizontal,Spacing=8};
-            row.Children.Add(new TextBlock{Text=pair.Value.Code+" · "+endpointId[..8]+"…",VerticalAlignment=VerticalAlignment.Center});
+            var controllerText=new TextBlock{Text=pair.Value.Code+" · "+endpointId[..8]+"…",VerticalAlignment=VerticalAlignment.Center};
+            ToolTip.SetTip(controllerText,endpointId);row.Children.Add(controllerText);
             row.Children.Add(Button("撤销",async()=>await directory.Revoke(endpointId)));controllers.Children.Add(row);
         }
         if(controllers.Children.Count==0)controllers.Children.Add(new TextBlock{Text="尚无授权",Foreground=Muted});
-        networkLog.Text=string.Join(Environment.NewLine,engine.Logs.TakeLast(3));
+        var logs=engine.Logs.TakeLast(3).ToArray();networkSummary.Text=logs.LastOrDefault()??"暂无网络事件";
+        networkLog.Text=logs.Length==0?"暂无网络事件":string.Join(Environment.NewLine,logs);ToolTip.SetTip(networkSummary,networkSummary.Text);
         if(directory!=null)
         {
             if(allow.IsChecked!=directory.Enabled){ready=false;allow.IsChecked=directory.Enabled;ready=true;}
             hostDetails.IsVisible=directory.Enabled;
+            identityCard.IsVisible=directory.Enabled;controllersExpander.IsVisible=directory.Enabled;SetSideVisible(directory.Enabled);
+            if(!directory.Enabled){identityExpander.IsExpanded=false;passwordVisible=false;}UpdatePassword();
             Title="ArdUi "+Program.Version+(directory.Enabled&&directory.Code.Length!=0?" · "+directory.Code:"");
         }
     }
@@ -927,44 +1020,77 @@ sealed class MainWindow : Window
         var password=remotePassword.Text??"";remotePassword.Text="";Say("正在核对对端身份并申请授权…");
         await directory.Connect(remote.Text??"",password);Say("已获授权，可以从设备列表打开远程桌面和文件共享。");
     }
+    Task RevealPassword()
+    {
+        if(directory==null||!directory.Enabled)throw new InvalidOperationException("请先允许被控。");
+        passwordVisible=true;passwordVisibleUntil=DateTimeOffset.UtcNow.AddSeconds(10);UpdatePassword();return Task.CompletedTask;
+    }
+    void UpdatePassword()
+    {
+        if(directory==null||!directory.Enabled){passwordVisible=false;hostPassword.Text="••••••";return;}
+        if(passwordVisible&&DateTimeOffset.UtcNow>=passwordVisibleUntil)passwordVisible=false;
+        var text=passwordVisible?directory.AccessPassword:"••••••";if(hostPassword.Text!=text)hostPassword.Text=text;
+    }
     async Task SaveAccess()
     {
         if(directory==null)throw new InvalidOperationException("设备尚未就绪。");
-        var password=hostPassword.Text??"";
-        await directory.SetAccess(allow.IsChecked==true,password);
+        await directory.SetAccess(allow.IsChecked==true);
         Say(directory.Enabled?"已自动保存：允许远程访问。":"已自动保存：关闭远程访问并断开被控会话。");
     }
-    async Task Scan()
+    DeviceDisplay Device(Peer peer)
     {
-        var files=await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions{Title="选择机器编号二维码",AllowMultiple=false});
-        if(files.Count==0)return;
-        await using var stream=await files[0].OpenReadAsync();remote.Text=Wire.Machine(Qr.Decode(stream));
-    }
-    Control Device(Peer peer,bool connected)
-    {
-        var stack=new StackPanel{Spacing=8,Children={Label((string.IsNullOrEmpty(peer.Name)?peer.Code:peer.Name)+" · "+peer.Code,16),
-            new TextBlock{Text=engine?.Status.GetValueOrDefault(peer.Id,"已授权 · 未连接")??"已授权 · 在线",Foreground=Muted,FontSize=12}}};
-        var actions=new WrapPanel();
-        void Add(string title,Func<Task> action,bool enabled=true)
-        { var button=Button(title,action);button.IsEnabled=enabled;button.Margin=new Thickness(0,0,6,4);actions.Children.Add(button); }
-        Add("远程桌面",async () =>
+        var displayName=PeerLabel(peer);
+        var title=new TextBlock{Text=displayName,FontSize=11,FontWeight=FontWeight.SemiBold,VerticalAlignment=VerticalAlignment.Center,TextTrimming=TextTrimming.CharacterEllipsis,MaxWidth=110};
+        var state=new TextBlock{Text=engine?.Status.GetValueOrDefault(peer.Id,"正在连接")??"已连接 · P2P 直连 / IPv4 · RTT 18.2 ms · ~86.4 Mbps",Foreground=Muted,FontSize=9,VerticalAlignment=VerticalAlignment.Center,TextTrimming=TextTrimming.CharacterEllipsis,Margin=new Thickness(8,0,4,0)};
+        var indicator=new Ellipse{Width=7,Height=7,Fill=ConnectionBrush(state.Text??""),Margin=new Thickness(0,0,6,0),VerticalAlignment=VerticalAlignment.Center};
+        ToolTip.SetTip(title,displayName);ToolTip.SetTip(state,state.Text);
+        var row=new Grid{ColumnDefinitions=new ColumnDefinitions("Auto,Auto,*,Auto"),MinHeight=26};
+        row.Children.Add(indicator);Grid.SetColumn(title,1);row.Children.Add(title);Grid.SetColumn(state,2);row.Children.Add(state);
+        var actions=new StackPanel{Orientation=Orientation.Horizontal,Spacing=3,VerticalAlignment=VerticalAlignment.Center};
+        Button Add(string caption,Func<Task> action)
+        { var button=Button(caption,action);button.FontSize=9;button.Padding=new Thickness(5,1);button.MinHeight=22;actions.Children.Add(button);return button; }
+        Add("桌面",async () =>
         {
             await directory!.Connect(peer.Code,"",enrolling:false);
             var session=engine!.Outgoing[peer.Id];var bridge=session.Forward(3389);
             await Launch("mstsc.exe","/v:127.0.0.1:"+bridge.Port);
         });
-        Add("文件共享",async () =>
+        Add("文件",async () =>
         {
             await directory!.Connect(peer.Code,"",enrolling:false);
             var input=await ShareDetails();
             var path=await WindowsShares.Map(engine!.Outgoing[peer.Id],input.Share,input.User,input.Password,CancellationToken.None);
             await Launch("explorer.exe",path);
         });
-        Add("EndpointId",async () => { await Clipboard!.SetTextAsync(peer.Id);Say("完整 EndpointId 已复制："+peer.Id); });
-        Add("备注",async () => { peer.Name=await AskText("设备备注",peer.Name);engine!.State.Save(); });
-        Add("断开",async () => { await engine!.Disconnect(peer.Id); });
-        Add("移除",async () => { await directory!.RemoveLocal(peer); });
-        stack.Children.Add(actions); return Card(stack);
+        var pause=Add("暂停",async()=>await directory!.Pause(peer));ToolTip.SetTip(pause,"断开当前会话并暂停自动重连；再次打开桌面或文件时恢复。");
+        var moreActions=new StackPanel{Orientation=Orientation.Horizontal,Spacing=3};
+        void More(string caption,Func<Task> action){var button=Button(caption,action);button.FontSize=9;button.Padding=new Thickness(5,1);button.MinHeight=22;moreActions.Children.Add(button);}
+        More("EndpointId",async()=>{await Clipboard!.SetTextAsync(peer.Id);Say("完整 EndpointId 已复制："+peer.Id);});
+        More("备注",async()=>{peer.Name=await AskText("设备备注",peer.Name);engine!.State.Save();});
+        More("移除",async()=>await RemoveWithUndo(peer));
+        var moreRow=new Border{Child=moreActions,IsVisible=false,Padding=new Thickness(0,3,0,0)};
+        var more=new Button{Content="更多⌄",FontSize=9,Padding=new Thickness(5,1),MinHeight=22};
+        more.Click+=(_,_)=>{moreRow.IsVisible=!moreRow.IsVisible;more.Content=moreRow.IsVisible?"收起⌃":"更多⌄";};
+        actions.Children.Add(more);Grid.SetColumn(actions,3);row.Children.Add(actions);
+        var stack=new StackPanel{Spacing=0,Children={row,moreRow}};var card=Card(stack);card.Padding=new Thickness(6,3);return new DeviceDisplay(card,indicator,title,state);
+    }
+    async Task RemoveWithUndo(Peer peer)
+    {
+        var snapshot=new Peer{Id=peer.Id,Address=peer.Address,Code=peer.Code,Name=peer.Name,Grant=peer.Grant,AutoConnect=peer.AutoConnect};
+        await directory!.RemoveLocal(peer);undoPeer=snapshot;undoUntil=DateTimeOffset.UtcNow.AddSeconds(8);undoBar.IsVisible=true;undoTimer.Start();UpdateUndo();
+        Say($"已移除 {peer.Code}，可在 8 秒内撤销。");
+    }
+    Task UndoRemove()
+    {
+        var snapshot=undoPeer??throw new InvalidOperationException("撤销期限已结束。");
+        undoPeer=null;undoTimer.Stop();undoBar.IsVisible=false;directory!.RestoreLocal(snapshot);Say("已撤销移除："+snapshot.Code);return Task.CompletedTask;
+    }
+    void UpdateUndo()
+    {
+        if(undoPeer==null)return;
+        var seconds=(int)Math.Ceiling((undoUntil-DateTimeOffset.UtcNow).TotalSeconds);
+        if(seconds<=0){undoPeer=null;undoTimer.Stop();undoBar.IsVisible=false;return;}
+        undoText.Text=$"已移除 {undoPeer.Code} · {seconds} 秒内可撤销";
     }
     async Task<bool> ConfirmPair(Pairing pair,CancellationToken ct)
     {
@@ -1029,7 +1155,7 @@ sealed class MainWindow : Window
 sealed class App : Application
 {
     public override void Initialize()
-    { Styles.Add(new FluentTheme()); RequestedThemeVariant = ThemeVariant.Light; }
+    { Styles.Add(new SimpleTheme()); RequestedThemeVariant = ThemeVariant.Light; }
     public override void OnFrameworkInitializationCompleted()
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop) desktop.MainWindow = new MainWindow();
@@ -1062,7 +1188,7 @@ static class SelfTest
     public static async Task<int> Prototype()
     {
         var root = Path.Combine(Path.GetTempPath(), "ArdUi-prototype-" + Guid.NewGuid().ToString("N"));
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(6));
         var ct = timeout.Token;
         var echo = new TcpListener(IPAddress.Loopback, 0); echo.Start();
         var port = ((IPEndPoint)echo.LocalEndpoint).Port;
@@ -1100,8 +1226,10 @@ static class SelfTest
             var original = cd.Code; await cd.Register(ct);
             if (original != cd.Code || hd.Enabled) throw new Exception("Registration/default access failure.");
             Console.WriteLine("PASS: HTTPS registration, stable machine code, host disabled by default.");
-            await hd.SetAccess(true, "Prototype-Access-7391", ct); hd.Start();
-            var connection = cd.Connect(hd.Code, "Prototype-Access-7391", ct);
+            var minute=DateTimeOffset.UtcNow.ToUnixTimeSeconds()/60;var enrollmentPassword=hd.AccessPassword;
+            if(!Regex.IsMatch(enrollmentPassword,@"\A[0-9]{6}\z")||enrollmentPassword==hd.AccessPasswordFor(minute+1))throw new Exception("Rotating password failure.");
+            await hd.SetAccess(true,ct);hd.Start();cd.Start();
+            var connection = cd.Connect(hd.Code,enrollmentPassword,ct);
             await prompt.Task.WaitAsync(ct);
             if (caller.State.Peers.Count != 0 || connection.IsCompleted) throw new Exception("Peer granted before consent.");
             approval.SetResult(true); await connection;
@@ -1118,14 +1246,22 @@ static class SelfTest
                 if (!(await Wire.Read(local.GetStream(),message.Length,ct)).SequenceEqual(message)) throw new Exception("TCP proxy corrupted data.");
                 await response;
             }
-            await VerifyFlow(); Console.WriteLine("PASS: loopback TCP proxy through authenticated ARD to remote service.");
-            await caller.Disconnect(host.Id); await host.Disconnect(caller.Id);
+            await VerifyFlow();Console.WriteLine("PASS: loopback TCP proxy through authenticated ARD to remote service.");
+            var first=caller.Outgoing[host.Id];var stablePort=first.Forward(port).Port;await first.Process.DisposeAsync();
+            using(var recovery=CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                recovery.CancelAfter(TimeSpan.FromSeconds(90));
+                while(!caller.Outgoing.TryGetValue(host.Id,out var restored)||ReferenceEquals(first,restored)||!restored.Live)await Task.Delay(100,recovery.Token);
+            }
+            if(caller.Outgoing[host.Id].Forward(port).Port!=stablePort)throw new Exception("Local forwarding port changed across reconnect.");
+            await VerifyFlow();Console.WriteLine("PASS: killed ARD child recovered automatically with the same local forwarding port.");
+            var savedPeer=caller.State.Peers.Single();await cd.Pause(savedPeer);await host.Disconnect(caller.Id);
             await cd.Connect(hd.Code,"",ct,enrolling:false);
             if (hostChecks != 1 || callerChecks != 1) throw new Exception("Authorized reconnect prompted again.");
             await VerifyFlow(); Console.WriteLine("PASS: authorized reconnect without enrollment password or consent.");
             await hd.Revoke(caller.Id);
             if (host.Incoming.Count != 0 || hd.Controllers.Length != 0) throw new Exception("Revoke failed.");
-            await caller.Disconnect(host.Id);
+            await cd.Pause(caller.State.Peers.Single());
             try { await cd.Connect(hd.Code,"",ct,enrolling:false); throw new Exception("Revoked caller admitted."); }
             catch (IOException) { }
             Console.WriteLine("PASS: revocation removes ACL and denies reconnect.");
@@ -1133,7 +1269,7 @@ static class SelfTest
             for(var round=1;round<=3;round++)
             {
                 Console.WriteLine($"TEST: repeated add round {round} connecting.");
-                await cd.Connect(hd.Code,"Prototype-Access-7391",ct).WaitAsync(TimeSpan.FromSeconds(75),ct);
+                await cd.Connect(hd.Code,hd.AccessPassword,ct).WaitAsync(TimeSpan.FromSeconds(75),ct);
                 await VerifyFlow();
                 var saved=caller.State.Peers.Single();await cd.RemoveLocal(saved);
                 if(caller.State.Peers.Count!=0||caller.Outgoing.Count!=0)throw new Exception("Repeated local removal failed.");
@@ -1141,7 +1277,7 @@ static class SelfTest
             }
             await hd.Revoke(caller.Id);
             Console.WriteLine("PASS: three add, transfer, remove, and immediate re-add cycles.");
-            await hd.SetAccess(false,null,ct);
+            await hd.SetAccess(false,ct);
             if (hd.Enabled || host.Incoming.Count != 0) throw new Exception("Disable failed.");
             Console.WriteLine("PASS: host disable stops incoming sessions.");
             return 0;
@@ -1191,17 +1327,21 @@ sealed record Pairing(string Code, string Endpoint, bool Incoming);
 sealed class AccessSettings
 {
     public bool Enabled { get; set; }
-    public string? Password { get; set; }
-    public string? Salt { get; set; }
-    public string? Hash { get; set; }
+    public string? EnrollmentSecret { get; set; }
     public Dictionary<string, ControllerGrant> Controllers { get; set; } = new();
     public Dictionary<string, string> Targets { get; set; } = new();
+    public double SideWidth { get; set; } = 240;
 }
 
 // The directory routes signed public session descriptions. Passwords and flow
 // capabilities only cross ARD after both long-term identity signatures verify.
 sealed class DirectoryClient : IAsyncDisposable
 {
+    sealed class ReconnectJob(CancellationTokenSource stop)
+    {
+        public CancellationTokenSource Stop { get; }=stop;
+        public Task Task { get; set; }=Task.CompletedTask;
+    }
     readonly Engine engine;
     readonly HttpClient http;
     readonly NSec.Cryptography.Key key;
@@ -1210,7 +1350,9 @@ sealed class DirectoryClient : IAsyncDisposable
     readonly object sync = new();
     readonly string path;
     readonly AccessSettings access;
+    readonly byte[] enrollmentSecret;
     readonly ConcurrentDictionary<string, Task> jobs = new();
+    readonly ConcurrentDictionary<string,ReconnectJob> reconnects=new();
     readonly Dictionary<string, long> seen = new();
     readonly Queue<DateTime> attempts = new();
     CancellationTokenSource incoming = new();
@@ -1220,7 +1362,8 @@ sealed class DirectoryClient : IAsyncDisposable
     public string Code => code;
     public bool Online => online;
     public bool Enabled { get { lock (sync) return access.Enabled; } }
-    public string AccessPassword { get { lock(sync) return UnprotectPassword(access.Password!); } }
+    public double SideWidth { get { lock(sync)return Math.Clamp(access.SideWidth,180,360); } }
+    public string AccessPassword=>AccessPasswordFor(DateTimeOffset.UtcNow.ToUnixTimeSeconds()/60);
     public Func<Pairing, CancellationToken, Task<bool>>? Confirm { get; set; }
     public event Action? Changed;
     public event Action<string>? Notice;
@@ -1241,16 +1384,15 @@ sealed class DirectoryClient : IAsyncDisposable
         access = File.Exists(path) ? JsonSerializer.Deserialize<AccessSettings>(File.ReadAllText(path), Wire.Json)!
             : new AccessSettings();
         if (access == null || access.Controllers == null || access.Targets == null) throw new InvalidDataException("访问配置损坏。");
-        if (access.Hash != null && (Convert.FromBase64String(access.Hash).Length != 32 || access.Salt == null || Convert.FromBase64String(access.Salt).Length != 16))
-            throw new InvalidDataException("访问密码记录损坏。");
-        if(access.Password==null)
+        if(access.EnrollmentSecret==null)
         {
-            const string alphabet="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-            var password=string.Concat(Enumerable.Range(0,12).Select(_=>alphabet[RandomNumberGenerator.GetInt32(alphabet.Length)]));
-            var salt=RandomNumberGenerator.GetBytes(16);var hash=Rfc2898DeriveBytes.Pbkdf2(password,salt,600000,HashAlgorithmName.SHA256,32);
-            access.Password=ProtectPassword(password);access.Salt=Convert.ToBase64String(salt);access.Hash=Convert.ToBase64String(hash);access.Controllers.Clear();Save();
-            CryptographicOperations.ZeroMemory(hash);
+            var secret=RandomNumberGenerator.GetBytes(32);
+            try{access.EnrollmentSecret=Convert.ToBase64String(ProtectedData.Protect(secret,null,DataProtectionScope.CurrentUser));Save();}
+            finally{CryptographicOperations.ZeroMemory(secret);}
         }
+        try{enrollmentSecret=ProtectedData.Unprotect(Convert.FromBase64String(access.EnrollmentSecret),null,DataProtectionScope.CurrentUser);}
+        catch(Exception ex){throw new InvalidDataException("首次连接密码密钥损坏。",ex);}
+        if(enrollmentSecret.Length!=32){CryptographicOperations.ZeroMemory(enrollmentSecret);throw new InvalidDataException("首次连接密码密钥长度无效。");}
         // A changed directory authority requires a separate trust namespace.
         var authorityPath = Path.Combine(engine.State.Root, "directory.txt");
         if (File.Exists(authorityPath) && File.ReadAllText(authorityPath) != server.AbsoluteUri)
@@ -1262,8 +1404,13 @@ sealed class DirectoryClient : IAsyncDisposable
         File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(access, Wire.Json));
         File.Move(path + ".tmp", path, true);
     }
-    static string ProtectPassword(string password)=>Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(password),null,DataProtectionScope.CurrentUser));
-    static string UnprotectPassword(string password)=>Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(password),null,DataProtectionScope.CurrentUser));
+    public string AccessPasswordFor(long minute)
+    {
+        Span<byte> period=stackalloc byte[8];BinaryPrimitives.WriteInt64BigEndian(period,minute);
+        var digest=HMACSHA256.HashData(enrollmentSecret,period);
+        try{return (BinaryPrimitives.ReadUInt32BigEndian(digest)%1_000_000).ToString("D6");}
+        finally{CryptographicOperations.ZeroMemory(digest);}
+    }
     SignedEnvelope Sign(string route, object value)
     {
         var payload = Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(value, Wire.Json));
@@ -1312,7 +1459,54 @@ sealed class DirectoryClient : IAsyncDisposable
         File.WriteAllText(saved, JsonSerializer.Serialize(info, Wire.Json));
         code = info.Code; online = true; Changed?.Invoke();
     }
-    public void Start() => loop = Run();
+    public void Start()=>loop=Run();
+    void StartReconnects()
+    {
+        Peer[] peers;lock(engine.State.Peers)peers=engine.State.Peers.Where(p=>p.AutoConnect).ToArray();
+        foreach(var peer in peers)EnsureReconnect(peer);
+    }
+    void EnsureReconnect(Peer peer)
+    {
+        if(!peer.AutoConnect||stop.IsCancellationRequested||reconnects.ContainsKey(peer.Id))return;
+        var linked=CancellationTokenSource.CreateLinkedTokenSource(stop.Token);var job=new ReconnectJob(linked);
+        if(!reconnects.TryAdd(peer.Id,job)){linked.Dispose();return;}
+        job.Task=Supervise(peer,linked.Token);_=CleanupReconnect(peer.Id,job);
+    }
+    async Task CleanupReconnect(string id,ReconnectJob job)
+    {
+        try{await job.Task;}catch{}
+        finally{if(reconnects.TryRemove(new KeyValuePair<string,ReconnectJob>(id,job)))job.Stop.Dispose();}
+    }
+    async Task Supervise(Peer peer,CancellationToken ct)
+    {
+        var delay=1;var announced=false;
+        while(!ct.IsCancellationRequested&&peer.AutoConnect)
+        {
+            if(engine.Outgoing.TryGetValue(peer.Id,out var active)&&active.Live)
+            {
+                try{await active.Process.Exited.WaitAsync(ct);}catch(OperationCanceledException){break;}
+                continue;
+            }
+            engine.SetStatus(peer.Id,delay==1?"正在自动恢复连接…":$"自动重连等待 {delay} 秒…");
+            try
+            {
+                await ConnectOnce(peer.Code,"",false,ct,true);delay=1;announced=false;continue;
+            }
+            catch(OperationCanceledException)when(ct.IsCancellationRequested){break;}
+            catch(Exception ex)
+            {
+                engine.SetStatus(peer.Id,"自动重连中 · "+ex.Message);
+                if(!announced){Notice?.Invoke(peer.Code+" 自动重连中："+ex.Message);announced=true;}
+            }
+            try{await Task.Delay(TimeSpan.FromSeconds(delay),ct);}catch(OperationCanceledException){break;}
+            delay=Math.Min(delay*2,30);
+        }
+    }
+    async Task StopReconnect(string id)
+    {
+        if(!reconnects.TryRemove(id,out var job))return;
+        job.Stop.Cancel();try{await job.Task;}catch{}finally{job.Stop.Dispose();}
+    }
     async Task Run()
     {
         var announced = false;
@@ -1326,6 +1520,7 @@ sealed class DirectoryClient : IAsyncDisposable
                     if (Enabled) await Call<JsonElement>("/api/v1/access", new { enabled = true }, stop.Token);
                 }
                 await Poll(stop.Token);
+                StartReconnects();
                 online = true; announced = false; Changed?.Invoke();
             }
             catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
@@ -1381,18 +1576,24 @@ sealed class DirectoryClient : IAsyncDisposable
             if(!access.Enabled) return null;
             if(!request.Enroll) return access.Controllers.TryGetValue(ticket.ControllerEndpoint,out var saved) ? saved.Receipt : null;
         }
-        string? salt, hash;
         lock (sync)
         {
             var now = DateTime.UtcNow;
             while (attempts.TryPeek(out var time) && time < now.AddMinutes(-1)) attempts.Dequeue();
-            if (!access.Enabled || attempts.Count >= 10 || request.Password.Length > 128) return null;
-            attempts.Enqueue(now); salt = access.Salt; hash = access.Hash;
+            if (!access.Enabled || attempts.Count >= 10 || !Regex.IsMatch(request.Password,@"\A[0-9]{6}\z")) return null;
+            attempts.Enqueue(now);
         }
-        if (salt == null || hash == null) return null;
-        var actual = Rfc2898DeriveBytes.Pbkdf2(request.Password, Convert.FromBase64String(salt), 600000, HashAlgorithmName.SHA256, 32);
-        var valid = CryptographicOperations.FixedTimeEquals(actual, Convert.FromBase64String(hash));
-        CryptographicOperations.ZeroMemory(actual);
+        var supplied=Encoding.ASCII.GetBytes(request.Password);var valid=false;
+        try
+        {
+            var minute=DateTimeOffset.UtcNow.ToUnixTimeSeconds()/60;
+            for(var offset=0;offset<=1;offset++)
+            {
+                var expected=Encoding.ASCII.GetBytes(AccessPasswordFor(minute-offset));
+                try{valid|=CryptographicOperations.FixedTimeEquals(supplied,expected);}finally{CryptographicOperations.ZeroMemory(expected);}
+            }
+        }
+        finally{CryptographicOperations.ZeroMemory(supplied);}
         if (!valid) return null;
         await confirmations.WaitAsync(ct);
         try
@@ -1411,26 +1612,16 @@ sealed class DirectoryClient : IAsyncDisposable
         }
         finally { confirmations.Release(); }
     }
-    public async Task SetAccess(bool enabled, string? password, CancellationToken ct = default)
+    public async Task SetAccess(bool enabled, CancellationToken ct = default)
     {
         await edits.WaitAsync(ct);
         try
         {
-            if (password != null && (password.Length < 8 || password.Length > 128)) throw new InvalidDataException("访问密码应为 8–128 个字符。");
-            lock(sync)if(password==UnprotectPassword(access.Password!))password=null;
-            lock (sync) if (enabled && password == null && access.Hash == null) throw new InvalidDataException("请先设置访问密码。");
             lock (sync) { access.Enabled = false; Save(); }
             incoming.Cancel();
             await engine.StopIncoming();
             await Task.WhenAll(jobs.Values);
             incoming.Dispose(); incoming = CancellationTokenSource.CreateLinkedTokenSource(stop.Token);
-            if (password != null)
-            {
-                var salt = RandomNumberGenerator.GetBytes(16);
-                var hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, 600000, HashAlgorithmName.SHA256, 32);
-                lock (sync) { access.Password=ProtectPassword(password);access.Salt = Convert.ToBase64String(salt); access.Hash = Convert.ToBase64String(hash); access.Controllers.Clear(); Save(); }
-                CryptographicOperations.ZeroMemory(hash);
-            }
             if (code.Length == 0) await Register(ct);
             await Call<JsonElement>("/api/v1/access", new { enabled }, ct);
             lock (sync) { access.Enabled = enabled; Save(); }
@@ -1438,9 +1629,16 @@ sealed class DirectoryClient : IAsyncDisposable
         }
         finally { edits.Release(); }
     }
-    public async Task Connect(string machine, string password, CancellationToken ct = default, bool enrolling = true)
+    public async Task Connect(string machine,string password,CancellationToken ct=default,bool enrolling=true)
+    {
+        await ConnectOnce(machine,password,enrolling,ct,false);
+        machine=Wire.Machine(machine);Peer peer;lock(engine.State.Peers)peer=engine.State.Peers.Single(p=>p.Code==machine);
+        peer.AutoConnect=true;engine.State.Save();EnsureReconnect(peer);Changed?.Invoke();
+    }
+    async Task ConnectOnce(string machine,string password,bool enrolling,CancellationToken ct,bool background)
     {
         machine = Wire.Machine(machine);
+        password=password.Trim();
         if (code.Length == 0) await Register(ct);
         if (machine == Code) throw new InvalidOperationException("不能连接本机。");
         var target = await Call<MachineInfo>("/api/v1/lookup", new { code = machine }, ct);
@@ -1454,15 +1652,19 @@ sealed class DirectoryClient : IAsyncDisposable
             if (Confirm == null || !await Confirm(new Pairing(machine, target.Endpoint, false), ct)) throw new OperationCanceledException("尚未核对对端 EndpointId。");
             lock (sync) { access.Targets[machine] = target.Endpoint; Save(); }
         }
-        if (engine.Outgoing.TryGetValue(target.Endpoint, out var active) && active.Live) return;
+        if(engine.Outgoing.TryGetValue(target.Endpoint,out var active))
+        {
+            if(active.Live)return;
+            await engine.DropOutgoing(target.Endpoint);
+        }
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, stop.Token);
-        timeout.CancelAfter(TimeSpan.FromMinutes(5));
+        timeout.CancelAfter(background?TimeSpan.FromSeconds(75):TimeSpan.FromMinutes(5));
         var dir = engine.State.NewSessionDirectory();
         var transferred = false;
         try
         {
             var local = await Ard.Identity(dir, timeout.Token);
-            var request = new ServerRequest(machine, target.Endpoint, local, Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeSeconds());
+            var request = new ServerRequest(machine,target.Endpoint,local,Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow.AddSeconds(background?60:300).ToUnixTimeSeconds());
             await Call<JsonElement>("/api/v1/connect", request, timeout.Token);
             ServerOffer? offer = null;
             while (offer == null)
@@ -1490,10 +1692,27 @@ sealed class DirectoryClient : IAsyncDisposable
     }
     public async Task RemoveLocal(Peer peer)
     {
-        if(engine.Outgoing.TryRemove(peer.Id,out var session))await session.DisposeAsync();
+        peer.AutoConnect=false;engine.State.Save();await StopReconnect(peer.Id);await engine.RemoveOutgoing(peer.Id);
         engine.State.Remove(peer.Id);
         lock(sync){access.Targets.Remove(peer.Code);Save();}
         Changed?.Invoke();
+    }
+    public void RestoreLocal(Peer snapshot)
+    {
+        if(snapshot.Grant==null)throw new InvalidDataException("设备授权记录不完整，无法撤销移除。");
+        var peer=engine.State.GetOrAdd(snapshot.Id,snapshot.Code,snapshot.Grant);
+        peer.Name=snapshot.Name;peer.AutoConnect=snapshot.AutoConnect;engine.State.Save();
+        lock(sync){access.Targets[peer.Code]=peer.Id;Save();}
+        if(peer.AutoConnect)EnsureReconnect(peer);Changed?.Invoke();
+    }
+    public void SetSideWidth(double width)
+    {
+        lock(sync){access.SideWidth=Math.Clamp(width,180,360);Save();}
+    }
+    public async Task Pause(Peer peer)
+    {
+        peer.AutoConnect=false;engine.State.Save();await StopReconnect(peer.Id);await engine.DropOutgoing(peer.Id);
+        engine.SetStatus(peer.Id,"已授权 · 已暂停");Changed?.Invoke();
     }
     public void ExportIdentity(string destination, string password)
     {
@@ -1512,10 +1731,13 @@ sealed class DirectoryClient : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         stop.Cancel(); incoming.Cancel();
+        foreach(var job in reconnects.Values)job.Stop.Cancel();
         try { await loop; } catch { }
         await engine.StopIncoming();
         try { await Task.WhenAll(jobs.Values); } catch { }
-        http.Dispose(); key.Dispose(); incoming.Dispose(); stop.Dispose();
+        try{await Task.WhenAll(reconnects.Values.Select(j=>j.Task));}catch{}
+        foreach(var job in reconnects.Values)job.Stop.Dispose();reconnects.Clear();
+        CryptographicOperations.ZeroMemory(enrollmentSecret);http.Dispose();key.Dispose();incoming.Dispose();stop.Dispose();
     }
 }
 sealed record IdentityBackup(int Version, string Endpoint, string Salt, string Nonce, string Ciphertext, string Tag);
@@ -1574,11 +1796,57 @@ static class IdentityStore
     }
 }
 
+sealed class ForwardHub : IAsyncDisposable
+{
+    readonly object sync=new();
+    readonly Dictionary<int,LocalForwarder> forwards=new();
+    Session? current;
+    int disposed;
+    public Dictionary<string,string> Mappings { get; }=new();
+    public Session? Current { get { lock(sync)return current; } }
+    public void Attach(Session session)
+    {
+        LocalForwarder[] bridges;
+        lock(sync){if(disposed!=0)throw new ObjectDisposedException(nameof(ForwardHub));current=session;bridges=forwards.Values.ToArray();}
+        foreach(var bridge in bridges)bridge.Reset();
+    }
+    public void Detach(Session session)
+    {
+        LocalForwarder[] bridges;
+        lock(sync)
+        {
+            if(!ReferenceEquals(current,session))return;
+            current=null;bridges=forwards.Values.ToArray();
+        }
+        foreach(var bridge in bridges)bridge.Reset();
+    }
+    public LocalForwarder Forward(int target)
+    {
+        lock(sync)
+        {
+            if(disposed!=0)throw new ObjectDisposedException(nameof(ForwardHub));
+            var session=current;
+            if(session==null||!session.Live)throw new IOException("设备正在自动重连。");
+            if(!session.TcpPorts.Contains(target))throw new IOException("被控端未授权此 TCP 端口。");
+            if(!forwards.TryGetValue(target,out var bridge))forwards[target]=bridge=new LocalForwarder(this,target,session.UdpPorts.Contains(target));
+            return bridge;
+        }
+    }
+    public async ValueTask DisposeAsync()
+    {
+        if(Interlocked.Exchange(ref disposed,1)!=0)return;
+        LocalForwarder[] bridges;lock(sync){current=null;bridges=forwards.Values.ToArray();forwards.Clear();}
+        KeyValuePair<string,string>[] mappings;lock(Mappings){mappings=Mappings.ToArray();Mappings.Clear();}
+        foreach(var mapping in mappings)await WindowsShares.Remove(mapping.Key,mapping.Value);
+        foreach(var bridge in bridges)await bridge.DisposeAsync();
+    }
+}
+
 sealed class LocalForwarder : IAsyncDisposable
 {
     readonly TcpListener listener;
     readonly UdpClient? udp;
-    readonly Session session;
+    readonly ForwardHub hub;
     readonly int target;
     readonly CancellationTokenSource stop = new();
     readonly ConcurrentDictionary<int,Task> tasks = new();
@@ -1588,11 +1856,11 @@ sealed class LocalForwarder : IAsyncDisposable
     readonly ConcurrentDictionary<IPEndPoint,LocalUdpFlow> udpFlows = new();
     int serial;
     public int Port => ((IPEndPoint)listener.LocalEndpoint).Port;
-    public LocalForwarder(Session session,int target)
+    public LocalForwarder(ForwardHub hub,int target,bool udpEnabled)
     {
-        this.session=session;this.target=target;
+        this.hub=hub;this.target=target;
         listener=new TcpListener(IPAddress.Loopback,0);listener.Start();
-        if(session.UdpPorts.Contains(target)) udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,Port));
+        if(udpEnabled)udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,Port));
         accept=Accept();receive=udp == null ? Task.CompletedTask : ReceiveUdp();
     }
     async Task Accept()
@@ -1612,7 +1880,11 @@ sealed class LocalForwarder : IAsyncDisposable
     async Task Forward(TcpClient client)
     {
         using(client)
-        try { using var upstream=await session.OpenTcp(target,stop.Token); await Wire.Bridge(client,upstream,stop.Token); }
+        try
+        {
+            var session=hub.Current??throw new IOException("设备正在自动重连。");
+            using var upstream=await session.OpenTcp(target,stop.Token);await Wire.Bridge(client,upstream,stop.Token);
+        }
         catch(Exception ex) when(ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { }
     }
     async Task ReceiveUdp()
@@ -1626,6 +1898,8 @@ sealed class LocalForwarder : IAsyncDisposable
                 if(!udpFlows.TryGetValue(packet.RemoteEndPoint,out var flow))
                 {
                     if(udpFlows.Count >= 64) continue;
+                    var session=hub.Current;
+                    if(session==null||!session.Live||!session.UdpPorts.Contains(target))continue;
                     flow=new LocalUdpFlow(session,target,packet.RemoteEndPoint,async (data,remote) =>
                         await udp.SendAsync(data,remote,stop.Token),stop.Token);
                     udpFlows[packet.RemoteEndPoint]=flow;
@@ -1637,6 +1911,10 @@ sealed class LocalForwarder : IAsyncDisposable
             }
         }
         catch(Exception ex) when(ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { }
+    }
+    public void Reset()
+    {
+        foreach(var pair in udpFlows.ToArray())if(udpFlows.TryRemove(pair.Key,out var flow))flow.Dispose();
     }
     public async ValueTask DisposeAsync()
     {
@@ -1702,7 +1980,8 @@ static class WindowsShares
         """;
         var drive=(await Run(script,new { Remote=remote,Port=bridge.Port,User=user,Password=password },ct)).Trim();
         if(!Regex.IsMatch(drive,@"\A[D-Z]:\z")) throw new IOException("Windows 返回无效共享映射。");
-        lock(session.Mappings) session.Mappings[drive]=remote;
+        var mappings=session.Hub?.Mappings??throw new IOException("共享转发入口不可用。");
+        lock(mappings)mappings[drive]=remote;
         return drive+"\\";
     }
     public static async Task Remove(string drive,string remote)

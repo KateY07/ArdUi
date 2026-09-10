@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>ArdUi</AssemblyName>
-    <Version>1.0.0-pre.10</Version>
+    <Version>1.0.0-pre.11</Version>
     <SelfContained>false</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
@@ -18,10 +18,9 @@
   <ItemGroup>
     <Compile Include="ArdUi.cs" />
     <PackageReference Include="Avalonia.Desktop" Version="11.3.13" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.13" />
+    <PackageReference Include="Avalonia.Themes.Simple" Version="11.3.13" />
     <PackageReference Include="Avalonia.Headless" Version="11.3.13" />
     <PackageReference Include="NSec.Cryptography" Version="25.4.0" />
-    <PackageReference Include="ZXing.Net" Version="0.16.11" />
     <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
     <EmbeddedResource Include="release-public.pem" LogicalName="ArdUi.release-public.pem" />

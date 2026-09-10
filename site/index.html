@@ -3,17 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ArdUi v1.pre10</title>
+<title>ArdUi v1.pre11</title>
 <style>
 :root{color-scheme:dark;--bg:#0b0d10;--card:#15191f;--line:#2a313b;--text:#eef2f6;--muted:#a8b2bf;--accent:#7dd3fc}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.65 system-ui,"Microsoft YaHei",sans-serif}.wrap{max-width:850px;margin:auto;padding:56px 22px 80px}h1{font-size:42px;margin:0 0 4px}.tag{color:var(--accent);font-weight:700}.muted{color:var(--muted)}section{margin-top:34px;padding:24px;background:var(--card);border:1px solid var(--line);border-radius:14px}h2{margin:0 0 12px;font-size:21px}pre{overflow:auto;padding:16px;background:#080a0d;border:1px solid var(--line);border-radius:9px;color:#d8f4ff}button{border:0;border-radius:8px;padding:10px 15px;background:var(--accent);color:#06202b;font-weight:700;cursor:pointer}li{margin:.45em 0}code{color:#c8ebff}a{color:var(--accent)}@media(max-width:520px){h1{font-size:34px}.wrap{padding-top:36px}section{padding:18px}}
 </style>
 </head>
 <body><main class="wrap">
 <div class="tag">Avalonia 预发布版</div>
-<h1>ArdUi v1.pre10</h1>
+<h1>ArdUi v1.pre11</h1>
 <p class="muted">通过永久设备身份与 ARD 端到端连接，访问已授权 Windows 设备的远程桌面和 SMB 文件共享。</p>
 <section><h2>一键安装</h2><p>先安装 Microsoft .NET 8 Runtime x64，然后在普通 PowerShell 窗口执行：</p><pre id="cmd">irm https://f.visnova.cn/ardui/install.ps1 | iex</pre><button onclick="navigator.clipboard.writeText(document.querySelector('#cmd').textContent).then(()=>this.textContent='已复制')">复制命令</button><p class="muted">支持 Windows 11 24H2 / Windows Server 2025 x64 及以上。不请求管理员权限，不安装 Wintun。</p></section>
-<section><h2>使用流程</h2><ol><li>默认关闭被控；开启后才显示本机机器码、完整 EndpointId 和首次生成的随机密码，点击按钮可复制 ID。</li><li>被控密码直接显示，编辑后自动保存；仅在有人正在访问时显示活动设备，可一键断开。</li><li>输入对方 6 位机器码和访问密码添加设备；首次请求由被控端在主界面点击“是”或“否”。</li><li>双方通过独立渠道核对完整 EndpointId。获准后，从设备列表直接打开远程桌面或 SMB 文件共享。</li><li>活动连接显示 P2P 直连或 ArdRelay 中继、TCP/PsPing RTT 与 UDP 往返延迟。</li></ol></section>
+<section><h2>使用流程</h2><ol><li>默认关闭被控；开启后显示本机机器码；首次密码点击后显示 10 秒，EndpointId 收纳在小型折叠菜单中。</li><li>在授权列表上方输入对方机器码和首次密码；首次请求由被控端点击“是”或“否”。</li><li>双方通过独立渠道核对完整 EndpointId。获准后无需再次输入首次密码，直至被控端人工撤销。</li><li>从单行设备列表直接打开远程桌面或 SMB 文件共享；断线后自动重建 ARD 会话并保持本地转发端口。</li><li>活动连接显示路径类型、UDP 往返延迟和低频测得的预计可用带宽；网络诊断按需展开。</li></ol></section>
 <section><h2>身份与安全</h2><p>安装脚本首次创建 <code>%LOCALAPPDATA%\ArdUi\data\device\identity</code>；修复和升级保留身份、机器编号、已授权设备、访问密码和“允许被控”设置。EndpointId 是永久公钥指纹；访问密码只在经过身份验证的端到端连接中发送，协调服务器不接收密码或密码哈希。</p><p>首次安装仍需信任本站提供的脚本与发布文件。首次设备核对请使用电话、当面等独立渠道。</p></section>
-<section><h2>当前范围</h2><p>v1.pre10 是无 XAML、单 C# 核心实现的 Avalonia 图形版。安装脚本分别校验 ArdUi 与 ARD 2.0.0-pre.6，并固定 ArdRelay 公钥；RDP 本地入口同时转发 TCP 与 UDP。</p><p>ArdUi SHA-256 <code>66dcdc8936446b265c984127bea5766a8bfba3cbf357d69965a683fa252712aa</code></p></section>
+<section><h2>当前范围</h2><p>v1.pre11 是使用 Avalonia SimpleTheme、无 XAML、单 C# 核心实现的图形版。安装脚本配置当前用户开机自启动，分别校验 ArdUi 与 ARD 2.0.0-pre.6，并固定 ArdRelay 公钥；已通过 SHA-256 的本地文件会直接复用，只下载缺失或变化的文件。</p><p>ArdUi SHA-256 <code>36e05397db04283a84c5939c11a4e6466de2cbafeec60c77c745eb1e7805f7ae</code></p></section>
 </main></body></html>
