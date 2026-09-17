@@ -1,7 +1,7 @@
-param([string]$ArdPath)
+param([string]$ArdPath,[string]$Python='python')
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-$version='v1.pre11'
+$version='v2.pre1'
 Push-Location $PSScriptRoot
 try {
     New-Item -ItemType Directory -Force tools,dist | Out-Null
@@ -15,7 +15,12 @@ try {
     if($LASTEXITCODE -ne 0 -or $ardVersion -ne 'ard 2.0.0-pre.6'){throw "ARD 2.0.0-pre.6 is required; found '$ardVersion'."}
     $output=Join-Path $PSScriptRoot "dist/final-$version"
     $obj=Join-Path $PSScriptRoot "dist/obj-$version/"
-    if(Test-Path $output){Remove-Item -LiteralPath $output -Recurse -Force}
+    $distRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'dist'))+[IO.Path]::DirectorySeparatorChar
+    if(-not [IO.Path]::GetFullPath($output).StartsWith($distRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Invalid publish output path.'}
+    if(Test-Path -LiteralPath $output){
+        if((Get-Item -LiteralPath $output).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Publish output must not be a directory link.'}
+        Remove-Item -LiteralPath $output -Recurse -Force
+    }
     dotnet publish ArdUi.csproj -c Release -r win-x64 --self-contained false -o $output `
         -p:PublishSingleFile=true -p:PublishTrimmed=false `
         -p:BaseIntermediateOutputPath=$obj -p:MSBuildProjectExtensionsPath=$obj
@@ -24,13 +29,21 @@ try {
     if(-not (Test-Path $exe -PathType Leaf)){throw 'Publish did not produce ArdUi.exe.'}
     $extra=@(Get-ChildItem -LiteralPath $output -File | Where-Object Name -ne 'ArdUi.exe')
     if($extra.Count){throw 'Framework-dependent single-file publish produced unexpected sidecar files: '+(($extra.Name) -join ', ')}
-    $test=Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru -NoNewWindow
-    if($test.ExitCode -ne 0){throw 'Headless self-test failed.'}
+    foreach($mode in @('self-test','transit-test')){
+        $stdout=Join-Path $output ($mode+'.stdout');$stderr=Join-Path $output ($mode+'.stderr')
+        $test=Start-Process -FilePath $exe -ArgumentList ('--'+$mode) -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        Get-Content -LiteralPath $stdout;Get-Content -LiteralPath $stderr
+        if($test.ExitCode -ne 0){throw "$mode failed."}
+    }
     $previousArdPath=$env:ARDUI_ARD_PATH
     try{
         $env:ARDUI_ARD_PATH=(Resolve-Path -LiteralPath 'tools/ard.exe').Path
-        $flow=Start-Process -FilePath $exe -ArgumentList '--prototype-test' -Wait -PassThru -NoNewWindow
-        if($flow.ExitCode -ne 0){throw 'Two-device end-to-end regression failed.'}
+        & $Python tests/test_transit_server.py
+        if($LASTEXITCODE -ne 0){throw 'Directory authorization regression failed.'}
+        & $Python tests/integration_v2.py --dll $exe
+        if($LASTEXITCODE -ne 0){throw 'Real ARD candidate and failover regression failed.'}
+        & $Python tests/integration_v2.py --dll $exe --prototype
+        if($LASTEXITCODE -ne 0){throw 'Two-device enrollment regression failed.'}
     }
     finally{$env:ARDUI_ARD_PATH=$previousArdPath}
     $hash=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()

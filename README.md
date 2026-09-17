@@ -2,7 +2,9 @@
 
 ArdUi 是基于 ARD 的 Windows 远程访问应用，使用 Avalonia 和 .NET 8，以简约的“已授权设备”列表为主界面。用户通过 6 位机器编号添加设备，经密码验证、双方身份核对和被控端同意后，即可从列表打开远程桌面或 SMB 文件共享。
 
-当前发布的是 v1.pre11 Avalonia 图形预发布版。核心客户端由单个 C# 文件实现，不使用 XAML；以依赖框架的 Windows x64 单文件发布，运行前需要安装 .NET 8 Runtime。用户通过 `irm https://f.visnova.cn/ardui/install.ps1 | iex` 安装。
+当前发布的是 v2.pre1 Avalonia 图形预发布版。核心客户端由单个 C# 文件实现，不使用 XAML；以依赖框架的 Windows x64 单文件发布，运行前需要安装 .NET 8 Runtime。用户通过 `irm https://f.visnova.cn/ardui/install.ps1 | iex` 安装。
+
+v2.pre1 增加独立 ArdTransit 候选转发、内层端到端加密、TCP/原生 UDP 路径切换和 ZIP 诊断导出。需双方升级；身份与已有授权保留。普通客户端不会自动替他人转发。详见[实现方案](ardui增强中继畅想(暂不实现).md)、[节点运行说明](transit/README.md)与[验证记录](V2-VALIDATION.md)。
 
 ## 产品组成
 
@@ -126,7 +128,7 @@ ArdUi 访问密码是首次添加设备的授权口令。Windows 远程桌面和
 | 地址 | 内容 |
 | --- | --- |
 | `https://f.visnova.cn/ardui/` | 安装命令、使用流程、安全边界和当前限制。 |
-| `https://f.visnova.cn/ardui/ArdUi-v1.pre11.exe` | 由安装脚本自动获取的框架依赖单文件客户端。 |
+| `https://f.visnova.cn/ardui/ArdUi-v2.pre1.exe` | 由安装脚本自动获取的框架依赖单文件客户端。 |
 | `https://f.visnova.cn/ardui/ard-v2.0.0-pre.6.exe` | 由安装脚本单独获取并校验的 ARD 引擎。 |
 | `https://f.visnova.cn/ardui/install.ps1` | 一键下载、安装/修复并启动的 PowerShell 脚本。 |
 

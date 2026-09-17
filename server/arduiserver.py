@@ -8,21 +8,77 @@ import re
 import secrets
 import sqlite3
 import string
+import tempfile
 import time
 from http import HTTPStatus
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey, Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
 
 DB = os.environ.get('ARDUI_DATABASE', '/var/lib/arduiserver/devices.sqlite3')
 CODE = re.compile(r'[A-Z0-9]{6}\Z')
 ENDPOINT = re.compile(r'[0-9a-f]{64}\Z')
 TICKET = re.compile(r'[0-9a-f]{32}\Z')
+SIGNING_KEY = os.environ.get('ARDUI_TRANSIT_KEY', DB + '.transit-key')
+VERSION = 'v2.pre1'
+
+def transit_signer():
+    folder = os.path.dirname(os.path.abspath(SIGNING_KEY))
+    os.makedirs(folder, exist_ok=True)
+    if not os.path.exists(SIGNING_KEY):
+        fd, pending = tempfile.mkstemp(prefix='.transit-key-', dir=folder)
+        try:
+            with os.fdopen(fd, 'wb') as out:
+                out.write(secrets.token_bytes(32))
+                out.flush()
+                os.fsync(out.fileno())
+            try: os.link(pending, SIGNING_KEY)
+            except FileExistsError: print('Transit signing identity already initialized by another worker.', flush=True)
+        finally: os.unlink(pending)
+    with open(SIGNING_KEY, 'rb') as source:
+        return Ed25519PrivateKey.from_private_bytes(source.read())
+
+def signed_transit(value):
+    key = transit_signer()
+    payload = base64.b64encode(json.dumps(value, separators=(',', ':')).encode()).decode()
+    endpoint = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+    issued, nonce = int(time.time()), secrets.token_hex(16)
+    message = f'ArdUiServer/1\n/transit-ticket/v2\n{endpoint}\n{issued}\n{nonce}\n{payload}'.encode()
+    return dict(endpoint=endpoint, issuedAt=issued, nonce=nonce, payload=payload,
+                signature=base64.b64encode(key.sign(message)).decode())
+
+def check_grant(value, controller, target):
+    try:
+        if value['endpoint'] != target: raise ValueError('grant signer')
+        message = f"ArdUiServer/1\n/grant/v1\n{target}\n{value['issuedAt']}\n{value['nonce']}\n{value['payload']}".encode()
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(target)).verify(base64.b64decode(value['signature'], validate=True), message)
+        grant = json.loads(base64.b64decode(value['payload'], validate=True))
+        if grant['controllerEndpoint'] != controller or grant['targetEndpoint'] != target: raise ValueError('grant pair')
+    except (ValueError, KeyError, TypeError, InvalidSignature):
+        raise ApiError(403, '转发需要被控端签名的永久授权。')
+
+def check_approval(value, expected, now):
+    try:
+        target=expected['b']
+        if value['endpoint']!=target or type(value['issuedAt']) is not int or abs(now-value['issuedAt'])>120: raise ValueError('approval signer or time')
+        message=f"ArdUiServer/1\n/transit-approval/v2\n{target}\n{value['issuedAt']}\n{value['nonce']}\n{value['payload']}".encode()
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(target)).verify(base64.b64decode(value['signature'],validate=True),message)
+        approval=json.loads(base64.b64decode(value['payload'],validate=True))
+        if any(approval[k]!=v for k,v in expected.items()): raise ValueError('approval binding')
+        if type(approval['expires']) is not int or not now<approval['expires']<=now+120: raise ValueError('approval expiry')
+    except (ValueError,KeyError,TypeError,InvalidSignature):
+        raise ApiError(403,'需要被控端为本次候选和双方临时身份签名批准。')
 
 class ApiError(Exception):
     def __init__(self, status, message): self.status, self.message = status, message
 
+class Connection(sqlite3.Connection):
+    def __exit__(self, *args):
+        try: return super().__exit__(*args)
+        finally: self.close()
+
 def database():
-    db = sqlite3.connect(DB, timeout=15)
+    db = sqlite3.connect(DB, timeout=15, factory=Connection)
     db.row_factory = sqlite3.Row
     db.execute('PRAGMA foreign_keys=ON')
     return db
@@ -46,6 +102,14 @@ def initialize():
           PRIMARY KEY(endpoint,nonce));
         CREATE TABLE IF NOT EXISTS limits(name TEXT, window INTEGER, count INTEGER,
           PRIMARY KEY(name,window));
+        CREATE TABLE IF NOT EXISTS transit_nodes(
+          endpoint TEXT PRIMARY KEY REFERENCES devices(endpoint), seen INTEGER NOT NULL,
+          capacity INTEGER NOT NULL, active INTEGER NOT NULL, mbps INTEGER NOT NULL, metrics TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS transit_routes(
+          id TEXT PRIMARY KEY, a TEXT NOT NULL, b TEXT NOT NULL, c TEXT NOT NULL,
+          expires INTEGER NOT NULL, lease_a INTEGER NOT NULL, lease_b INTEGER NOT NULL,
+          status TEXT NOT NULL, ticket TEXT NOT NULL, offer TEXT);
+        CREATE INDEX IF NOT EXISTS transit_owner ON transit_routes(c,status);
         ''')
     os.chmod(DB, 0o600)
 
@@ -96,6 +160,8 @@ def registered(db, endpoint):
 
 def dispatch(path, endpoint, data, ip, envelope):
     now=int(time.time())
+    if path.startswith('/api/v2/transit/'):
+        return transit_dispatch(path, endpoint, data, envelope, now)
     if path == '/api/v1/register':
         with database() as db:
             row=db.execute('SELECT * FROM devices WHERE endpoint=?',(endpoint,)).fetchone()
@@ -202,11 +268,78 @@ def dispatch(path, endpoint, data, ip, envelope):
             return result
     raise ApiError(404,'接口不存在。')
 
+def transit_dispatch(path, endpoint, data, envelope, now):
+    with database() as db:
+        db.execute('BEGIN IMMEDIATE')
+        registered(db, endpoint)
+        db.execute('DELETE FROM transit_nodes WHERE seen<?', (now-3600,))
+        db.execute("UPDATE transit_routes SET status='closed' WHERE min(lease_a,lease_b)<? OR (status='pending' AND expires<?)", (now, now))
+        db.execute('DELETE FROM transit_routes WHERE expires<? AND status=?', (now-3600, 'closed'))
+        if path == '/api/v2/transit/key':
+            return {'endpoint': signed_transit({})['endpoint'], 'version': VERSION}
+        if path == '/api/v2/transit/heartbeat':
+            capacity, active, mbps = (data.get(k) for k in ('capacity', 'active', 'mbps'))
+            if type(capacity) is not int or not 1 <= capacity <= 32 or type(active) is not int or not 0 <= active <= capacity or type(mbps) is not int or not 1 <= mbps <= 10000:
+                raise ApiError(400, '无效中继容量。')
+            metrics = data.get('metrics', {})
+            if not isinstance(metrics, dict) or len(json.dumps(metrics)) > 4096: raise ApiError(400, '无效心跳。')
+            db.execute('INSERT INTO transit_nodes VALUES(?,?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET seen=excluded.seen,capacity=excluded.capacity,active=excluded.active,mbps=excluded.mbps,metrics=excluded.metrics',
+                       (endpoint, now, capacity, active, mbps, json.dumps(metrics)))
+            rows = db.execute("SELECT * FROM transit_routes WHERE c=? AND status IN ('pending','ready') ORDER BY expires LIMIT 32", (endpoint,)).fetchall()
+            return {'jobs': [json.loads(r['ticket']) for r in rows if r['status']=='pending'],
+                    'leases': {r['id']: min(r['lease_a'], r['lease_b']) for r in rows}, 'version': VERSION}
+        if path == '/api/v2/transit/candidates':
+            target = text(data, 'target', ENDPOINT)
+            rows = db.execute('SELECT endpoint,capacity,active,mbps,seen FROM transit_nodes WHERE seen>=? AND active<capacity AND endpoint NOT IN (?,?) ORDER BY active*1.0/capacity,seen DESC LIMIT 3',
+                              (now-20, endpoint, target)).fetchall()
+            return {'candidates': [dict(r) for r in rows]}
+        if path == '/api/v2/transit/request':
+            route = text(data, 'route', TICKET)
+            target, candidate = text(data, 'target', ENDPOINT), text(data, 'candidate', ENDPOINT)
+            a_session, b_session = text(data, 'aSession', ENDPOINT), text(data, 'bSession', ENDPOINT)
+            if len({endpoint, target, candidate}) != 3: raise ApiError(400, '转发需要三个不同的设备。')
+            check_grant(data.get('grant'), endpoint, target)
+            check_approval(data.get('approval'), dict(route=route,a=endpoint,b=target,c=candidate,aSession=a_session,bSession=b_session), now)
+            node = db.execute('SELECT * FROM transit_nodes WHERE endpoint=? AND seen>=?', (candidate, now-20)).fetchone()
+            count = db.execute("SELECT count(*) FROM transit_routes WHERE c=? AND status IN ('pending','ready')", (candidate,)).fetchone()[0]
+            per_caller = db.execute("SELECT count(*) FROM transit_routes WHERE a=? AND status IN ('pending','ready')", (endpoint,)).fetchone()[0]
+            if node is None or count >= node['capacity'] or per_caller >= 6: raise ApiError(429, '候选中继容量已满或已离线。')
+            ticket = signed_transit(dict(route=route, a=endpoint, b=target, c=candidate, aSession=a_session, bSession=b_session, expires=now+90, mbps=min(node['mbps'],1000)))
+            try:
+                db.execute('INSERT INTO transit_routes VALUES(?,?,?,?,?,?,?,?,?,NULL)',
+                           (route, endpoint, target, candidate, now+90, now+90, now+90, 'pending', json.dumps(ticket)))
+            except sqlite3.IntegrityError: raise ApiError(409, '转发票据已使用。')
+            return {'ticket': ticket}
+        match = re.fullmatch(r'/api/v2/transit/routes/([0-9a-f]{32})(/ready|/renew|/close)?', path)
+        if match:
+            route, action = match.groups()
+            row = db.execute('SELECT * FROM transit_routes WHERE id=?', (route,)).fetchone()
+            if row is None or endpoint not in (row['a'],row['b'],row['c']): raise ApiError(404, '转发会话不存在。')
+            if action == '/close':
+                db.execute("UPDATE transit_routes SET status='closed' WHERE id=?", (route,))
+                return {'ok': True}
+            if row['status']=='closed': raise ApiError(410, '转发租约已结束。')
+            if action == '/ready':
+                if endpoint != row['c'] or row['status'] != 'pending': raise ApiError(403, '无权发布转发入口。')
+                if data.get('route') != route: raise ApiError(400, '转发编号不匹配。')
+                for name in ('aRelaySession', 'bRelaySession'): text(data, name, ENDPOINT)
+                for name in ('aToken', 'bToken'): text(data, name, TICKET)
+                db.execute("UPDATE transit_routes SET status='ready',offer=? WHERE id=?", (json.dumps(envelope), route))
+                return {'ok': True}
+            if action == '/renew':
+                if endpoint == row['a']: column='lease_a'
+                elif endpoint == row['b']: column='lease_b'
+                else: raise ApiError(403, '中继不能代替双方续期。')
+                db.execute(f'UPDATE transit_routes SET {column}=? WHERE id=?', (now+90,route))
+                return {'ok': True}
+            return {'status': row['status'], 'ticket': json.loads(row['ticket']), 'offer': json.loads(row['offer']) if row['offer'] else None}
+    raise ApiError(404, '中继接口不存在。')
+
 def application(environ,start_response):
     status=200
     try:
         path=environ.get('PATH_INFO','')
-        if path=='/api/health' and environ['REQUEST_METHOD']=='GET': result={'service':'arduiserver','version':'v1.pre7-console','ok':True}
+        if path=='/api/health' and environ['REQUEST_METHOD']=='GET': result={'service':'arduiserver','version':VERSION,'ok':True}
         elif environ['REQUEST_METHOD']!='POST': raise ApiError(405,'此接口仅接受 POST。')
         else:
             try: length=int(environ.get('CONTENT_LENGTH') or 0)

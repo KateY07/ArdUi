@@ -2,6 +2,8 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.IO.Compression;
+using System.Threading.Channels;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -27,10 +29,10 @@ using SkiaSharp;
 
 namespace ArdUi;
 
-// All application implementation lives in this file. ARD owns peer cryptography.
+// ARD authenticates each hop; the v2 overlay authenticates and preserves the A–B session.
 static class Program
 {
-    public const string Version = "v1.pre11";
+    public const string Version = "v2.pre1";
     public static string DataRoot => Path.GetFullPath(Environment.GetEnvironmentVariable("ARDUI_DATA_ROOT") ?? Path.Combine(AppContext.BaseDirectory,"data"));
     [STAThread]
     public static int Main(string[] args)
@@ -45,6 +47,8 @@ static class Program
                 return SelfTest.RunAsync().GetAwaiter().GetResult();
             if (args.Contains("--prototype-test"))
                 return SelfTest.Prototype().GetAwaiter().GetResult();
+            if (args.Contains("--transit-test"))
+                return TransitTest.Run(args).GetAwaiter().GetResult();
             if (args.Length == 2 && args[0] == "--render-preview")
                 return Preview.Render(args[1]);
             return AppBuilder.Configure<App>().UsePlatformDetect().LogToTrace()
@@ -178,6 +182,13 @@ static class Wire
         return value;
     }
     public static int Port() { var l = new TcpListener(IPAddress.Loopback, 0); l.Start(); var p = ((IPEndPoint)l.LocalEndpoint).Port; l.Stop(); return p; }
+    public static void ConfigureUdp(UdpClient udp)
+    {
+        udp.Client.ReceiveBufferSize=1<<20;
+        if(OperatingSystem.IsWindows())
+            try{udp.Client.IOControl(unchecked((int)0x9800000C),new byte[4],null);}
+            catch(SocketException ex){Diagnostics.Log("udp-socket-option",ex.Message);}
+    }
     public static async Task<byte[]> Read(Stream s, int size, CancellationToken ct)
     { var b = new byte[size]; await s.ReadExactlyAsync(b, ct); return b; }
     public static async Task WriteJson<T>(Stream s, T value, CancellationToken ct)
@@ -272,6 +283,7 @@ sealed class Child : IAsyncDisposable
         while (await reader.ReadLineAsync() is { } line)
         {
             lines.Enqueue(line); while (lines.Count > 100) lines.TryDequeue(out _);
+            Diagnostics.Log("ard",line);
             var transport = Regex.Match(line, "transport=\\\"(?<v>direct|relay)\\\"");
             var kind = Regex.Match(line, "network=\\\"(?<v>ipv4|ipv6|relay)\\\"");
             var rtt = Regex.Match(line, @"rtt_ms=(?:Some\()?(?<v>[0-9]+(?:\.[0-9]+)?)");
@@ -361,6 +373,11 @@ sealed class Gateway : IAsyncDisposable
     int serial;
     public int Port { get; }
     public event Action? Attached;
+    public Func<TcpClient,byte,CancellationToken,Task>? AttachOverlay;
+    public OverlaySession? Overlay;
+    IPEndPoint? overlayRemote;
+    public async Task SendOverlayUdp(byte[] data,CancellationToken ct)
+    {if(overlayRemote is{} remote)await udp.SendAsync(Wire.Packet(token,65535,data),remote,ct);}
     readonly Func<PasswordRequest, CancellationToken, Task<SignedEnvelope?>>? authenticate;
     public Gateway(Settings settings, byte[] token, Func<PasswordRequest, CancellationToken, Task<SignedEnvelope?>>? authenticate = null)
     {
@@ -369,6 +386,7 @@ sealed class Gateway : IAsyncDisposable
         Port = ((IPEndPoint)listener.LocalEndpoint).Port;
         try { udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, Port)); }
         catch { listener.Stop(); throw; }
+        Wire.ConfigureUdp(udp);
         acceptTask = Accept(); udpTask = Receive();
     }
     async Task Accept()
@@ -412,6 +430,8 @@ sealed class Gateway : IAsyncDisposable
                     return;
                 }
                 if (!CryptographicOperations.FixedTimeEquals(head.AsSpan(4, 16), token)) return;
+                if(command is 4 or 5 && port==0 && AttachOverlay!=null)
+                {handshake.CancelAfter(Timeout.InfiniteTimeSpan);await AttachOverlay(client,command,stop.Token);return;}
                 if (command == 0 && port == 0)
                 { Attached?.Invoke(); await stream.WriteAsync(new byte[] { 0 }, handshake.Token); return; }
                 if(command==3&&port==0)
@@ -430,7 +450,7 @@ sealed class Gateway : IAsyncDisposable
                 handshake.CancelAfter(Timeout.InfiniteTimeSpan);
                 await Wire.Bridge(client, target, stop.Token);
             }
-            catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { }
+            catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { Diagnostics.Log("gateway-tcp",ex.Message); }
         }
     }
     async Task Receive()
@@ -442,6 +462,8 @@ sealed class Gateway : IAsyncDisposable
                 var packet = await udp.ReceiveAsync(stop.Token);
                 if (!IPAddress.IsLoopback(packet.RemoteEndPoint.Address) || !Wire.ValidPacket(packet.Buffer, token)) continue;
                 var port = (int)BinaryPrimitives.ReadUInt16BigEndian(packet.Buffer.AsSpan(16));
+                if(port==65535&&Overlay!=null)
+                {overlayRemote=packet.RemoteEndPoint;await Overlay.ReceiveBaseUdp(packet.Buffer[18..]);continue;}
                 if (port == 0)
                 {
                     await udp.SendAsync(packet.Buffer, packet.RemoteEndPoint, stop.Token);
@@ -461,7 +483,7 @@ sealed class Gateway : IAsyncDisposable
                     { udpFlows.TryRemove(new KeyValuePair<string, TargetUdp>(key, captured)); captured.Dispose(); }, TaskScheduler.Default);
                 }
                 try { await flow.Send(packet.Buffer.AsMemory(18)); }
-                catch (Exception ex) when (ex is SocketException or OperationCanceledException or ObjectDisposedException) { }
+                catch (Exception ex) when (ex is SocketException or OperationCanceledException or ObjectDisposedException) { Diagnostics.Log("gateway-udp",ex.Message); }
             }
         }
         catch (Exception) when (stop.IsCancellationRequested) { }
@@ -485,6 +507,7 @@ sealed class TargetUdp : IDisposable
     public TargetUdp(int port, Func<byte[], Task> reply, CancellationToken ct, int maximum = Wire.MaxUdp)
     {
         this.reply = reply; this.maximum = maximum; stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        Wire.ConfigureUdp(client);
         client.Connect(IPAddress.Loopback, port); stop.CancelAfter(TimeSpan.FromMinutes(2));
         Completion = Receive();
     }
@@ -501,7 +524,7 @@ sealed class TargetUdp : IDisposable
                 if (result.Buffer.Length <= maximum) await reply(result.Buffer);
             }
         }
-        catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { }
+        catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { Diagnostics.Log("target-udp",ex.Message); }
     }
     int disposed;
     public void Dispose()
@@ -512,15 +535,23 @@ sealed class Session : IAsyncDisposable
 {
     public string PeerId { get; }
     public string Address { get; }
-    public int LocalPort { get; }
+    readonly int basePort;
+    public int LocalPort => !Host&&Overlay!=null?Overlay.Port:basePort;
     public byte[] Capability { get; }
     public int[] TcpPorts { get; }
     public int[] UdpPorts { get; }
     public bool Host { get; }
-    public Child Process { get; }
+    public Child Process { get; set; }
+    public OverlaySession? Overlay { get; set; }
+    public TransitCoordinator? Transit { get; set; }
+    public event Action? OverlayReady;
+    readonly string[] ardArguments;
+    readonly TaskCompletionSource completed=new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public Task Completion=>completed.Task;
+    public bool HasOverlay=>Overlay!=null;
     public CancellationToken Token => stop.Token;
-    public bool Live => disposed == 0 && !Process.Exited.IsCompleted;
-    public string Network => Process.Network;
+    public bool Live => disposed == 0 && (Overlay!=null?!Overlay.Expired:!Process.Exited.IsCompleted);
+    public string Network => Overlay?.Network??Process.Network;
     public double? TcpRtt { get; set; }
     public double? UdpRtt { get; set; }
     public double? BandwidthMbps { get; set; }
@@ -534,9 +565,34 @@ sealed class Session : IAsyncDisposable
     public Session(string peer, string address, int port, byte[] capability, int[] tcpPorts, int[] udpPorts,
         Child process, string directory, Gateway? gateway = null, ForwardHub? hub = null)
     {
-        PeerId = peer; Address = address; LocalPort = port; Capability = capability;
+        PeerId = peer; Address = address; basePort = port; Capability = capability;
         TcpPorts = tcpPorts; UdpPorts = udpPorts; Process = process; this.directory = directory;
         this.gateway = gateway; Hub=hub; Host = gateway != null;
+        ardArguments=process.Process.StartInfo.ArgumentList.ToArray();
+        if(gateway!=null)gateway.AttachOverlay=AcceptOverlay;
+    }
+    public async Task EnableOverlay(CancellationToken ct)
+    {Overlay=await OverlaySession.Connect(basePort,Capability,()=>Process.Network,ct);OverlayReady?.Invoke();}
+    async Task AcceptOverlay(TcpClient tcp,byte command,CancellationToken ct)
+    {
+        using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct);timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        if(command==4)
+        {
+            if(Overlay!=null)throw new IOException("覆盖层已建立，必须使用恢复入口。");
+            Overlay=await OverlaySession.AcceptHello(tcp,basePort,Capability,()=>Process.Network,timeout.Token);gateway!.Overlay=Overlay;OverlayReady?.Invoke();
+        }
+        else
+        {
+            var resume=await Wire.ReadJson<JsonElement>(tcp.GetStream(),timeout.Token);
+            if(Overlay==null||resume.GetProperty("session").GetString()!=Overlay.Id)throw new IOException("覆盖层恢复编号无效。");
+            await tcp.GetStream().WriteAsync(new byte[]{0},timeout.Token);
+        }
+        var link=new OverlayLink("base",tcp,gateway!.SendOverlayUdp,()=>Process.Network);await Overlay!.Add(link);await link.Reader;
+    }
+    public async Task RestartArd(CancellationToken ct)
+    {
+        await Process.DisposeAsync();ct.ThrowIfCancellationRequested();Process=new Child(Ard.Exe,directory,ardArguments);
+        Diagnostics.Log("ard-restart",PeerId);
     }
     public async Task<TcpClient> OpenTcp(int port, CancellationToken ct)
     {
@@ -603,7 +659,8 @@ sealed class Session : IAsyncDisposable
                 catch
                 {
                     TcpRtt=null;UdpRtt=null;BandwidthMbps=null;changed();
-                    if(++failures>=2){try{await Process.DisposeAsync();}catch{}break;}
+                    if(++failures>=2&&Overlay==null){try{await Process.DisposeAsync();}catch(Exception ex){Diagnostics.Log("health-restart",ex.Message);}break;}
+                    if(Overlay?.Expired==true){Diagnostics.Log("overlay-timeout","All paths unavailable for 45 seconds.");break;}
                 }
                 try { await Task.Delay(TimeSpan.FromSeconds(5), stop.Token); }
                 catch (OperationCanceledException) { break; }
@@ -614,7 +671,10 @@ sealed class Session : IAsyncDisposable
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         stop.Cancel();
+        completed.TrySetResult();
         Hub?.Detach(this);
+        if(Transit!=null)await Transit.DisposeAsync();
+        if(Overlay!=null)await Overlay.DisposeAsync();
         try { await metrics; } catch { }
         await Process.DisposeAsync();
         if (gateway != null) await gateway.DisposeAsync();
@@ -633,6 +693,7 @@ sealed class Engine : IAsyncDisposable
     public ConcurrentDictionary<string, string> Status { get; } = new();
     public ConcurrentQueue<string> Logs { get; } = new();
     public event Action? Changed;
+    public DirectoryClient? DirectoryApi { get; set; }
     readonly SemaphoreSlim operation = new(1);
     readonly ConcurrentDictionary<string,ForwardHub> hubs = new();
     Engine(State state, Settings settings, string id) { State=state; Settings=settings; Id=id; }
@@ -667,9 +728,34 @@ sealed class Engine : IAsyncDisposable
         if (!host) session.StartMetrics(() => Update(session.PeerId, Describe(session, false)));
         Update(session.PeerId, Describe(session, host));
     }
+    void ConfigureOverlay(Session session)
+    {
+        if(session.Overlay==null||DirectoryApi==null||session.Transit!=null)return;
+        session.Transit=new TransitCoordinator(this,DirectoryApi,session);
+        session.Overlay.Changed+=()=>Update(session.PeerId,Describe(session,session.Host));
+    }
     async Task Monitor(Session session,bool host)
     {
-        await session.Process.Exited;
+        long baseLost=0;
+        while(!session.Token.IsCancellationRequested)
+        {
+            var child=session.Process;
+            try{await Task.WhenAny(child.Exited,Task.Delay(1000,session.Token));session.Token.ThrowIfCancellationRequested();}catch(OperationCanceledException){break;}
+            if(!session.Live)break;
+            if(session.Overlay?.Link("base") is{Live:false})
+            {if(baseLost==0)baseLost=Environment.TickCount64;}
+            else baseLost=0;
+            var stalled=baseLost!=0&&Environment.TickCount64-baseLost>=10000;
+            if(!child.Exited.IsCompleted&&!stalled)continue;
+            if(session.Overlay==null||!session.Live)break;
+            try
+            {
+                if(stalled)Diagnostics.Log("ard-stalled","Base transport remained unavailable for 10 seconds; restarting the same identity.");
+                await Task.Delay(1000,session.Token);await session.RestartArd(session.Token);baseLost=0;Observe(session,host);
+            }
+            catch(OperationCanceledException){break;}
+            catch(Exception ex){Diagnostics.Log("ard-restart-failed",ex.Message);break;}
+        }
         var sessions=host ? Incoming : Outgoing;
         if(sessions.TryRemove(new KeyValuePair<string,Session>(session.PeerId,session)))
         { await session.DisposeAsync(); Update(session.PeerId,"连接已断开"); }
@@ -721,6 +807,7 @@ sealed class Engine : IAsyncDisposable
             child = Ard.Start(dir, true, gateway.Port, ticket.ClientSessionId, Settings);
             await child.WaitFor("relay online", ct);
             session = new Session(peer.Id, peer.Address, gateway.Port, capability, Settings.TcpPorts, Settings.UdpPorts, child, dir, gateway);
+            session.OverlayReady+=()=>ConfigureOverlay(session);
             var attached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             gateway.Attached += () => { attached.TrySetResult(); Update(peer.Id, "已连接 · 对方正在访问本机"); };
             if (!Incoming.TryAdd(peer.Id, session)) throw new IOException("已有同设备会话。");
@@ -777,6 +864,7 @@ sealed class Engine : IAsyncDisposable
             peer = State.GetOrAdd(target.Endpoint, target.Code, admission.Grant);
             var hub=hubs.GetOrAdd(peer.Id,_=>new ForwardHub());
             session = new Session(peer.Id, peer.Address, port, Convert.FromHexString(admission.Token), admission.TcpPorts, admission.UdpPorts, child, dir, hub:hub);
+            await session.EnableOverlay(ct);ConfigureOverlay(session);
             using (await session.OpenTcp(0, ct)) { }
             if (!Outgoing.TryAdd(peer.Id, session)) throw new IOException("该设备已有连接。");
             hub.Attach(session);
@@ -893,7 +981,10 @@ sealed class MainWindow : Window
         var side=new StackPanel{Spacing=6,Children={incomingArea,pendingIncoming,controllersExpander}};
         sideScroll=new ScrollViewer{Content=side};Grid.SetColumn(sideScroll,2);main.Children.Add(sideScroll);Grid.SetRow(main,2);root.Children.Add(main);
         var diagnosticButton=new Button{Content="诊断⌄",FontSize=9,Padding=new Thickness(5,1)};
-        diagnostics=Card(networkLog);diagnostics.IsVisible=false;diagnostics.Padding=new Thickness(5,3);
+        var exportDiagnostics=Button("导出诊断包",()=>
+        {var path=Diagnostics.Export(Program.DataRoot,engine);Say("诊断包："+path);return Task.CompletedTask;});
+        exportDiagnostics.FontSize=9;exportDiagnostics.Padding=new Thickness(5,1);
+        diagnostics=Card(new StackPanel{Spacing=3,Children={networkLog,exportDiagnostics}});diagnostics.IsVisible=false;diagnostics.Padding=new Thickness(5,3);
         diagnosticButton.Click+=(_,_)=>{diagnostics.IsVisible=!diagnostics.IsVisible;diagnosticButton.Content=diagnostics.IsVisible?"诊断⌃":"诊断⌄";};
         var networkRow=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto")};networkRow.Children.Add(networkSummary);
         Grid.SetColumn(diagnosticButton,1);networkRow.Children.Add(diagnosticButton);
@@ -1204,10 +1295,12 @@ static class SelfTest
             var a = Path.Combine(root,"a"); var b = Path.Combine(root,"b");
             IdentityStore.Prepare(a); IdentityStore.Prepare(b);
             var settings = new Settings { TcpPorts = [port], UdpPorts = [] };
+            settings.Relay=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY")??settings.Relay;
+            settings.RelayKey=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY_KEY")??settings.RelayKey;
             await using var host = await Engine.Create(a, settings);
             await using var caller = await Engine.Create(b, settings);
-            await using var hd = new DirectoryClient(host);
-            await using var cd = new DirectoryClient(caller);
+            await using var hd = new DirectoryClient(host,Environment.GetEnvironmentVariable("ARDUI_TEST_SERVER"));
+            await using var cd = new DirectoryClient(caller,Environment.GetEnvironmentVariable("ARDUI_TEST_SERVER"));
             var hostChecks = 0; var callerChecks = 0;
             var prompt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var approval = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1247,11 +1340,11 @@ static class SelfTest
                 await response;
             }
             await VerifyFlow();Console.WriteLine("PASS: loopback TCP proxy through authenticated ARD to remote service.");
-            var first=caller.Outgoing[host.Id];var stablePort=first.Forward(port).Port;await first.Process.DisposeAsync();
+            var first=caller.Outgoing[host.Id];var child=first.Process;var stablePort=first.Forward(port).Port;await child.DisposeAsync();
             using(var recovery=CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
                 recovery.CancelAfter(TimeSpan.FromSeconds(90));
-                while(!caller.Outgoing.TryGetValue(host.Id,out var restored)||ReferenceEquals(first,restored)||!restored.Live)await Task.Delay(100,recovery.Token);
+                while(!caller.Outgoing.TryGetValue(host.Id,out var restored)||ReferenceEquals(child,restored.Process)||!restored.Live||restored.Overlay?.Link("base")?.Live!=true)await Task.Delay(100,recovery.Token);
             }
             if(caller.Outgoing[host.Id].Forward(port).Port!=stablePort)throw new Exception("Local forwarding port changed across reconnect.");
             await VerifyFlow();Console.WriteLine("PASS: killed ARD child recovered automatically with the same local forwarding port.");
@@ -1370,6 +1463,7 @@ sealed class DirectoryClient : IAsyncDisposable
     public DirectoryClient(Engine engine, string? testServer = null)
     {
         this.engine = engine;
+        engine.DirectoryApi=this;
         var server = new Uri(testServer ?? engine.Settings.Server);
         if (server.Scheme != "https" && !(testServer != null && server.IsLoopback && server.Scheme == "http"))
             throw new InvalidDataException("可信服务器必须使用 HTTPS。");
@@ -1410,6 +1504,14 @@ sealed class DirectoryClient : IAsyncDisposable
         var digest=HMACSHA256.HashData(enrollmentSecret,period);
         try{return (BinaryPrimitives.ReadUInt32BigEndian(digest)%1_000_000).ToString("D6");}
         finally{CryptographicOperations.ZeroMemory(digest);}
+    }
+    public SignedEnvelope ApproveTransit(string route,string controller,string candidate,string aSession,string bSession)
+    {
+        lock(sync)
+        {
+            if(!access.Enabled||!access.Controllers.ContainsKey(controller))throw new IOException("当前已无被控授权。");
+            return Sign("/transit-approval/v2",new{route,a=controller,b=engine.Id,c=candidate,aSession,bSession,expires=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+90});
+        }
     }
     SignedEnvelope Sign(string route, object value)
     {
@@ -1484,7 +1586,7 @@ sealed class DirectoryClient : IAsyncDisposable
         {
             if(engine.Outgoing.TryGetValue(peer.Id,out var active)&&active.Live)
             {
-                try{await active.Process.Exited.WaitAsync(ct);}catch(OperationCanceledException){break;}
+                try{await active.Completion.WaitAsync(ct);}catch(OperationCanceledException){break;}
                 continue;
             }
             engine.SetStatus(peer.Id,delay==1?"正在自动恢复连接…":$"自动重连等待 {delay} 秒…");
@@ -1861,6 +1963,7 @@ sealed class LocalForwarder : IAsyncDisposable
         this.hub=hub;this.target=target;
         listener=new TcpListener(IPAddress.Loopback,0);listener.Start();
         if(udpEnabled)udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,Port));
+        if(udp!=null)Wire.ConfigureUdp(udp);
         accept=Accept();receive=udp == null ? Task.CompletedTask : ReceiveUdp();
     }
     async Task Accept()
@@ -1936,6 +2039,7 @@ sealed class LocalUdpFlow : IDisposable
     {
         this.session=session;this.target=target;this.remote=remote;this.reply=reply;
         stop=CancellationTokenSource.CreateLinkedTokenSource(ct);upstream.Connect(IPAddress.Loopback,session.LocalPort);
+        Wire.ConfigureUdp(upstream);
         stop.CancelAfter(TimeSpan.FromMinutes(2));Completion=Receive();
     }
     public async Task Send(byte[] data)
@@ -2007,5 +2111,1243 @@ static class WindowsShares
         var message=await error;var text=await output;
         if(process.ExitCode!=0)throw new IOException("Windows SMB 连接失败，请检查共享名、账户及系统策略。"+Environment.NewLine+message);
         return text;
+    }
+}
+
+sealed record OverlayHello(string Session, string Key);
+sealed record OverlayControl(string Id, string Method, JsonElement Data, string? Error = null);
+
+static class Diagnostics
+{
+    static readonly ConcurrentQueue<object> events = new();
+    public static string Redact(string value)
+    {
+        value=Regex.Replace(value,@"\b(?:\d{1,3}\.){3}\d{1,3}\b","[IPv4]");
+        return Regex.Replace(value,@"(?<![\w])(?:[0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F:.%]+","[IPv6]");
+    }
+    public static void Log(string kind,string message)
+    {
+        var clean=Redact(message);events.Enqueue(new{time=DateTimeOffset.UtcNow,kind,message=clean});
+        while(events.Count>2048)events.TryDequeue(out _);
+        Trace.WriteLine($"[v2 {kind}] {clean}");
+    }
+    public static string Export(string root,Engine? engine)
+    {
+        var folder=Path.Combine(root,"diagnostics");Directory.CreateDirectory(folder);
+        var path=Path.Combine(folder,$"ArdUi-{Program.Version}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.zip");
+        using var zip=ZipFile.Open(path,ZipArchiveMode.Create);
+        void Entry(string name,object value)
+        {using var writer=new StreamWriter(zip.CreateEntry(name,CompressionLevel.Optimal).Open());writer.Write(JsonSerializer.Serialize(value,Wire.Json));}
+        using var process=Process.GetCurrentProcess();
+        Entry("status.json",new{version=Program.Version,ard="2.0.0-pre.6",time=DateTimeOffset.UtcNow,
+            endpoint=engine?.Id,os=Environment.OSVersion.VersionString,memoryBytes=process.WorkingSet64,cpuSeconds=process.TotalProcessorTime.TotalSeconds,
+            sessions=engine?.Outgoing.Values.Concat(engine.Incoming.Values).Select(s=>new{peer=s.PeerId,host=s.Host,network=s.Network,s.TcpRtt,s.UdpRtt,s.BandwidthMbps,overlay=s.Overlay?.Snapshot()}).ToArray()});
+        Entry("events.json",events.ToArray());
+        Entry("privacy.json",new{ipAddresses="redacted",excluded=new[]{"private keys","passwords","session keys","capabilities","tickets","payloads","handshakes"}});
+        return path;
+    }
+}
+
+sealed class OverlayCipher : IDisposable
+{
+    readonly byte[] sendKey,receiveKey,context;
+    readonly long[] serial=new long[2];
+    readonly HashSet<ulong> datagrams=new();
+    readonly object gate=new();
+    ulong high;
+    public long Replays,Rejected;
+    public OverlayCipher(byte[] secret,byte[] context,bool caller)
+    {
+        this.context=context;
+        sendKey=HKDF.DeriveKey(HashAlgorithmName.SHA256,secret,32,context,Encoding.ASCII.GetBytes(caller?"ArdUi/2 A-B":"ArdUi/2 B-A"));
+        receiveKey=HKDF.DeriveKey(HashAlgorithmName.SHA256,secret,32,context,Encoding.ASCII.GetBytes(caller?"ArdUi/2 B-A":"ArdUi/2 A-B"));
+    }
+    public byte[] Encrypt(byte[] plain,bool udp)
+    {
+        var packet=new byte[plain.Length+25];packet[0]=udp?(byte)1:(byte)0;
+        var number=Interlocked.Increment(ref serial[udp?1:0]);if(number<=0)throw new CryptographicException("覆盖层 nonce 已耗尽。");
+        BinaryPrimitives.WriteInt64BigEndian(packet.AsSpan(1),number);
+        Span<byte> nonce=stackalloc byte[12];nonce.Clear();nonce[3]=packet[0];packet.AsSpan(1,8).CopyTo(nonce[4..]);
+        using var aes=new AesGcm(sendKey,16);aes.Encrypt(nonce,plain,packet.AsSpan(9,plain.Length),packet.AsSpan(9+plain.Length,16),context);
+        return packet;
+    }
+    public byte[]? Decrypt(byte[] packet,bool udp)
+    {
+        if(packet.Length is <38 or >65536||packet[0]!=(udp?1:0)){Interlocked.Increment(ref Rejected);return null;}
+        var seq=BinaryPrimitives.ReadUInt64BigEndian(packet.AsSpan(1));
+        lock(gate)
+        {
+            if(udp&&(seq==0||datagrams.Contains(seq)||(high>8192&&seq<=high-8192))){Replays++;return null;}
+            Span<byte> nonce=stackalloc byte[12];nonce.Clear();nonce[3]=packet[0];packet.AsSpan(1,8).CopyTo(nonce[4..]);
+            var plain=new byte[packet.Length-25];
+            try{using var aes=new AesGcm(receiveKey,16);aes.Decrypt(nonce,packet.AsSpan(9,plain.Length),packet.AsSpan(9+plain.Length),plain,context);}
+            catch(CryptographicException ex){Rejected++;Diagnostics.Log("authentication",ex.Message);return null;}
+            if(udp){high=Math.Max(high,seq);datagrams.Add(seq);if(datagrams.Count>16384)datagrams.RemoveWhere(n=>high>8192&&n<=high-8192);}
+            return plain;
+        }
+    }
+    public void Dispose(){CryptographicOperations.ZeroMemory(sendKey);CryptographicOperations.ZeroMemory(receiveKey);}
+}
+
+sealed class OverlayLink : IAsyncDisposable
+{
+    readonly TcpClient tcp;
+    readonly SemaphoreSlim write=new(1);
+    readonly CancellationTokenSource stop=new();
+    readonly Func<byte[],CancellationToken,Task> sendUdp;
+    readonly Func<string> network;
+    public string Name{get;}
+    public CancellationToken Token=>stop.Token;
+    public bool Live=>!stop.IsCancellationRequested;
+    public string Network=>network();
+    public double? RttMs, JitterMs, BandwidthMbps;
+    readonly ConcurrentQueue<double?> samples=new();
+    public PathQuality Quality=>PathQuality.From(samples.ToArray(),BandwidthMbps);
+    public void Sample(double? ms){samples.Enqueue(ms);while(samples.Count>16)samples.TryDequeue(out _);}
+    public long Sent,Received,Probes,Lost;
+    public Task Reader{get;set;}=Task.CompletedTask;
+    public Action? Closed;
+    public OverlayLink(string name,TcpClient tcp,Func<byte[],CancellationToken,Task> sendUdp,Func<string> network)
+    {Name=name;this.tcp=tcp;tcp.NoDelay=true;this.sendUdp=sendUdp;this.network=network;}
+    public async Task Send(byte[] data,bool udp,CancellationToken ct)
+    {
+        if(!Live)throw new IOException("传输路径已关闭。");
+        using var linked=CancellationTokenSource.CreateLinkedTokenSource(ct,stop.Token);linked.CancelAfter(TimeSpan.FromSeconds(5));
+        if(udp){await sendUdp(data,linked.Token);Interlocked.Add(ref Sent,data.Length);return;}
+        await write.WaitAsync(linked.Token);
+        try
+        {
+            var header=new byte[4];BinaryPrimitives.WriteInt32BigEndian(header,data.Length);
+            await tcp.GetStream().WriteAsync(header,linked.Token);await tcp.GetStream().WriteAsync(data,linked.Token);
+            Interlocked.Add(ref Sent,data.Length);
+        }
+        finally{write.Release();}
+    }
+    public async Task Read(Func<OverlayLink,byte[],bool,Task> receive)
+    {
+        try
+        {
+            while(!stop.IsCancellationRequested)
+            {
+                var size=BinaryPrimitives.ReadInt32BigEndian(await Wire.Read(tcp.GetStream(),4,stop.Token));
+                if(size is <38 or >65536)throw new InvalidDataException("无效覆盖层帧大小。");
+                var data=await Wire.Read(tcp.GetStream(),size,stop.Token);Interlocked.Add(ref Received,size);
+                await receive(this,data,false);
+            }
+        }
+        catch(Exception ex)when(ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException)
+        {Diagnostics.Log("link-ended",Name+": "+ex.Message);}
+        finally{stop.Cancel();tcp.Dispose();Closed?.Invoke();}
+    }
+    public ValueTask DisposeAsync(){stop.Cancel();tcp.Dispose();return ValueTask.CompletedTask;}
+}
+
+sealed class OverlaySession : IAsyncDisposable
+{
+    const int Chunk=16384,Window=512,Fragment=1100;
+    readonly bool caller;
+    readonly int basePort,targetPort;
+    readonly byte[] capability;
+    readonly Func<string> baseNetwork;
+    readonly OverlayCipher cipher;
+    readonly CancellationTokenSource stop=new();
+    readonly ConcurrentDictionary<string,OverlayLink> links=new();
+    readonly ConcurrentDictionary<uint,OverlayFlow> flows=new();
+    readonly ConcurrentDictionary<string,TaskCompletionSource<JsonElement>> controls=new();
+    readonly ConcurrentDictionary<long,TaskCompletionSource<bool>> probes=new();
+    readonly SortedDictionary<long,byte[]> pending=new(),reorder=new();
+    readonly SemaphoreSlim window=new(Window),incomingSignal=new(0,1),controlSlots=new(8),bandwidthGate=new(1);
+    readonly Channel<(OverlayLink Link,byte[] Frame,bool Udp)> replies=Channel.CreateBounded<(OverlayLink,byte[],bool)>(128);
+    readonly SemaphoreSlim ackSignal=new(0,1);
+    readonly object incomingGate=new();
+    readonly object sequenceGate=new(),udpGate=new();
+    readonly TcpListener? listener;
+    readonly UdpClient? facade;
+    readonly Dictionary<IPEndPoint,uint> udpIds=new();
+    readonly Dictionary<uint,long> udpTouched=new();
+    readonly ConcurrentDictionary<uint,IPEndPoint> udpRemotes=new();
+    readonly ConcurrentDictionary<uint,TargetUdp> targetUdp=new();
+    readonly Dictionary<(uint,long),Fragments> fragments=new();
+    readonly Task maintenance,orderedReceiver,replyWriter,ackWriter;
+    Task accept=Task.CompletedTask,datagramReader=Task.CompletedTask,reconnect=Task.CompletedTask;
+    long sendSequence,receiveSequence,probeId,udpSequence,missingSince,lastResend;
+    int flowSerial,disposed;
+    string selected="base";
+    public string Id{get;}
+    public int Port=>listener==null?0:((IPEndPoint)listener.LocalEndpoint).Port;
+    public bool Expired=>stop.IsCancellationRequested||missingSince!=0&&Environment.TickCount64-missingSince>45000;
+    public string Selected=>selected;
+    public string Network=>selected=="base"?baseNetwork():"ArdTransit / "+selected[..Math.Min(6,selected.Length)];
+    public Func<string,JsonElement,CancellationToken,Task<object>>? Control;
+    public Action? Changed;
+    public long Retransmits,Duplicates,UdpFragments,UdpDrops,Switches;
+    public CancellationToken Token=>stop.Token;
+    sealed class Fragments(int count,long time)
+    {public byte[][] Parts{get;}=new byte[count][];public long Time{get;}=time;public int Bytes;}
+    OverlaySession(string id,bool caller,int port,byte[] capability,byte[] secret,byte[] context,Func<string> network)
+    {
+        Id=id;this.caller=caller;this.capability=capability;this.baseNetwork=network;
+        basePort=caller?port:0;targetPort=caller?0:port;cipher=new(secret,context,caller);
+        if(caller)
+        {
+            listener=new TcpListener(IPAddress.Loopback,0);listener.Start();facade=new UdpClient(new IPEndPoint(IPAddress.Loopback,Port));Wire.ConfigureUdp(facade);
+            accept=Accept();datagramReader=ReadFacade();
+        }
+        orderedReceiver=ReceiveOrdered();replyWriter=WriteReplies();ackWriter=WriteAcks();maintenance=Maintain();
+    }
+    static byte[] Derive(ECDiffieHellman key,string remote)
+    {
+        var blob=Convert.FromBase64String(remote);using var other=ECDiffieHellman.Create();other.ImportSubjectPublicKeyInfo(blob,out var consumed);
+        if(consumed!=blob.Length||other.KeySize!=256||other.ExportParameters(false).Curve.Oid.Value!=ECCurve.NamedCurves.nistP256.Oid.Value)
+            throw new CryptographicException("覆盖层密钥曲线无效。");
+        return key.DeriveRawSecretAgreement(other.PublicKey);
+    }
+    static byte[] Context(OverlayHello a,OverlayHello b,byte[] cap)=>SHA256.HashData(Encoding.UTF8.GetBytes($"ArdUi/2\n{a.Session}\n{a.Key}\n{b.Key}\n{Convert.ToHexString(cap)}"));
+    public static async Task<OverlaySession> Connect(int port,byte[] cap,Func<string> network,CancellationToken ct)
+    {
+        var tcp=await ConnectBase(port,cap,4,ct);
+        try
+        {
+            using var key=ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+            var hello=new OverlayHello(Guid.NewGuid().ToString("N"),Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()));
+            await Wire.WriteJson(tcp.GetStream(),hello,ct);var reply=await Wire.ReadJson<OverlayHello>(tcp.GetStream(),ct);
+            if(reply.Session!=hello.Session)throw new IOException("覆盖层会话编号不匹配。");
+            var secret=Derive(key,reply.Key);OverlaySession session;
+            try{session=new(hello.Session,true,port,cap,secret,Context(hello,reply,cap),network);}finally{CryptographicOperations.ZeroMemory(secret);}
+            await session.AttachClientBase(tcp);session.reconnect=session.ReconnectBase();
+            for(var attempt=0;attempt<3;attempt++)
+            {
+                try{await session.Probe(session.Link("base")!,true);break;}
+                catch(Exception ex){Diagnostics.Log("udp-warmup",ex.Message);ct.ThrowIfCancellationRequested();}
+            }
+            return session;
+        }
+        catch{tcp.Dispose();throw;}
+    }
+    public static async Task<OverlaySession> AcceptHello(TcpClient tcp,int port,byte[] cap,Func<string> network,CancellationToken ct)
+    {
+        var hello=await Wire.ReadJson<OverlayHello>(tcp.GetStream(),ct);
+        if(!Regex.IsMatch(hello.Session,@"\A[0-9a-f]{32}\z"))throw new IOException("覆盖层编号无效。");
+        using var key=ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+        var reply=new OverlayHello(hello.Session,Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()));var secret=Derive(key,hello.Key);
+        try
+        {
+            var session=new OverlaySession(hello.Session,false,port,cap,secret,Context(hello,reply,cap),network);
+            try{await Wire.WriteJson(tcp.GetStream(),reply,ct);return session;}catch{await session.DisposeAsync();throw;}
+        }
+        finally{CryptographicOperations.ZeroMemory(secret);}
+    }
+    static async Task<TcpClient> ConnectBase(int port,byte[] cap,byte command,CancellationToken ct)
+    {
+        var tcp=new TcpClient{NoDelay=true};
+        try
+        {await tcp.ConnectAsync(IPAddress.Loopback,port,ct);var header=new byte[23];"AUI1"u8.CopyTo(header);cap.CopyTo(header,4);header[20]=command;await tcp.GetStream().WriteAsync(header,ct);return tcp;}
+        catch{tcp.Dispose();throw;}
+    }
+    async Task AttachClientBase(TcpClient tcp)
+    {
+        var udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));Wire.ConfigureUdp(udp);udp.Connect(IPAddress.Loopback,basePort);
+        var link=new OverlayLink("base",tcp,async(data,ct)=>await udp.SendAsync(Wire.Packet(capability,65535,data),ct),baseNetwork);
+        link.Closed+=()=>udp.Dispose();await Add(link);
+        _=Task.Run(async()=>
+        {
+            try
+            {
+                while(!link.Token.IsCancellationRequested)
+                {var p=await udp.ReceiveAsync(link.Token);if(Wire.ValidPacket(p.Buffer,capability)&&BinaryPrimitives.ReadUInt16BigEndian(p.Buffer.AsSpan(16))==65535)await Receive(link,p.Buffer[18..],true);}
+            }
+            catch(Exception ex)when(ex is SocketException or OperationCanceledException or ObjectDisposedException){Diagnostics.Log("base-udp",ex.Message);}
+        });
+    }
+    async Task ReconnectBase()
+    {
+        while(!stop.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(1000,stop.Token);if(links.TryGetValue("base",out var live)&&live.Live)continue;
+                using var timeout=CancellationTokenSource.CreateLinkedTokenSource(stop.Token);timeout.CancelAfter(TimeSpan.FromSeconds(8));
+                var tcp=await ConnectBase(basePort,capability,5,timeout.Token);
+                try
+                {
+                    await Wire.WriteJson(tcp.GetStream(),new{session=Id},timeout.Token);
+                    if((await Wire.Read(tcp.GetStream(),1,timeout.Token))[0]!=0)throw new IOException("覆盖层恢复被拒绝。");
+                    await AttachClientBase(tcp);
+                }
+                catch{tcp.Dispose();throw;}
+            }
+            catch(OperationCanceledException)when(stop.IsCancellationRequested){break;}
+            catch(Exception ex){Diagnostics.Log("base-reconnect",ex.Message);}
+        }
+    }
+    public async Task Add(OverlayLink link)
+    {
+        if(links.TryGetValue(link.Name,out var previous))await previous.DisposeAsync();
+        links[link.Name]=link;link.Reader=link.Read(Receive);Diagnostics.Log("path-added",link.Name);Changed?.Invoke();
+    }
+    public OverlayLink? Link(string name)=>links.TryGetValue(name,out var link)?link:null;
+    public async Task Remove(string name)
+    {if(links.TryRemove(name,out var link))await link.DisposeAsync();if(selected==name)Select("base");}
+    public void Select(string name)
+    {
+        if(selected==name)return;if(!links.TryGetValue(name,out var link)||!link.Live)throw new IOException("目标路径未就绪。");
+        selected=name;Interlocked.Increment(ref Switches);lastResend=0;Diagnostics.Log("path-selected",name);Changed?.Invoke();
+    }
+    static byte[] Frame(byte kind,long seq,uint flow,ReadOnlySpan<byte> body)
+    {
+        var data=new byte[13+body.Length];data[0]=kind;BinaryPrimitives.WriteInt64BigEndian(data.AsSpan(1),seq);
+        BinaryPrimitives.WriteUInt32BigEndian(data.AsSpan(9),flow);body.CopyTo(data.AsSpan(13));return data;
+    }
+    async Task SendOn(OverlayLink link,byte[] plain,bool udp)
+    {await link.Send(cipher.Encrypt(plain,udp),udp,stop.Token);}
+    void Reply(OverlayLink link,byte[] frame,bool udp)
+    {if(!replies.Writer.TryWrite((link,frame,udp)))Diagnostics.Log("probe-reply-dropped","Reply queue is full.");}
+    void Ack()
+    {lock(incomingGate){if(ackSignal.CurrentCount==0)ackSignal.Release();}}
+    async Task WriteReplies()
+    {
+        try
+        {
+            await foreach(var reply in replies.Reader.ReadAllAsync(stop.Token))
+                try{await SendOn(reply.Link,reply.Frame,reply.Udp);}
+                catch(Exception ex){Diagnostics.Log("reply-deferred",ex.Message);}
+        }
+        catch(OperationCanceledException ex){Diagnostics.Log("reply-writer-stopped",ex.Message);}
+    }
+    async Task WriteAcks()
+    {
+        try
+        {
+            while(!stop.IsCancellationRequested)
+            {
+                await ackSignal.WaitAsync(stop.Token);long acknowledged;
+                lock(incomingGate)acknowledged=receiveSequence;
+                if(Active() is{} link)
+                    try{await SendOn(link,Frame(9,acknowledged,0,[]),false);}
+                    catch(Exception ex){Diagnostics.Log("ack-deferred",ex.Message);}
+            }
+        }
+        catch(OperationCanceledException ex){Diagnostics.Log("ack-writer-stopped",ex.Message);}
+    }
+    OverlayLink? Active()
+    {
+        if(links.TryGetValue(selected,out var active)&&active.Live)return active;
+        if(links.TryGetValue("base",out var fallback)&&fallback.Live){Select("base");return fallback;}
+        return null;
+    }
+    async Task SendReliable(byte kind,uint flow,byte[] body)
+    {
+        await window.WaitAsync(stop.Token);byte[] frame;
+        lock(sequenceGate){frame=Frame(kind,++sendSequence,flow,body);pending.Add(sendSequence,frame);}
+        if(Active() is{} link)
+            try{await SendOn(link,frame,false);}catch(Exception ex)when(!stop.IsCancellationRequested){Diagnostics.Log("send-deferred",ex.Message);}
+    }
+    async Task Receive(OverlayLink link,byte[] packet,bool udp)
+    {
+        var frame=cipher.Decrypt(packet,udp);if(frame==null)return;
+        var kind=frame[0];var seq=BinaryPrimitives.ReadInt64BigEndian(frame.AsSpan(1));var flow=BinaryPrimitives.ReadUInt32BigEndian(frame.AsSpan(9));
+        if(udp)
+        {
+            if(kind==10){Reply(link,Frame(11,seq,flow,frame.AsSpan(13)),true);return;}
+            if(kind==11){if(probes.TryRemove(seq,out var probe))probe.TrySetResult(true);return;}
+            if(kind==12)await Datagram(flow,seq,frame[13..]);return;
+        }
+        if(kind==9)
+        {
+            lock(sequenceGate)
+            {
+                if(seq<0||seq>sendSequence)throw new IOException("覆盖层确认越界。");
+                foreach(var id in pending.Keys.TakeWhile(n=>n<=seq).ToArray()){pending.Remove(id);window.Release();}
+            }
+            return;
+        }
+        if(kind==10){Reply(link,Frame(11,seq,flow,frame.AsSpan(13)),false);return;}
+        if(kind==11){if(probes.TryRemove(seq,out var probe))probe.TrySetResult(true);return;}
+        if(kind is <1 or >6||seq<=0)throw new IOException("覆盖层指令无效。");
+        lock(incomingGate)
+        {
+            if(seq<=receiveSequence){Duplicates++;}
+            else
+            {
+                if(seq>receiveSequence+Window)throw new IOException("覆盖层接收窗口超限。");
+                reorder.TryAdd(seq,frame);
+                if(incomingSignal.CurrentCount==0)incomingSignal.Release();
+            }
+        }
+        Ack();
+    }
+    async Task ReceiveOrdered()
+    {
+        try
+        {
+            while(!stop.IsCancellationRequested)
+            {
+                await incomingSignal.WaitAsync(stop.Token);
+                while(true)
+                {
+                    byte[]? next;lock(incomingGate)reorder.TryGetValue(receiveSequence+1,out next);
+                    if(next==null)break;
+                    await Dispatch(next);
+                    lock(incomingGate)reorder.Remove(++receiveSequence);
+                    Ack();
+                }
+            }
+        }
+        catch(Exception ex){Diagnostics.Log("ordered-receiver",ex.Message);if(!stop.IsCancellationRequested)stop.Cancel();}
+    }
+    async Task Dispatch(byte[] frame)
+    {
+        var kind=frame[0];var id=BinaryPrimitives.ReadUInt32BigEndian(frame.AsSpan(9));var body=frame[13..];
+        if(kind==5||kind==6)
+        {
+            var message=JsonSerializer.Deserialize<OverlayControl>(body,Wire.Json)??throw new IOException("空控制消息。");
+            if(kind==6)
+            {if(controls.TryRemove(message.Id,out var waiter)){if(message.Error!=null)waiter.TrySetException(new IOException(message.Error));else waiter.TrySetResult(message.Data);}return;}
+            if(!controlSlots.Wait(0))throw new IOException("对端控制请求过多。");
+            _=HandleControl(message);return;
+        }
+        if(kind==1)
+        {
+            if(caller||id==0||flows.Count>=128||flows.ContainsKey(id)){_=ResetFlow(id);return;}
+            var flow=new OverlayFlow(this,id,null);if(flows.TryAdd(id,flow))flow.Start();return;
+        }
+        if(!flows.TryGetValue(id,out var existing))return;
+        if(kind==4){existing.Close();return;}
+        try{await existing.Enqueue(kind==3?[]:body);}
+        catch(Exception ex){Diagnostics.Log("flow-queue",ex.Message);existing.Close();_=ResetFlow(id);}
+    }
+    async Task ResetFlow(uint id)
+    {try{await SendReliable(4,id,[]);}catch(Exception ex){Diagnostics.Log("flow-reset",ex.Message);}}
+    async Task HandleControl(OverlayControl message)
+    {
+        try
+        {
+            object result;
+            if(message.Method=="select")
+            {
+                var name=message.Data.GetProperty("path").GetString()!;
+                if(name!="base"&&(!(Link(name)?.Network.StartsWith("P2P",StringComparison.Ordinal)??false)))throw new IOException("本端候选未直连。");
+                Select(name);result=new{ok=true};
+            }
+            else result=Control!=null?await Control(message.Method,message.Data,stop.Token):throw new IOException("中继协调尚未就绪。");
+            await SendReliable(6,0,JsonSerializer.SerializeToUtf8Bytes(message with{Data=JsonSerializer.SerializeToElement(result,Wire.Json)},Wire.Json));
+        }
+        catch(Exception ex)
+        {
+            Diagnostics.Log("control",message.Method+": "+ex.Message);
+            if(!stop.IsCancellationRequested)
+                try{await SendReliable(6,0,JsonSerializer.SerializeToUtf8Bytes(message with{Data=JsonSerializer.SerializeToElement(new{}),Error=ex.Message},Wire.Json));}
+                catch(Exception sendError){Diagnostics.Log("control-reply",sendError.Message);}
+        }
+        finally{controlSlots.Release();}
+    }
+    public async Task<JsonElement> Request(string method,object value,CancellationToken ct)
+    {
+        if(controls.Count>=16)throw new IOException("协调请求过多。");
+        var id=Guid.NewGuid().ToString("N");var waiter=new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);controls[id]=waiter;
+        try
+        {
+            await SendReliable(5,0,JsonSerializer.SerializeToUtf8Bytes(new OverlayControl(id,method,JsonSerializer.SerializeToElement(value,Wire.Json)),Wire.Json));
+            return await waiter.Task.WaitAsync(TimeSpan.FromSeconds(75),ct);
+        }
+        finally{controls.TryRemove(id,out _);}
+    }
+    public async Task<double> Probe(OverlayLink link,bool udp,int bytes=32)
+    {
+        var id=Interlocked.Increment(ref probeId);var waiter=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);probes[id]=waiter;
+        var watch=Stopwatch.StartNew();Interlocked.Increment(ref link.Probes);
+        try
+        {
+            await SendOn(link,Frame(10,id,0,new byte[bytes]),udp);
+            await waiter.Task.WaitAsync(TimeSpan.FromSeconds(2),stop.Token);
+            var rtt=watch.Elapsed.TotalMilliseconds;
+            if(udp){link.JitterMs=link.RttMs is{} old?Math.Abs(old-rtt):0;link.RttMs=rtt;link.Sample(rtt);}
+            else if(bytes>1024)link.BandwidthMbps=bytes*8d/Math.Max(.001,watch.Elapsed.TotalSeconds)/1e6;
+            return rtt;
+        }
+        catch{Interlocked.Increment(ref link.Lost);if(udp)link.Sample(null);throw;}
+        finally{probes.TryRemove(id,out _);}
+    }
+    async Task Maintain()
+    {
+        var round=0;
+        while(!stop.IsCancellationRequested)
+        {
+            try
+            {
+                var active=Active();
+                ExpireUdp(Environment.TickCount64);
+                if(active==null){if(missingSince==0)missingSince=Environment.TickCount64;}
+                else{missingSince=0;if(active.Name!=selected)Select(active.Name);}
+                if(Environment.TickCount64-lastResend>=1000&&active!=null)
+                {
+                    lastResend=Environment.TickCount64;byte[][] frames;lock(sequenceGate)frames=pending.Values.Take(64).ToArray();
+                    foreach(var frame in frames){await SendOn(active,frame,false);Retransmits++;}
+                }
+                foreach(var link in links.Values.Where(l=>l.Live).ToArray())
+                {
+                    try
+                    {
+                        await Probe(link,true);
+                        if(round%15==0&&bandwidthGate.Wait(0))
+                            try{await Probe(link,false,32768);}finally{bandwidthGate.Release();}
+                    }
+                    catch(Exception ex)when(!stop.IsCancellationRequested)
+                    {
+                        Diagnostics.Log("probe",link.Name+": "+ex.Message);
+                        try{await Probe(link,false);}catch(Exception tcpError){Diagnostics.Log("path-unhealthy",tcpError.Message);await link.DisposeAsync();}
+                    }
+                }
+                round++;await Task.Delay(500,stop.Token);
+            }
+            catch(OperationCanceledException)when(stop.IsCancellationRequested){break;}
+            catch(Exception ex){Diagnostics.Log("overlay-maintenance",ex.Message);await Task.Delay(300,stop.Token).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);}
+        }
+    }
+    public async Task<PathQuality> Evaluate(OverlayLink link,CancellationToken ct)
+    {
+        for(var warmup=0;warmup<3;warmup++)
+        {try{await Probe(link,true);break;}catch(Exception ex){Diagnostics.Log("candidate-warmup",ex.Message);ct.ThrowIfCancellationRequested();}}
+        var samples=new List<double?>();
+        for(var i=0;i<8;i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try{samples.Add(await Probe(link,true));}catch(Exception ex){Diagnostics.Log("quality-probe",ex.Message);samples.Add(null);}
+            await Task.Delay(100,ct);
+        }
+        double? bandwidth=null;
+        await bandwidthGate.WaitAsync(ct);
+        try
+        {
+            var watch=Stopwatch.StartNew();await Task.WhenAll(Enumerable.Range(0,8).Select(_=>Probe(link,false,32768)));
+            bandwidth=8*32768*8d/Math.Max(.001,watch.Elapsed.TotalSeconds)/1e6;link.BandwidthMbps=bandwidth;
+        }
+        catch(Exception ex){Diagnostics.Log("quality-bandwidth",ex.Message);ct.ThrowIfCancellationRequested();}
+        finally{bandwidthGate.Release();}
+        return PathQuality.From(samples.ToArray(),bandwidth);
+    }
+    async Task Accept()
+    {
+        try
+        {
+            while(!stop.IsCancellationRequested)
+            {
+                var tcp=await listener!.AcceptTcpClientAsync(stop.Token);
+                if(flows.Count>=128){tcp.Dispose();continue;}
+                var id=checked((uint)Interlocked.Increment(ref flowSerial));var flow=new OverlayFlow(this,id,tcp);
+                if(!flows.TryAdd(id,flow)){tcp.Dispose();continue;}await SendReliable(1,id,[]);flow.Start();
+            }
+        }
+        catch(Exception ex)when(stop.IsCancellationRequested){Diagnostics.Log("listener-stopped",ex.Message);}
+    }
+    internal void ExpireUdp(long now)
+    {
+        lock(udpGate)
+            foreach(var flow in udpTouched.Where(p=>now-p.Value>120000).Select(p=>p.Key).ToArray())
+            {
+                udpTouched.Remove(flow);
+                if(udpRemotes.TryRemove(flow,out var remote))udpIds.Remove(remote);
+            }
+    }
+    internal int UdpFlowCount=>udpRemotes.Count;
+    async Task ReadFacade()
+    {
+        try
+        {
+            while(!stop.IsCancellationRequested)
+            {
+                var packet=await facade!.ReceiveAsync(stop.Token);if(packet.Buffer.Length>1500)continue;
+                uint flow;lock(udpGate)
+                {
+                    if(!udpIds.TryGetValue(packet.RemoteEndPoint,out flow))
+                    {if(udpIds.Count>=256){UdpDrops++;continue;}flow=checked((uint)Interlocked.Increment(ref flowSerial));udpIds[packet.RemoteEndPoint]=flow;udpRemotes[flow]=packet.RemoteEndPoint;}
+                    udpTouched[flow]=Environment.TickCount64;
+                }
+                await SendDatagram(flow,packet.Buffer);
+            }
+        }
+        catch(Exception ex)when(ex is SocketException or OperationCanceledException or ObjectDisposedException){Diagnostics.Log("facade-udp",ex.Message);}
+    }
+    async Task SendDatagram(uint flow,byte[] data)
+    {
+        var link=Active();if(link==null){UdpDrops++;return;}
+        var id=Interlocked.Increment(ref udpSequence);var count=(data.Length+Fragment-1)/Fragment;
+        for(var i=0;i<count;i++)
+        {
+            var payload=new byte[2+Math.Min(Fragment,data.Length-i*Fragment)];payload[0]=(byte)i;payload[1]=(byte)count;data.AsSpan(i*Fragment,payload.Length-2).CopyTo(payload.AsSpan(2));
+            try{await SendOn(link,Frame(12,id,flow,payload),true);UdpFragments++;}
+            catch(Exception ex)when(ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException){UdpDrops++;Diagnostics.Log("udp-send",ex.Message);}
+        }
+    }
+    async Task Datagram(uint flow,long id,byte[] payload)
+    {
+        if(payload.Length<3||payload[1] is <1 or >2||payload[0]>=payload[1]||payload.Length>Fragment+2){UdpDrops++;return;}
+        byte[]? data=null;
+        lock(udpGate)
+        {
+            foreach(var old in fragments.Where(p=>Environment.TickCount64-p.Value.Time>2000).Select(p=>p.Key).ToArray()){fragments.Remove(old);UdpDrops++;}
+            var key=(flow,id);
+            if(!fragments.TryGetValue(key,out var buffer))
+            {if(fragments.Count>=256){UdpDrops++;return;}fragments[key]=buffer=new(payload[1],Environment.TickCount64);}
+            if(buffer.Parts.Length!=payload[1]){UdpDrops++;return;}
+            if(buffer.Parts[payload[0]]==null){buffer.Parts[payload[0]]=payload[2..];buffer.Bytes+=payload.Length-2;}
+            if(buffer.Bytes>1500){fragments.Remove(key);UdpDrops++;return;}
+            if(buffer.Parts.All(p=>p!=null)){data=buffer.Parts.SelectMany(p=>p).ToArray();fragments.Remove(key);}
+        }
+        if(data==null)return;
+        if(caller)
+        {
+            IPEndPoint? remote;
+            lock(udpGate){if(udpRemotes.TryGetValue(flow,out remote))udpTouched[flow]=Environment.TickCount64;}
+            if(remote!=null)await facade!.SendAsync(data,remote,stop.Token);return;
+        }
+        if(!targetUdp.TryGetValue(flow,out var target))
+        {
+            if(targetUdp.Count>=256){UdpDrops++;return;}
+            target=new TargetUdp(targetPort,reply=>SendDatagram(flow,reply),stop.Token,1500);targetUdp[flow]=target;
+            var captured=target;_=target.Completion.ContinueWith(t=>{targetUdp.TryRemove(new KeyValuePair<uint,TargetUdp>(flow,captured));captured.Dispose();},TaskScheduler.Default);
+        }
+        await target.Send(data);
+    }
+    public async Task ReceiveBaseUdp(byte[] data)
+    {if(Link("base") is{} link)await Receive(link,data,true);}
+    public async Task ReceiveUdp(OverlayLink link,byte[] data)=>await Receive(link,data,true);
+    public object Snapshot()
+    {
+        int buffered;lock(sequenceGate)buffered=pending.Values.Sum(p=>p.Length);
+        return new{selected,flows=flows.Count,udpFlows=caller?udpRemotes.Count:targetUdp.Count,bufferedBytes=buffered,Retransmits,Duplicates,UdpFragments,UdpDrops,Switches,
+            replayRejected=cipher.Replays,authenticationRejected=cipher.Rejected,
+            paths=links.Values.Select(l=>new{l.Name,l.Live,l.Network,l.RttMs,l.JitterMs,l.BandwidthMbps,l.Probes,l.Lost,l.Sent,l.Received,quality=l.Quality}).ToArray()};
+    }
+    public async ValueTask DisposeAsync()
+    {
+        if(Interlocked.Exchange(ref disposed,1)!=0)return;stop.Cancel();listener?.Stop();facade?.Dispose();
+        foreach(var pendingControl in controls.Values)pendingControl.TrySetCanceled();
+        foreach(var link in links.Values)await link.DisposeAsync();foreach(var flow in flows.Values)flow.Close();foreach(var udp in targetUdp.Values)udp.Dispose();
+        try{await Task.WhenAll(links.Values.Select(l=>l.Reader).Concat([maintenance,orderedReceiver,replyWriter,ackWriter,accept,datagramReader,reconnect]));}catch(Exception ex){Diagnostics.Log("overlay-close",ex.Message);}
+        cipher.Dispose();
+    }
+    sealed class OverlayFlow(OverlaySession owner,uint id,TcpClient? accepted)
+    {
+        readonly Channel<byte[]> received=Channel.CreateBounded<byte[]>(new BoundedChannelOptions(32){SingleReader=true,SingleWriter=true,FullMode=BoundedChannelFullMode.Wait});
+        readonly CancellationTokenSource stop=CancellationTokenSource.CreateLinkedTokenSource(owner.Token);
+        TcpClient? socket=accepted;
+        public ValueTask Enqueue(byte[] data)=>received.Writer.WriteAsync(data,stop.Token);
+        public void Start()=>_=Run();
+        public void Close(){stop.Cancel();socket?.Dispose();received.Writer.TryComplete();}
+        async Task Run()
+        {
+            try
+            {
+                if(socket==null){socket=new TcpClient{NoDelay=true};await socket.ConnectAsync(IPAddress.Loopback,owner.targetPort,stop.Token);}
+                socket.NoDelay=true;var stream=socket.GetStream();
+                async Task Read()
+                {
+                    var buffer=new byte[Chunk];int size;
+                    while((size=await stream.ReadAsync(buffer,stop.Token))>0)await owner.SendReliable(2,id,buffer[..size]);
+                    await owner.SendReliable(3,id,[]);
+                }
+                async Task Write()
+                {
+                    await foreach(var data in received.Reader.ReadAllAsync(stop.Token))
+                    {if(data.Length==0){socket.Client.Shutdown(SocketShutdown.Send);break;}await stream.WriteAsync(data,stop.Token);}
+                }
+                var read=Read();var write=Write();var first=await Task.WhenAny(read,write);if(first.IsFaulted||first.IsCanceled)Close();await Task.WhenAll(read,write);
+            }
+            catch(Exception ex)
+            {
+                Diagnostics.Log("tcp-flow",ex.Message);
+                if(!owner.stop.IsCancellationRequested)try{await owner.SendReliable(4,id,[]);}catch(Exception sendError){Diagnostics.Log("tcp-reset",sendError.Message);}
+            }
+            finally{Close();owner.flows.TryRemove(new KeyValuePair<uint,OverlayFlow>(id,this));}
+        }
+    }
+}
+
+sealed record PathQuality(int Samples,int Received,double MedianMs,double P90Ms,double JitterMs,double Loss,double? Mbps)
+{
+    public double Score=>P90Ms+2*JitterMs+1000*Loss;
+    public bool Eligible=>Samples>=8&&Received>=7&&Mbps is >0;
+    public static PathQuality From(double?[] samples,double? mbps)
+    {
+        var values=samples.Where(x=>x.HasValue).Select(x=>x!.Value).Order().ToArray();
+        if(values.Length==0)return new(samples.Length,0,1e6,1e6,1e6,1,mbps);
+        var median=values[values.Length/2];var p90=values[(int)Math.Ceiling(values.Length*.9)-1];
+        return new(samples.Length,values.Length,median,p90,p90-median,1-values.Length/(double)samples.Length,mbps);
+    }
+    public bool BetterThan(PathQuality baseline)
+    {
+        if(!Eligible||Loss>Math.Max(.125,baseline.Loss)||baseline.Mbps is{} old&&Mbps<old*.7)return false;
+        if(baseline.Samples<8||baseline.Received<4)return true;
+        return baseline.Score-Score>=Math.Max(5,baseline.Score*.15)||
+            (baseline.Mbps is >0&&Mbps>=baseline.Mbps*1.5&&P90Ms<=baseline.P90Ms+5&&Loss<=baseline.Loss);
+    }
+}
+sealed record TransitCandidate(string Endpoint,int Capacity,int Active,int Mbps,long Seen);
+sealed record TransitCandidates(TransitCandidate[] Candidates);
+sealed record TransitTicket(string Route,string A,string B,string C,string ASession,string BSession,long Expires,int Mbps);
+sealed record TransitOffer(string Route,string ARelaySession,string BRelaySession,string AToken,string BToken);
+sealed record TransitReply(string Status,SignedEnvelope Ticket,SignedEnvelope? Offer);
+sealed record TransitActivation(SignedEnvelope Ticket,SignedEnvelope Offer);
+
+sealed class TransitCoordinator : IAsyncDisposable
+{
+    readonly Engine engine;
+    readonly DirectoryClient directory;
+    readonly Session session;
+    readonly OverlaySession overlay;
+    readonly ConcurrentDictionary<string,Leg> legs=new();
+    readonly CancellationTokenSource stop;
+    readonly SemaphoreSlim selecting=new(1),keyGate=new(1);
+    readonly Task loop;
+    string? directoryKey;
+    long testSelectionUntil;
+    long nextSelection;
+    Task selectionTask=Task.CompletedTask;
+    sealed class Leg(string route,string candidate,string folder,string endpoint)
+    {
+        public string Route{get;}=route;
+        public string Candidate{get;}=candidate;
+        public string Folder{get;}=folder;
+        public string Endpoint{get;}=endpoint;
+        public long Created{get;}=Environment.TickCount64;
+        public Child? Child;
+        public OverlayLink? Link;
+        public UdpClient? Udp;
+        public Task Reader=Task.CompletedTask;
+        public bool Activated,PeerDirect;
+        public PathQuality? Quality;
+        public int Degraded;
+    }
+    public TransitCoordinator(Engine engine,DirectoryClient directory,Session session)
+    {
+        this.engine=engine;this.directory=directory;this.session=session;overlay=session.Overlay!;
+        stop=CancellationTokenSource.CreateLinkedTokenSource(session.Token);overlay.Control=Handle;
+        loop=Run();
+    }
+    async Task<string> ServerKey(CancellationToken ct)
+    {
+        await keyGate.WaitAsync(ct);
+        try
+        {
+            if(directoryKey!=null)return directoryKey;
+            var response=await directory.Call<JsonElement>("/api/v2/transit/key",new{},ct);
+            var key=Wire.Endpoint(response.GetProperty("endpoint").GetString()!);
+            var path=Path.Combine(engine.State.Root,"transit-directory-key");
+            if(File.Exists(path)&&File.ReadAllText(path).Trim()!=key)throw new CryptographicException("NJ 中继票据公钥发生改变，已阻止候选中继。");
+            File.WriteAllText(path,key);directoryKey=key;return key;
+        }
+        finally{keyGate.Release();}
+    }
+    async Task<Leg> Prepare(string route,string candidate,CancellationToken ct)
+    {
+        if(!Regex.IsMatch(route,@"\A[0-9a-f]{32}\z")||Wire.Endpoint(candidate)==engine.Id||candidate==session.PeerId||legs.Count>=3)
+            throw new IOException("候选中继参数或数量无效。");
+        if(legs.TryGetValue(route,out var existing))return existing;
+        var folder=engine.State.NewSessionDirectory();var endpoint=await Ard.Identity(folder,ct);
+        var leg=new Leg(route,candidate,folder,endpoint);
+        if(!legs.TryAdd(route,leg)){Directory.Delete(folder,true);return legs[route];}
+        return leg;
+    }
+    async Task<object> Handle(string method,JsonElement data,CancellationToken ct)
+    {
+        if(method=="transit-prepare")
+        {
+            if(!session.Host)throw new IOException("只有主控可以发起中继探测。");
+            var leg=await Prepare(data.GetProperty("route").GetString()!,data.GetProperty("candidate").GetString()!,ct);
+            var aSession=Wire.Endpoint(data.GetProperty("aSession").GetString()!);
+            return new{endpoint=leg.Endpoint,approval=directory.ApproveTransit(leg.Route,session.PeerId,leg.Candidate,aSession,leg.Endpoint)};
+        }
+        if(method=="transit-activate")
+        {
+            if(!session.Host)throw new IOException("中继激活方向无效。");
+            var activation=data.Deserialize<TransitActivation>(Wire.Json)!;
+            var ticket=DirectoryClient.Verify<TransitTicket>(activation.Ticket,"/transit-ticket/v2",await ServerKey(ct));
+            if(!legs.TryGetValue(ticket.Route,out var leg))throw new IOException("未知候选中继会话。");
+            await Activate(leg,activation,ct);return new{ok=true};
+        }
+        var route=data.GetProperty("route").GetString()!;
+        if(method=="transit-close"){await Close(route,false);return new{ok=true};}
+        if(method=="transit-status")
+        {
+            if(!legs.TryGetValue(route,out var leg))return new{direct=false,network="closed",live=false};
+            leg.PeerDirect=data.TryGetProperty("direct",out var direct)&&direct.GetBoolean();
+            return new{direct=IsDirect(leg),network=leg.Child?.Network,live=leg.Link?.Live??false,rttMs=leg.Child?.PathRtt};
+        }
+        throw new IOException("未知中继协调指令。");
+    }
+    static bool IsDirect(Leg leg)=>leg.Child!=null&&!leg.Child.Exited.IsCompleted&&leg.Child.Network.StartsWith("P2P",StringComparison.Ordinal)&&leg.Link?.Live==true;
+    async Task Activate(Leg leg,TransitActivation activation,CancellationToken ct)
+    {
+        if(leg.Activated)throw new IOException("中继入口已激活。");
+        var ticket=DirectoryClient.Verify<TransitTicket>(activation.Ticket,"/transit-ticket/v2",await ServerKey(ct));
+        if(ticket.Route!=leg.Route||ticket.C!=leg.Candidate||ticket.Expires<=DateTimeOffset.UtcNow.ToUnixTimeSeconds()||
+            ticket.A!=(session.Host?session.PeerId:engine.Id)||ticket.B!=(session.Host?engine.Id:session.PeerId)||
+            (session.Host?ticket.BSession:ticket.ASession)!=leg.Endpoint)throw new CryptographicException("中继票据没有绑定当前双方和临时身份。");
+        var offer=DirectoryClient.Verify<TransitOffer>(activation.Offer,$"/api/v2/transit/routes/{leg.Route}/ready",leg.Candidate);
+        if(offer.Route!=leg.Route)throw new CryptographicException("C 的签名绑定了错误会话。");
+        var remote=Wire.Endpoint(session.Host?offer.BRelaySession:offer.ARelaySession);
+        var token=Convert.FromHexString(session.Host?offer.BToken:offer.AToken);if(token.Length!=16)throw new IOException("中继能力令牌无效。");
+        var port=Wire.Port();leg.Child=Ard.Start(leg.Folder,false,port,remote,engine.Settings);
+        leg.Child.Output+=line=>Diagnostics.Log("transit-ard",line);
+        await leg.Child.WaitFor("READY:",ct);
+        var tcp=new TcpClient{NoDelay=true};
+        try
+        {
+            await tcp.ConnectAsync(IPAddress.Loopback,port,ct);
+            await Wire.WriteJson(tcp.GetStream(),new{route=leg.Route,token=Convert.ToHexString(token).ToLowerInvariant()},ct);
+            if((await Wire.Read(tcp.GetStream(),1,ct))[0]!=0)throw new IOException("C 拒绝了转发入口。");
+            var udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));Wire.ConfigureUdp(udp);leg.Udp=udp;udp.Connect(IPAddress.Loopback,port);
+            var link=new OverlayLink(leg.Route,tcp,async(payload,cancel)=>
+            {var packet=new byte[16+payload.Length];token.CopyTo(packet,0);payload.CopyTo(packet,16);await udp.SendAsync(packet,cancel);},()=>leg.Child.Network);
+            leg.Link=link;await overlay.Add(link);leg.Activated=true;
+            leg.Reader=ReadDatagrams(leg,token);Diagnostics.Log("transit-active",leg.Route);
+        }
+        catch{tcp.Dispose();throw;}
+    }
+    async Task ReadDatagrams(Leg leg,byte[] token)
+    {
+        try
+        {
+            while(!stop.IsCancellationRequested&&leg.Link!.Live)
+            {
+                var packet=await leg.Udp!.ReceiveAsync(stop.Token);
+                if(packet.Buffer.Length>=54&&CryptographicOperations.FixedTimeEquals(packet.Buffer.AsSpan(0,16),token))
+                    await overlay.ReceiveUdp(leg.Link,packet.Buffer[16..]);
+            }
+        }
+        catch(Exception ex)when(ex is SocketException or OperationCanceledException or ObjectDisposedException){Diagnostics.Log("transit-udp",ex.Message);}
+    }
+    async Task<Leg?> EvaluateCandidate(TransitCandidate candidate,CancellationToken ct)
+    {
+        var route=Guid.NewGuid().ToString("N");var keep=false;
+        using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct,stop.Token);timeout.CancelAfter(TimeSpan.FromSeconds(85));
+        try
+        {
+            var leg=await Prepare(route,candidate.Endpoint,timeout.Token);
+            var b=await overlay.Request("transit-prepare",new{route,candidate=candidate.Endpoint,aSession=leg.Endpoint},timeout.Token);
+            Peer peer;lock(engine.State.Peers)peer=engine.State.Peers.Single(p=>p.Id==session.PeerId);
+            await directory.Call<JsonElement>("/api/v2/transit/request",new{route,target=session.PeerId,candidate=candidate.Endpoint,aSession=leg.Endpoint,bSession=b.GetProperty("endpoint").GetString(),grant=peer.Grant,approval=b.GetProperty("approval")},timeout.Token);
+            TransitReply? reply=null;
+            while(reply?.Status!="ready")
+            {
+                await Task.Delay(500,timeout.Token);
+                reply=await directory.Call<TransitReply>("/api/v2/transit/routes/"+route,new{},timeout.Token);
+                if(reply.Status=="closed")throw new IOException("候选中继已关闭。");
+            }
+            var activation=new TransitActivation(reply.Ticket,reply.Offer??throw new IOException("缺少 C 签名。"));
+            await Task.WhenAll(Activate(leg,activation,timeout.Token),overlay.Request("transit-activate",activation,timeout.Token));
+            while(true)
+            {
+                var bStatus=await overlay.Request("transit-status",new{route,direct=IsDirect(leg)},timeout.Token);
+                leg.PeerDirect=bStatus.GetProperty("direct").GetBoolean();
+                if(IsDirect(leg)&&leg.PeerDirect)break;
+                await Task.Delay(1000,timeout.Token);
+            }
+            leg.Quality=await overlay.Evaluate(leg.Link!,timeout.Token);
+            Diagnostics.Log("candidate-quality",route+" "+JsonSerializer.Serialize(leg.Quality,Wire.Json));
+            if(!leg.Quality.Eligible||!IsDirect(leg)||!leg.PeerDirect)return null;
+            keep=true;return leg;
+        }
+        catch(OperationCanceledException)when(ct.IsCancellationRequested){throw;}
+        catch(Exception ex){Diagnostics.Log("candidate-failed",candidate.Endpoint+": "+ex.Message);return null;}
+        finally{if(!keep)await Close(route,true);}
+    }
+    async Task Choose(Leg leg,CancellationToken ct)
+    {
+        var status=await overlay.Request("transit-status",new{route=leg.Route,direct=IsDirect(leg)},ct);
+        leg.PeerDirect=status.GetProperty("direct").GetBoolean();
+        if(!IsDirect(leg)||!leg.PeerDirect)throw new IOException("切换前复核双段 Direct 失败。");
+        await overlay.Request("select",new{path=leg.Route},ct);overlay.Select(leg.Route);
+        nextSelection=Environment.TickCount64+60000;
+        Diagnostics.Log("candidate-chosen",leg.Route+" "+JsonSerializer.Serialize(leg.Quality,Wire.Json));
+    }
+    public async Task<bool> ProbeCandidate(TransitCandidate candidate,bool testSelect,CancellationToken ct)
+    {
+        await selecting.WaitAsync(ct);Leg? leg=null;var chosen=false;
+        try
+        {
+            leg=await EvaluateCandidate(candidate,ct);if(leg==null)return false;
+            var baseline=await overlay.Evaluate(overlay.Link(overlay.Selected)!,ct);
+            if(!testSelect&&(session.Process.Network.StartsWith("P2P",StringComparison.Ordinal)||!leg.Quality!.BetterThan(baseline)))return false;
+            if(testSelect)testSelectionUntil=Environment.TickCount64+15000;
+            await Choose(leg,ct);chosen=true;return true;
+        }
+        finally
+        {
+            if(leg!=null&&!chosen)await Close(leg.Route,true);selecting.Release();
+        }
+    }
+    async Task SelectBest()
+    {
+        await selecting.WaitAsync(stop.Token);
+        var evaluated=new List<Leg>();
+        try
+        {
+            var list=await directory.Call<TransitCandidates>("/api/v2/transit/candidates",new{target=session.PeerId},stop.Token);
+            var current=overlay.Selected;
+            var candidates=list.Candidates.Where(c=>legs.Values.All(l=>l.Candidate!=c.Endpoint)).Take(Math.Max(0,3-legs.Count)).ToArray();
+            if(candidates.Length==0)return;
+            var baselineTask=overlay.Evaluate(overlay.Link(current)??overlay.Link("base")!,stop.Token);
+            var results=await Task.WhenAll(candidates.Select(c=>EvaluateCandidate(c,stop.Token)));
+            evaluated.AddRange(results.OfType<Leg>());var baseline=await baselineTask;
+            Diagnostics.Log("baseline-quality",JsonSerializer.Serialize(baseline,Wire.Json));
+            if(session.Process.Network.StartsWith("P2P",StringComparison.Ordinal))return;
+            var best=evaluated.Where(l=>l.Quality!.BetterThan(baseline)).OrderBy(l=>l.Quality!.Score).ThenByDescending(l=>l.Quality!.Mbps).FirstOrDefault();
+            if(best==null)return;
+            await Choose(best,stop.Token);
+            if(current!="base"&&current!=best.Route)await Close(current,true);
+        }
+        catch(Exception ex){Diagnostics.Log("candidate-selection",ex.Message);}
+        finally
+        {
+            foreach(var leg in evaluated.Where(l=>l.Route!=overlay.Selected))await Close(leg.Route,true);
+            nextSelection=Environment.TickCount64+60000;selecting.Release();
+        }
+    }
+    async Task Run()
+    {
+        var round=0;
+        while(!stop.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(3000,stop.Token);
+                foreach(var leg in legs.Values.ToArray())
+                {
+                    if(!leg.Activated)
+                    {if(Environment.TickCount64-leg.Created>100000)await Close(leg.Route,false);continue;}
+                    if(leg.Child!.Exited.IsCompleted||!leg.Link!.Live)
+                    {await Close(leg.Route,!session.Host);continue;}
+                    if(overlay.Selected==leg.Route&&(!IsDirect(leg)||!leg.PeerDirect))
+                    {await Fallback("候选路径已不满足双段 Direct");await Close(leg.Route,!session.Host);continue;}
+                    if(round%5==0)
+                        await directory.Call<JsonElement>($"/api/v2/transit/routes/{leg.Route}/renew",new{},stop.Token);
+                    if(!session.Host)
+                    {
+                        var status=await overlay.Request("transit-status",new{route=leg.Route,direct=IsDirect(leg)},stop.Token);
+                        leg.PeerDirect=status.GetProperty("direct").GetBoolean();
+                        if(overlay.Selected==leg.Route&&overlay.Link("base") is{} fallback)
+                        {
+                            var quality=leg.Link.Quality;var baseline=fallback.Quality;
+                            var worse=quality.Samples>=8&&baseline.Samples>=8&&
+                                (quality.Loss>.25&&quality.Loss>baseline.Loss||quality.Score>baseline.Score*1.3+5);
+                            leg.Degraded=worse?leg.Degraded+1:0;
+                            if(leg.Degraded>=3){await Fallback("候选连续三轮退化");await Close(leg.Route,true);}
+                        }
+                    }
+                }
+                if(!session.Host&&Environment.TickCount64>=testSelectionUntil&&session.Process.Network.StartsWith("P2P",StringComparison.Ordinal)&&overlay.Selected!="base")
+                {
+                    await Fallback("A–B 已达成 Direct");foreach(var route in legs.Keys)await Close(route,true);
+                }
+                if(!session.Host&&selectionTask.IsCompleted&&selecting.CurrentCount!=0&&Environment.TickCount64>=nextSelection&&
+                    !session.Process.Network.StartsWith("P2P",StringComparison.Ordinal))
+                {
+                    nextSelection=Environment.TickCount64+60000;selectionTask=SelectBest();
+                }
+                round++;
+            }
+            catch(OperationCanceledException)when(stop.IsCancellationRequested){break;}
+            catch(Exception ex){Diagnostics.Log("transit-coordinator",ex.Message);}
+        }
+    }
+    async Task Fallback(string reason)
+    {
+        Diagnostics.Log("fallback",reason);
+        nextSelection=Environment.TickCount64+5000;
+        if(overlay.Link("base")?.Live==true)overlay.Select("base");
+        try{await overlay.Request("select",new{path="base"},stop.Token);}
+        catch(Exception ex){Diagnostics.Log("fallback-notify",ex.Message);}
+    }
+    async Task Close(string route,bool notify)
+    {
+        if(!legs.TryRemove(route,out var leg))return;
+        if(overlay.Selected==route&&overlay.Link("base")?.Live==true)overlay.Select("base");
+        await overlay.Remove(route);leg.Udp?.Dispose();
+        if(leg.Child!=null)await leg.Child.DisposeAsync();
+        try{await leg.Reader;}catch(Exception ex){Diagnostics.Log("transit-reader-close",ex.Message);}
+        try{Directory.Delete(leg.Folder,true);}catch(IOException ex){Diagnostics.Log("transit-folder-close",ex.Message);}
+        if(notify&&!stop.IsCancellationRequested)
+        {
+            try
+            {
+                using var timeout=CancellationTokenSource.CreateLinkedTokenSource(stop.Token);timeout.CancelAfter(TimeSpan.FromSeconds(4));
+                await directory.Call<JsonElement>($"/api/v2/transit/routes/{route}/close",new{},timeout.Token);
+                await overlay.Request("transit-close",new{route},timeout.Token);
+            }
+            catch(Exception ex){Diagnostics.Log("transit-close-notify",ex.Message);}
+        }
+    }
+    public async ValueTask DisposeAsync()
+    {
+        stop.Cancel();try{await Task.WhenAll(loop,selectionTask);}catch(Exception ex){Diagnostics.Log("transit-stop",ex.Message);}
+        foreach(var route in legs.Keys)await Close(route,false);overlay.Control=null;
+    }
+}
+
+static class TransitTest
+{
+    static void Check(bool ok,string message){if(!ok)throw new Exception(message);}
+    public static async Task<int> Run(string[] args)
+    {
+        if(args.Contains("--integration-only")){await Integration(args);return 0;}
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(60));var ct=timeout.Token;
+        var baseline=PathQuality.From([40,41,42,42,43,44,45,46],20);
+        Check(PathQuality.From([20,21,22,22,23,24,25,26],20).BetterThan(baseline),"significant RTT improvement rejected");
+        Check(!PathQuality.From([38,39,40,40,41,42,43,44],20).BetterThan(baseline),"marginal improvement triggered switch");
+        Check(!PathQuality.From([10,11,12,12,13,14,null,null],20).BetterThan(baseline),"lossy candidate selected");
+        Check(!PathQuality.From([10,11,12,12,13,14,15,16],10).BetterThan(baseline),"insufficient bandwidth selected");
+        Check(PathQuality.From([40,41,42,42,43,44,45,46],31).BetterThan(baseline),"material bandwidth improvement rejected");
+        Console.WriteLine("PASS: candidate quality rejects noise, loss and bandwidth regression; accepts meaningful gains.");
+        using(var receive=new UdpClient(new IPEndPoint(IPAddress.Loopback,0)))
+        using(var send=new UdpClient(new IPEndPoint(IPAddress.Loopback,0)))
+        {
+            send.Connect((IPEndPoint)receive.Client.LocalEndPoint!);
+            await send.SendAsync(new byte[8],ct);var hello=await receive.ReceiveAsync(ct);await receive.SendAsync(hello.Buffer,hello.RemoteEndPoint,ct);await send.ReceiveAsync(ct);
+            await send.SendAsync(new byte[1158],ct);await send.SendAsync(new byte[458],ct);
+            Check((await receive.ReceiveAsync(ct)).Buffer.Length==1158,"raw UDP first");
+            Check((await receive.ReceiveAsync(ct).AsTask().WaitAsync(TimeSpan.FromSeconds(2),ct)).Buffer.Length==458,"raw UDP second");
+        }
+        Console.WriteLine("PASS: raw localhost UDP burst.");
+        var secret=RandomNumberGenerator.GetBytes(32);var context=RandomNumberGenerator.GetBytes(32);
+        using(var a=new OverlayCipher(secret,context,true))
+        using(var b=new OverlayCipher(secret,context,false))
+        {
+            var plain=RandomNumberGenerator.GetBytes(400);var cipher=a.Encrypt(plain,true);
+            Check(b.Decrypt(cipher,true)!.SequenceEqual(plain),"AEAD round trip");
+            Check(b.Decrypt(cipher,true)==null,"UDP replay accepted");
+            var modified=a.Encrypt(plain,true);modified[^1]^=1;Check(b.Decrypt(modified,true)==null,"Tamper accepted");
+            var wrong=RandomNumberGenerator.GetBytes(32);using var c=new OverlayCipher(wrong,context,false);
+            Check(c.Decrypt(a.Encrypt(plain,false),false)==null,"C decrypted payload");
+        }
+        Console.WriteLine("PASS: directional AEAD, UDP replay rejection, tamper rejection, wrong-key rejection.");
+        var echo=new TcpListener(IPAddress.Loopback,0);echo.Start();var echoPort=((IPEndPoint)echo.LocalEndpoint).Port;
+        using var echoUdp=new UdpClient(new IPEndPoint(IPAddress.Loopback,echoPort));
+        var echoTasks=new ConcurrentBag<Task>();
+        var accept=Task.Run(async()=>
+        {
+            try
+            {
+                while(!ct.IsCancellationRequested)
+                {
+                    var tcp=await echo.AcceptTcpClientAsync(ct);tcp.NoDelay=true;echoTasks.Add(Task.Run(async()=>
+                    {
+                        using(tcp)
+                        try{var buffer=new byte[32768];int size;while((size=await tcp.GetStream().ReadAsync(buffer,ct))>0)await tcp.GetStream().WriteAsync(buffer.AsMemory(0,size),ct);tcp.Client.Shutdown(SocketShutdown.Send);}
+                        catch(Exception ex){Diagnostics.Log("test-echo",ex.Message);}
+                    }));
+                }
+            }
+            catch(Exception ex){Diagnostics.Log("test-accept",ex.Message);}
+        });
+        var udpEcho=Task.Run(async()=>
+        {
+            try{while(!ct.IsCancellationRequested){var p=await echoUdp.ReceiveAsync(ct);await echoUdp.SendAsync(p.Buffer,p.RemoteEndPoint,ct);}}
+            catch(Exception ex){Diagnostics.Log("test-udp",ex.Message);}
+        });
+        var cap=RandomNumberGenerator.GetBytes(16);OverlaySession? host=null;
+        await using var gateway=new Gateway(new Settings{TcpPorts=[echoPort],UdpPorts=[echoPort]},cap);
+        gateway.AttachOverlay=async(tcp,command,cancel)=>
+        {
+            if(command==4){host=await OverlaySession.AcceptHello(tcp,gateway.Port,cap,()=>"P2P / localhost-test",cancel);gateway.Overlay=host;}
+            else{var id=await Wire.ReadJson<JsonElement>(tcp.GetStream(),cancel);Check(id.GetProperty("session").GetString()==host!.Id,"resume identity");await tcp.GetStream().WriteAsync(new byte[]{0},cancel);}
+            var link=new OverlayLink("base",tcp,gateway.SendOverlayUdp,()=>"P2P / localhost-test");await host!.Add(link);await link.Reader;
+        };
+        var root=Path.Combine(Path.GetTempPath(),"ArdUi-v2-test-"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            await using var caller=await OverlaySession.Connect(gateway.Port,cap,()=>"P2P / localhost-test",ct);
+            using var tcp=new TcpClient{NoDelay=true};await tcp.ConnectAsync(IPAddress.Loopback,caller.Port,ct);
+            var header=new byte[23];"AUI1"u8.CopyTo(header);cap.CopyTo(header,4);header[20]=1;BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(21),(ushort)echoPort);
+            await tcp.GetStream().WriteAsync(header,ct);Check((await Wire.Read(tcp.GetStream(),1,ct))[0]==0,"gateway open");
+            async Task Exchange(int length)
+            {
+                var payload=RandomNumberGenerator.GetBytes(length);
+                var read=Wire.Read(tcp.GetStream(),length,ct);await tcp.GetStream().WriteAsync(payload,ct);
+                try{Check((await read.WaitAsync(TimeSpan.FromSeconds(12),ct)).SequenceEqual(payload),"TCP bytes changed or duplicated");}
+                catch{Diagnostics.Log("test-caller-state",JsonSerializer.Serialize(caller.Snapshot()));Diagnostics.Log("test-host-state",JsonSerializer.Serialize(host!.Snapshot()));throw;}
+            }
+            using var udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));udp.Connect(IPAddress.Loopback,caller.Port);
+            async Task Datagram()
+            {
+                var payload=RandomNumberGenerator.GetBytes(Wire.MaxUdp);var packet=Wire.Packet(cap,echoPort,payload);
+                await udp.SendAsync(packet,ct);UdpReceiveResult response;
+                try{response=await udp.ReceiveAsync(ct).AsTask().WaitAsync(TimeSpan.FromSeconds(5),ct);}
+                catch{Diagnostics.Log("test-caller-state",JsonSerializer.Serialize(caller.Snapshot()));Diagnostics.Log("test-host-state",JsonSerializer.Serialize(host!.Snapshot()));throw;}
+                Check(response.Buffer.SequenceEqual(packet),"fragmented native UDP corrupted");
+            }
+            await Exchange(100000);await Datagram();Console.WriteLine("PASS: multiplexed TCP and full-sized native UDP through the authenticated gateway.");
+            await Exchange(10*1024*1024);Console.WriteLine("PASS: intact 10 MiB stream crosses the 8 MiB reliable window without deadlock.");
+            Check(caller.UdpFlowCount>0,"UDP mapping was not recorded");caller.ExpireUdp(Environment.TickCount64+120001);
+            Check(caller.UdpFlowCount==0,"idle UDP mappings did not expire");await Datagram();
+            Console.WriteLine("PASS: idle UDP mapping is released and the same source socket reconnects.");
+            await using var relay=await TestRelay.Create(caller,host!,ct);
+            await caller.Request("select",new{path="test-C"},ct);caller.Select("test-C");
+            await Exchange(100000);await Datagram();Console.WriteLine("PASS: same TCP socket survives base-to-C switch; UDP traverses C with fragmentation.");
+            relay.DuplicateUdp=true;await Datagram();Console.WriteLine("PASS: duplicated relay datagrams rejected without duplicate business delivery.");
+            await caller.Remove("base");await Exchange(50000);
+            await Task.Delay(2000,ct);Check(caller.Link("base")?.Live==true,"base did not resume");
+            Console.WriteLine("PASS: standby base TCP connection reconnects while C carries business.");
+            await relay.Fail();await Exchange(100000);await Datagram();
+            Check(caller.Selected=="base","C failure did not fall back");
+            Console.WriteLine("PASS: C failure falls back automatically; original TCP socket and UDP mapping remain usable.");
+            var business=tcp.GetStream();tcp.Client.Shutdown(SocketShutdown.Send);Check(await business.ReadAsync(new byte[1],ct)==0,"TCP half-close");
+            var report=Diagnostics.Export(root,null);
+            using(var archive=ZipFile.OpenRead(report))
+            {
+                Check(archive.Entries.Count>=3,"diagnostic ZIP incomplete");
+                foreach(var entry in archive.Entries){using var reader=new StreamReader(entry.Open());var text=reader.ReadToEnd();Check(!text.Contains(Convert.ToHexString(cap),StringComparison.OrdinalIgnoreCase),"diagnostic capability leak");}
+            }
+            Console.WriteLine("PASS: TCP half-close and redacted diagnostic ZIP.");
+            if(args.Contains("--integration"))await Integration(args);
+            return 0;
+        }
+        catch
+        {Console.Error.WriteLine("Diagnostics: "+Diagnostics.Export(root,null));throw;}
+        finally
+        {
+            if(host!=null)await host.DisposeAsync();timeout.Cancel();echo.Stop();echoUdp.Dispose();
+            await Task.WhenAll(accept,udpEcho);await Task.WhenAll(echoTasks);
+        }
+    }
+    static async Task Integration(string[] args)
+    {
+        var root=Environment.GetEnvironmentVariable("ARDUI_TEST_ROOT")??throw new IOException("Run tests/integration_v2.py to start the isolated fixture.");
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(180));var ct=timeout.Token;
+        var echo=new TcpListener(IPAddress.Loopback,0);echo.Start();var port=((IPEndPoint)echo.LocalEndpoint).Port;
+        using var udpEcho=new UdpClient(new IPEndPoint(IPAddress.Loopback,port));Wire.ConfigureUdp(udpEcho);
+        var sockets=new ConcurrentBag<TcpClient>();var workers=new ConcurrentBag<Task>();
+        var accept=Task.Run(async()=>
+        {
+            try
+            {
+                while(!ct.IsCancellationRequested)
+                {
+                    var socket=await echo.AcceptTcpClientAsync(ct);socket.NoDelay=true;sockets.Add(socket);
+                    workers.Add(Task.Run(async()=>
+                    {try{var data=new byte[32768];int n;while((n=await socket.GetStream().ReadAsync(data,ct))>0)await socket.GetStream().WriteAsync(data.AsMemory(0,n),ct);}
+                     catch(Exception ex){Diagnostics.Log("integration-echo",ex.Message);}}));
+                }
+            }
+            catch(Exception ex){Diagnostics.Log("integration-accept",ex.Message);}
+        });
+        var datagrams=Task.Run(async()=>
+        {
+            try{while(!ct.IsCancellationRequested){var p=await udpEcho.ReceiveAsync(ct);await udpEcho.SendAsync(p.Buffer,p.RemoteEndPoint,ct);}}
+            catch(Exception ex){Diagnostics.Log("integration-udp",ex.Message);}
+        });
+        var settings=new Settings{Relay=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY")!,RelayKey=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY_KEY")!,TcpPorts=[port],UdpPorts=[port]};
+        var server=Environment.GetEnvironmentVariable("ARDUI_TEST_SERVER")!;
+        var a=Path.Combine(root,"a");var b=Path.Combine(root,"b");IdentityStore.Prepare(a);IdentityStore.Prepare(b);
+        await using var caller=await Engine.Create(a,settings);await using var host=await Engine.Create(b,settings);
+        await using var ad=new DirectoryClient(caller,server);await using var bd=new DirectoryClient(host,server);
+        ad.Confirm=(_,_)=>Task.FromResult(true);bd.Confirm=(_,_)=>Task.FromResult(true);
+        ad.Notice+=message=>Console.WriteLine("A: "+message);bd.Notice+=message=>Console.WriteLine("B: "+message);
+        try
+        {
+            await ad.Register(ct);await bd.Register(ct);await bd.SetAccess(true,ct);ad.Start();bd.Start();
+            await ad.Connect(bd.Code,bd.AccessPassword,ct);var session=caller.Outgoing[host.Id];
+            Check(session.Overlay!=null&&host.Incoming[caller.Id].Overlay!=null,"v2 authenticated overlay missing");
+            Console.WriteLine("PASS: two real ARD clients, signed identities, enrollment and inner E2E handshake.");
+            var stablePort=session.Forward(port).Port;
+            using var tcp=new TcpClient{NoDelay=true};await tcp.ConnectAsync(IPAddress.Loopback,stablePort,ct);
+            var business=tcp.GetStream();
+            async Task Exchange(int size=262144)
+            {
+                var payload=RandomNumberGenerator.GetBytes(size);var reply=Wire.Read(business,size,ct);
+                await business.WriteAsync(payload,ct);Check((await reply.WaitAsync(TimeSpan.FromSeconds(20),ct)).SequenceEqual(payload),"real ARD business stream corruption");
+            }
+            using var udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));Wire.ConfigureUdp(udp);udp.Connect(IPAddress.Loopback,stablePort);
+            async Task Udp()
+            {
+                for(var i=0;i<3;i++)
+                {
+                    var payload=RandomNumberGenerator.GetBytes(Wire.MaxUdp);await udp.SendAsync(payload,ct);
+                    using var attempt=CancellationTokenSource.CreateLinkedTokenSource(ct);attempt.CancelAfter(TimeSpan.FromSeconds(3));
+                    try{var reply=await udp.ReceiveAsync(attempt.Token);Check(reply.Buffer.SequenceEqual(payload),"native RDP-sized UDP corruption");return;}
+                    catch(OperationCanceledException)when(!ct.IsCancellationRequested){Diagnostics.Log("integration-udp-retry",i.ToString());}
+                }
+                throw new IOException("Native UDP failed three probes.");
+            }
+            await Exchange();await Udp();Console.WriteLine("PASS: TCP and native RDP-sized UDP through the real base ARD path.");
+            TransitCandidate[] candidates=[];
+            for(var i=0;i<20&&candidates.Length==0;i++)
+            {candidates=(await ad.Call<TransitCandidates>("/api/v2/transit/candidates",new{target=host.Id},ct)).Candidates;if(candidates.Length==0)await Task.Delay(500,ct);}
+            Check(candidates.Length>0,"ArdTransit was not registered");
+            Check(await session.Transit!.ProbeCandidate(candidates[0],true,ct),"candidate rejected");
+            var route=session.Overlay!.Selected;Check(route!="base","C was not selected");
+            Check(session.Overlay.Link(route)!.Network.StartsWith("P2P",StringComparison.Ordinal),"A-C not Direct");
+            Check(host.Incoming[caller.Id].Overlay!.Link(route)!.Network.StartsWith("P2P",StringComparison.Ordinal),"B-C not Direct");
+            Console.WriteLine("PASS: independent Python C, NJ signed ticket, C signed temporary identities, both real ARD legs Direct.");
+            await Exchange(1048576);await Udp();Console.WriteLine("PASS: same business TCP socket and native UDP switched to C (explicit test selection because localhost base is faster).");
+            using(var c=Process.GetProcessById(int.Parse(Environment.GetEnvironmentVariable("ARDUI_TEST_TRANSIT_PID")!)))
+            {c.Kill(true);await c.WaitForExitAsync(ct);}
+            await Exchange(1048576);await Udp();Check(session.Overlay.Selected=="base","real C failure did not fall back");
+            Console.WriteLine("PASS: killed C and its ARD children; same TCP stream survived automatic fallback with intact 1 MiB payload.");
+            var old=session.Process;var recovery=Stopwatch.StartNew();await old.DisposeAsync();
+            for(var i=0;i<300&&(ReferenceEquals(old,session.Process)||session.Overlay.Link("base")?.Live!=true);i++)await Task.Delay(100,ct);
+            Check(!ReferenceEquals(old,session.Process),"base ARD was not restarted");
+            Check(session.Overlay.Link("base")?.Live==true,"base transport did not resume within 30 seconds");
+            await Exchange();await Udp();Check(session.Forward(port).Port==stablePort,"local port changed");
+            Console.WriteLine($"PASS: killed base ARD process; overlay and original business socket resumed on the same local port in {recovery.Elapsed.TotalSeconds:F1}s.");
+            await bd.Revoke(caller.Id);Check(host.Incoming.Count==0&&bd.Controllers.Length==0,"revoke did not destroy all host routes");
+            Console.WriteLine("PASS: revocation destroys host overlay, transit paths and business sockets.");
+            Console.WriteLine("Diagnostics: "+Diagnostics.Export(root,caller));
+        }
+        catch{Console.Error.WriteLine("Diagnostics: "+Diagnostics.Export(root,caller));throw;}
+        finally
+        {
+            timeout.Cancel();echo.Stop();udpEcho.Dispose();foreach(var socket in sockets)socket.Dispose();
+            await Task.WhenAll(accept,datagrams);await Task.WhenAll(workers);
+        }
+    }
+    sealed class TestRelay : IAsyncDisposable
+    {
+        readonly TcpClient a,b;
+        readonly UdpClient ua=new(new IPEndPoint(IPAddress.Loopback,0)),ub=new(new IPEndPoint(IPAddress.Loopback,0));
+        readonly CancellationTokenSource stop=new();
+        readonly List<Task> tasks=new();
+        IPEndPoint? ra,rb;
+        public bool DuplicateUdp;
+        TestRelay(TcpClient a,TcpClient b){this.a=a;this.b=b;}
+        public static async Task<TestRelay> Create(OverlaySession caller,OverlaySession host,CancellationToken ct)
+        {
+            var listener=new TcpListener(IPAddress.Loopback,0);listener.Start();var port=((IPEndPoint)listener.LocalEndpoint).Port;
+            var ca=new TcpClient();await ca.ConnectAsync(IPAddress.Loopback,port,ct);var a=await listener.AcceptTcpClientAsync(ct);
+            var cb=new TcpClient();await cb.ConnectAsync(IPAddress.Loopback,port,ct);var b=await listener.AcceptTcpClientAsync(ct);listener.Stop();
+            var relay=new TestRelay(a,b);
+            relay.tasks.Add(Task.Run(async()=>{try{await Wire.Bridge(a,b,relay.stop.Token);}catch(Exception ex){Diagnostics.Log("test-relay",ex.Message);}}));
+            relay.tasks.Add(relay.Udp(true));relay.tasks.Add(relay.Udp(false));
+            async Task Add(OverlaySession target,TcpClient socket,int endpoint)
+            {
+                var udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));udp.Connect(IPAddress.Loopback,endpoint);
+                var link=new OverlayLink("test-C",socket,async(data,cancel)=>await udp.SendAsync(data,cancel),()=>"P2P / localhost-test");
+                link.Closed+=()=>udp.Dispose();await target.Add(link);
+                relay.tasks.Add(Task.Run(async()=>
+                {try{while(!relay.stop.IsCancellationRequested){var p=await udp.ReceiveAsync(relay.stop.Token);await target.ReceiveUdp(link,p.Buffer);}}
+                 catch(Exception ex){Diagnostics.Log("test-relay-udp",ex.Message);}}));
+            }
+            await Add(caller,ca,((IPEndPoint)relay.ua.Client.LocalEndPoint!).Port);
+            await Add(host,cb,((IPEndPoint)relay.ub.Client.LocalEndPoint!).Port);
+            await Task.Delay(2300,ct);return relay;
+        }
+        async Task Udp(bool side)
+        {
+            try
+            {
+                var from=side?ua:ub;var to=side?ub:ua;
+                while(!stop.IsCancellationRequested)
+                {
+                    var packet=await from.ReceiveAsync(stop.Token);if(side)ra=packet.RemoteEndPoint;else rb=packet.RemoteEndPoint;
+                    var remote=side?rb:ra;if(remote==null)continue;
+                    await to.SendAsync(packet.Buffer,remote,stop.Token);if(DuplicateUdp)await to.SendAsync(packet.Buffer,remote,stop.Token);
+                }
+            }
+            catch(Exception ex){Diagnostics.Log("test-relay-udp-stop",ex.Message);}
+        }
+        public Task Fail(){stop.Cancel();a.Dispose();b.Dispose();ua.Dispose();ub.Dispose();return Task.CompletedTask;}
+        public async ValueTask DisposeAsync(){await Fail();await Task.WhenAll(tasks);}
     }
 }

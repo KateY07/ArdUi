@@ -1,7 +1,7 @@
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-$version='v1.pre11'
-$expectedSha256='36e05397db04283a84c5939c11a4e6466de2cbafeec60c77c745eb1e7805f7ae'
+$version='v2.pre1'
+$expectedSha256='758c20c3350bb4c47a041428fbe4432328091aabad01ac09a06e5ab6c1b074e4'
 $expectedArdSha256='04ebed96baecc2fd5b67318b1d02742f777b0351c84ee5b1c1b163a05dc98b5d'
 $base='https://f.visnova.cn/ardui'
 if($env:ARDUI_INSTALL_ROOT){$root=[IO.Path]::GetFullPath($env:ARDUI_INSTALL_ROOT)}else{$root=Join-Path $env:LOCALAPPDATA 'ArdUi'}
@@ -104,8 +104,10 @@ try{
 '@,[Text.UTF8Encoding]::new($false))
     }
     $env:ARDUI_DATA_ROOT=$data
-    & $installed --identity-store $data
-    if($LASTEXITCODE){throw '身份初始化失败；已有身份未被覆盖。'}
+    $identityOutput=Join-Path $temporary 'identity.stdout';$identityError=Join-Path $temporary 'identity.stderr'
+    $identityProcess=Start-Process -FilePath $installed -ArgumentList @('--identity-store',('"{0}"' -f $data)) -WorkingDirectory $root -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $identityOutput -RedirectStandardError $identityError
+    if($identityProcess.ExitCode -ne 0){throw ('身份初始化失败；已有身份未被覆盖。'+(Get-Content -LiteralPath $identityError -Raw))}
+    if(-not (Test-Path -LiteralPath $current -PathType Leaf)){throw '身份初始化没有生成预期文件，安装已停止。'}
     $launcher=Join-Path $root 'ArdUi.cmd'
     [IO.File]::WriteAllLines($launcher,@('@echo off','set "ARDUI_DATA_ROOT=%~dp0data"',('start "" "%~dp0versions\{0}\ArdUi.exe"' -f $version)),[Text.Encoding]::ASCII)
     if($env:ARDUI_INSTALL_NO_SHORTCUT -ne '1'){
@@ -120,4 +122,11 @@ try{
         Start-Process -FilePath $launcher -WorkingDirectory $root -WindowStyle Hidden
     }
 }
-finally{if(Test-Path $temporary){Remove-Item -LiteralPath $temporary -Recurse -Force}}
+finally{
+    $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+    if(-not [IO.Path]::GetFullPath($temporary).StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase)){throw '临时目录路径无效，拒绝清理。'}
+    if(Test-Path -LiteralPath $temporary){
+        if((Get-Item -LiteralPath $temporary).Attributes -band [IO.FileAttributes]::ReparsePoint){throw '临时目录是链接，拒绝递归清理。'}
+        Remove-Item -LiteralPath $temporary -Recurse -Force
+    }
+}
