@@ -20,6 +20,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dll', default='bin/Release/net8.0-windows/ArdUi.dll')
     parser.add_argument('--prototype', action='store_true', help='Run consent, revoke and repeated enrollment regression')
+    parser.add_argument('--frd', action='store_true', help='Run real FRD desktop over the encrypted ARD and candidate paths')
     parser.add_argument('--transit-exe', help='Use a packaged ArdTransit executable instead of Python source')
     args=parser.parse_args()
     repo=Path(__file__).resolve().parents[1]
@@ -64,7 +65,7 @@ def main():
         print('Fixture:',root,flush=True)
         app=(repo/args.dll).resolve()
         command=([str(app)] if app.suffix=='.exe' else ['dotnet',str(app)])
-        command+=['--prototype-test'] if args.prototype else ['--transit-test','--integration-only']
+        command+=['--frd-test'] if args.frd else ['--prototype-test'] if args.prototype else ['--transit-test','--integration-only']
         with open(root/'client.log','wb') as output:
             result=subprocess.run(command,cwd=repo,env=env,stdout=output,stderr=subprocess.STDOUT,timeout=230,**creation)
         print((root/'client.log').read_text(encoding='utf-8',errors='replace'),flush=True)

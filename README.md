@@ -2,9 +2,11 @@
 
 ArdUi 是基于 ARD 的 Windows 远程访问应用，使用 Avalonia 和 .NET 8，以简约的“已授权设备”列表为主界面。用户通过 6 位机器编号添加设备，经密码验证、双方身份核对和被控端同意后，即可从列表打开远程桌面或 SMB 文件共享。
 
-当前发布的是 v2.pre1 Avalonia 图形预发布版。核心客户端由单个 C# 文件实现，不使用 XAML；以依赖框架的 Windows x64 单文件发布，运行前需要安装 .NET 8 Runtime。用户通过 `irm https://f.visnova.cn/ardui/install.ps1 | iex` 安装。
+当前版本为 v2.pre2 Avalonia 图形预发布版。源码按界面、授权、传输、中继及 FRD 等职责拆分，不使用 XAML；ArdUi 仍以依赖框架的 Windows x64 单文件发布，运行前需要安装 .NET 8 Runtime。用户通过 `irm https://f.visnova.cn/ardui/install.ps1 | iex` 安装，脚本同时部署 FRD v1.pre6 到安装目录下的 `frd\v1.pre6`。
 
 v2.pre1 增加独立 ArdTransit 候选转发、内层端到端加密、TCP/原生 UDP 路径切换和 ZIP 诊断导出。需双方升级；身份与已有授权保留。普通客户端不会自动替他人转发。详见[实现方案](ardui增强中继畅想(暂不实现).md)、[节点运行说明](transit/README.md)与[验证记录](V2-VALIDATION.md)。
+
+v2.pre2 在每台已授权设备的单行操作中增加“FRD”，保留原有“桌面”和“文件”。点击后自动启动对端仅监听本机回环的 FRD，并通过 ArdUi 已认证的端到端加密会话传输控制、视频与诊断 UDP；临时 FRD 口令不落盘或交给 NJ。无需用户填写 IP、端口或另一套密码。双方都需安装 v2.pre2；FRD 适用于已登录的交互式桌面，锁屏/安全桌面和 Windows 登录入口仍使用原有远程桌面。详见[FRD 安装与使用](FRD-INSTALL.md)和[源码结构](ARCHITECTURE.md)。
 
 ## 产品组成
 
@@ -14,6 +16,7 @@ v2.pre1 增加独立 ArdTransit 候选转发、内层端到端加密、TCP/原�
 | ArdUi.exe | 展示本机身份、维护已授权设备、申请和批准访问、打开远程桌面或文件共享。 |
 | arduiserver | 位于 `https://f.visnova.cn/`，分配机器编号，提供设备查询、在线状态和连接协调。 |
 | ARD | 验证通信对端，承载端到端加密连接和业务流量。 |
+| FRD | 可选的桌面查看与控制方式；由安装脚本自动部署，按需启动，通过 ArdUi 加密连接传输 TCP 与 UDP。 |
 
 最终只向用户提供 `irm https://f.visnova.cn/ardui/install.ps1 | iex` 这一条安装命令。脚本检查 .NET 8 Runtime 并下载依赖框架的 Windows x64 单文件客户端 `ArdUi.exe`；用户无需准备 ARD 文件，也不另交付安装器 EXE。
 
@@ -47,6 +50,8 @@ v2.pre1 增加独立 ArdTransit 候选转发、内层端到端加密、TCP/原�
 “正在访问本机”仅在存在活动被控会话时显示，每台设备旁提供“断开”。新的首次请求始终直接显示“是／否”，不藏入折叠管理区。Avalonia 版不设置全局快捷键。
 
 新建连接以单行形式显示在授权列表上方，输入的 6 位首次密码始终明文显示。每台设备保持单行，展示状态色点、备注名、机器编号、路径、UDP 往返延迟及低频测得的预计可用带宽；“EndpointId”“备注”和“移除”收纳在“更多”中。“暂停”会停止当前会话和自动重连，再次打开桌面或文件时恢复；误点移除可在 8 秒内撤销。
+
+每行的“桌面”启动 Windows 远程桌面，“FRD”启动随附的 FRD，“文件”打开 SMB。FRD 的键鼠与剪贴板同步仍由 FRD 窗口中手动开启；关闭桌面、断开、撤销授权或关闭被控时回收相应 FRD 进程及临时端口授权。
 
 普通操作不展示本地转发端口，不再展示 `10.x.x.1` 等虚拟地址。
 

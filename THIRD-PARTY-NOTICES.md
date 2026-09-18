@@ -1,6 +1,6 @@
 # Third-party components
 
-ArdUi application logic is implemented in `ArdUi.cs`. The framework-dependent single-file UI contains its managed and native UI dependencies; `ard.exe` is downloaded and verified separately by the installer.
+ArdUi application logic is organized by responsibility as documented in `ARCHITECTURE.md`. The framework-dependent single-file UI contains its managed and native UI dependencies; `ard.exe` and the FRD runtime are downloaded and verified separately by the installer. FRD's own third-party notices and FFmpeg license are retained in its installation directory.
 
 | Component | Version | Source / license |
 | --- | --- | --- |

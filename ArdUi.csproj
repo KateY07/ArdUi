@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>ArdUi</AssemblyName>
-    <Version>2.0.0-pre.1</Version>
+    <Version>2.0.0-pre.2</Version>
     <SelfContained>false</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
@@ -17,6 +17,14 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="ArdUi.cs" />
+    <Compile Include="GlobalUsings.cs" />
+    <Compile Include="App/**/*.cs" />
+    <Compile Include="Core/**/*.cs" />
+    <Compile Include="Transport/**/*.cs" />
+    <Compile Include="Overlay/**/*.cs" />
+    <Compile Include="TransitClient/**/*.cs" />
+    <Compile Include="Frd/**/*.cs" />
+    <Compile Include="Testing/**/*.cs" />
     <PackageReference Include="Avalonia.Desktop" Version="11.3.13" />
     <PackageReference Include="Avalonia.Themes.Simple" Version="11.3.13" />
     <PackageReference Include="Avalonia.Headless" Version="11.3.13" />

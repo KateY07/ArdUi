@@ -1,7 +1,7 @@
 param([string]$ArdPath,[string]$Python='python')
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-$version='v2.pre1'
+$version='v2.pre2'
 Push-Location $PSScriptRoot
 try {
     New-Item -ItemType Directory -Force tools,dist | Out-Null

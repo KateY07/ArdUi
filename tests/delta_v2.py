@@ -19,9 +19,9 @@ def reconstruct(old, meta, literals):
     if len(result)!=meta['size'] or digest(result)!=meta['sha256']: raise ValueError('Reconstructed binary hash mismatch')
     return result
 
-def make(repo):
-    old=(repo/'dist/final-v1.pre11/ArdUi.exe').read_bytes()
-    new=(repo/'dist/final-v2.pre1/ArdUi.exe').read_bytes()
+def make(repo, previous='v1.pre11', version='v2.pre1'):
+    old=(repo/f'dist/final-{previous}/ArdUi.exe').read_bytes()
+    new=(repo/f'dist/final-{version}/ArdUi.exe').read_bytes()
     matches=[]
     block_size=65536
     for offset in range(0,len(old)-block_size+1,block_size):
@@ -48,10 +48,10 @@ def make(repo):
     if cursor<len(new): operations.append([1,len(literals),len(new)-cursor]);literals.extend(new[cursor:])
     meta=dict(oldSha256=digest(old),sha256=digest(new),size=len(new),operations=operations)
     if reconstruct(old,meta,literals)!=new: raise ValueError('Local reconstruction failed')
-    target=repo/'dist/upload-v2.pre1-delta.zip'
-    with zipfile.ZipFile(repo/'dist/upload-v2.pre1.zip') as full,zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as delta:
+    target=repo/f'dist/upload-{version}-delta.zip'
+    with zipfile.ZipFile(repo/f'dist/upload-{version}.zip') as full,zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as delta:
         for name in full.namelist():
-            if name!='ArdUi-v2.pre1.exe': delta.writestr(name,full.read(name))
+            if name!=f'ArdUi-{version}.exe': delta.writestr(name,full.read(name))
         delta.writestr('binary-delta.json',json.dumps(meta,separators=(',',':')))
         delta.writestr('binary-literals.bin',literals)
         delta.writestr('apply_delta.py',Path(__file__).read_bytes().replace(b'\r\n',b'\n'))
@@ -60,6 +60,8 @@ def make(repo):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply',nargs=2,metavar=('OLD','OUTPUT'))
+    parser.add_argument('--previous',default='v1.pre11')
+    parser.add_argument('--version',default='v2.pre1')
     args=parser.parse_args()
     if args.apply:
         stage=Path(__file__).resolve().parent
@@ -67,4 +69,4 @@ if __name__=='__main__':
         result=reconstruct(Path(args.apply[0]).read_bytes(),meta,(stage/'binary-literals.bin').read_bytes())
         with Path(args.apply[1]).open('xb') as out: out.write(result)
         print('Reconstructed and verified: '+meta['sha256'])
-    else: make(Path(__file__).resolve().parents[1])
+    else: make(Path(__file__).resolve().parents[1],args.previous,args.version)

@@ -1,8 +1,26 @@
-$ErrorActionPreference='Stop'
+﻿$ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-$version='v2.pre1'
-$expectedSha256='758c20c3350bb4c47a041428fbe4432328091aabad01ac09a06e5ab6c1b074e4'
+$version='v2.pre2'
+$expectedSha256='9daf89bf0b98189e0f93fa3ef0bf7e632d067925280929eb52d87cfc298ea6e7'
 $expectedArdSha256='04ebed96baecc2fd5b67318b1d02742f777b0351c84ee5b1c1b163a05dc98b5d'
+# FRD release manifest begin
+$frdVersion='v1.pre6'
+$frdArchiveName='FRD-v1.pre6-win-x64.tar.xz'
+$frdArchiveSha256='6aee2eb0912d1b0915eef79156c06bcf64c8c008181d2e6b26845137da09944d'
+$frdFiles=@{
+    'FRD.exe'='37c95ff75dceb75c222b5afdc769a7941d7c9a8c96ce5543e09a2927d0ea2286'
+    'codec-config.json'='2625bdcb5ba824a36e0b8529b981ed036e57a5ecd004c4ac842cd33bc485b939'
+    'THIRD-PARTY-NOTICES.md'='850a93669aec92a0a1e49831fc15582fe7cc66df6e37ebb557794dec2cb4ae68'
+    'ffmpeg/LICENSE.txt'='8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903'
+    'ffmpeg/avcodec-62.dll'='34f5b1baac01c4be3edf464309c79db05ffbd4a9c905c94b4a4651cd15370296'
+    'ffmpeg/avdevice-62.dll'='d213d6cad9f3a526f7664ebb3f93d6882669540db7164daecd03f52e0f5288cc'
+    'ffmpeg/avfilter-11.dll'='e318cac83d648869180d0b57c45f21aad1e4db34a467000c157da2938ff7f63f'
+    'ffmpeg/avformat-62.dll'='c04e6ed2f9f36d42325d4f4df5babb5d6ce7c55dbffeb7ef1007e25e97bcb716'
+    'ffmpeg/avutil-60.dll'='6f172b5d10224fcc3f729c8baa6fd36a97bb58042bb3b1417078d77d2da59b87'
+    'ffmpeg/swresample-6.dll'='72e2721672c11fd37d983b05cc2370f612784e4e3218362a0cb4315d08c917fb'
+    'ffmpeg/swscale-9.dll'='3d07972cada6ba38c492e92b0f6c025a6835607fe00cdf83afc604c2fbdfe550'
+}
+# FRD release manifest end
 $base='https://f.visnova.cn/ardui'
 if($env:ARDUI_INSTALL_ROOT){$root=[IO.Path]::GetFullPath($env:ARDUI_INSTALL_ROOT)}else{$root=Join-Path $env:LOCALAPPDATA 'ArdUi'}
 $data=Join-Path $root 'data'
@@ -26,7 +44,7 @@ function Protect-ArdUiDirectory([string]$path){
 function Test-VerifiedFile([string]$path,[string]$expected){
     if(-not (Test-Path -LiteralPath $path -PathType Leaf)){return $false}
     try{return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -eq $expected}
-    catch{return $false}
+    catch{Write-Warning "无法校验文件 $path ($($_.Exception.Message))";return $false}
 }
 
 function Find-VerifiedPayload([string]$name,[string]$expected){
@@ -47,6 +65,7 @@ function Download-VerifiedPayload([string]$url,[string]$path,[string]$expected,[
             return $path
         }
         catch{
+            Write-Warning "$label 下载或校验失败（第 $attempt 次）：$($_.Exception.Message)"
             Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
             if($attempt -eq 3){throw}
             Start-Sleep -Seconds $attempt
@@ -63,6 +82,63 @@ function Install-VerifiedPayload([string]$source,[string]$target,[string]$expect
     Copy-Item -LiteralPath $source -Destination $target
     if(-not (Test-VerifiedFile $target $expected)){throw "$label 安装后 SHA-256 校验失败。"}
     Write-Host "已安装 $label"
+}
+
+function Test-FrdDirectory([string]$path){
+    if(-not (Test-Path -LiteralPath $path -PathType Container)){return $false}
+    foreach($name in $frdFiles.Keys){if(-not (Test-VerifiedFile (Join-Path $path $name) $frdFiles[$name])){return $false}}
+    return $true
+}
+
+function Install-FrdRuntime {
+    if($frdArchiveSha256 -notmatch '^[0-9a-f]{64}$' -or $frdFiles.Count -lt 4){throw 'FRD release hashes are missing.'}
+    $frdRoot=Join-Path $root 'frd'
+    $frdDestination=Join-Path $frdRoot $frdVersion
+    $frdCacheRoot=Join-Path $root 'cache'
+    foreach($path in @($frdRoot,$frdDestination,$frdCacheRoot,(Join-Path $frdDestination 'ffmpeg'))){
+        if((Test-Path -LiteralPath $path) -and ((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'FRD installation directories cannot be links.'}
+    }
+    if(Test-FrdDirectory $frdDestination){Write-Host "复用已完整校验的 FRD $frdVersion";return}
+    $frdSource=if($env:ARDUI_FRD_SOURCE){[IO.Path]::GetFullPath($env:ARDUI_FRD_SOURCE)}else{Join-Path (Join-Path $env:LOCALAPPDATA 'Programs\FRD') $frdVersion}
+    if(Test-FrdDirectory $frdSource){Write-Host '本机已有完整且校验通过的 FRD，直接复用运行文件。'}
+    else{
+        New-Item -ItemType Directory -Force $frdCacheRoot | Out-Null
+        $frdArchive=Join-Path $frdCacheRoot $frdArchiveName
+        if(Test-VerifiedFile $frdArchive $frdArchiveSha256){Write-Host '复用已校验的 FRD 安装包缓存。'}
+        else{
+            $frdDownload=Join-Path $temporary $frdArchiveName
+            Download-VerifiedPayload "$base/$frdArchiveName" $frdDownload $frdArchiveSha256 'FRD 安装包' | Out-Null
+            Move-Item -LiteralPath $frdDownload -Destination $frdArchive -Force
+        }
+        $frdSource=Join-Path $temporary 'frd-runtime'
+        New-Item -ItemType Directory -Path $frdSource | Out-Null
+        if($frdArchiveName.EndsWith('.zip',[StringComparison]::OrdinalIgnoreCase)){
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $archive=[IO.Compression.ZipFile]::OpenRead($frdArchive)
+            try{
+                if($archive.Entries.Count -ne $frdFiles.Count){throw 'Unexpected FRD archive file count.'}
+                foreach($entry in $archive.Entries){if(-not $frdFiles.ContainsKey($entry.FullName)){throw 'Unexpected FRD archive path.'}}
+            }finally{$archive.Dispose()}
+            [IO.Compression.ZipFile]::ExtractToDirectory($frdArchive,$frdSource)
+        }
+        elseif($frdArchiveName.EndsWith('.tar.xz',[StringComparison]::OrdinalIgnoreCase)){
+            $tar=Join-Path $env:SystemRoot 'System32\tar.exe'
+            if(-not (Test-Path -LiteralPath $tar -PathType Leaf)){throw 'Windows tar.exe is required to extract the FRD runtime.'}
+            $names=@(& $tar -tf $frdArchive)
+            if($LASTEXITCODE -ne 0 -or $names.Count -ne $frdFiles.Count){throw 'Cannot inspect FRD archive.'}
+            foreach($name in $names){if(-not $frdFiles.ContainsKey($name)){throw 'Unexpected FRD archive path.'}}
+            & $tar -xf $frdArchive -C $frdSource
+            if($LASTEXITCODE -ne 0){throw 'Cannot extract FRD runtime.'}
+        }
+        else{throw 'Unsupported FRD archive format.'}
+        if(-not (Test-FrdDirectory $frdSource)){throw 'FRD extracted files failed SHA-256 verification.'}
+    }
+    New-Item -ItemType Directory -Force $frdDestination,(Join-Path $frdDestination 'ffmpeg') | Out-Null
+    foreach($name in $frdFiles.Keys){
+        Install-VerifiedPayload (Join-Path $frdSource $name) (Join-Path $frdDestination $name) $frdFiles[$name] ('FRD '+$name)
+    }
+    if(-not (Test-FrdDirectory $frdDestination)){throw 'FRD installed files failed SHA-256 verification.'}
+    Write-Host "FRD $frdVersion 已安装到 $frdDestination（内含运行时，无需另装 .NET 10）。"
 }
 
 try{
@@ -83,6 +159,7 @@ try{
     if($uiSource){Write-Host '本地已找到校验通过的 ArdUi.exe'}else{$uiSource=Download-VerifiedPayload "$base/ArdUi-$version.exe" $download $expectedSha256 'ArdUi.exe'}
     $ardSource=Find-VerifiedPayload 'ard.exe' $expectedArdSha256
     if($ardSource){Write-Host '本地已找到校验通过的 ard.exe'}else{$ardSource=Download-VerifiedPayload "$base/ard-v2.0.0-pre.6.exe" $ardDownload $expectedArdSha256 'ard.exe'}
+    Install-FrdRuntime
     Install-VerifiedPayload $uiSource $installed $expectedSha256 'ArdUi.exe'
     Install-VerifiedPayload $ardSource $installedArd $expectedArdSha256 'ard.exe'
     $legacy=Join-Path $data 'identity';$current=Join-Path (Join-Path $data 'device') 'identity'

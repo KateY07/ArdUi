@@ -17,7 +17,7 @@ A ================= 原有 ARD 连接 ================= B
                     保持备用，故障回退
 ```
 
-`ard.exe` 和 `ard-relay` 的协议和锁定 README 不修改。客户端仍为单个 `ArdUi.cs`、Avalonia Simple、.NET 8 框架依赖发布；新增独立的 Python `transit/ardtransit.py` 供 Windows/Linux 节点运行，复用 ARD 进程完成打洞、身份认证与 TCP/UDP 传输。中央协调服务仍使用 Python。
+`ard.exe` 和 `ard-relay` 的协议和锁定 README 不修改。客户端采用 Avalonia Simple、.NET 8 框架依赖单 EXE 发布；自 v2.pre2 按职责拆分 C# 源码，见 `ARCHITECTURE.md`。独立的 Python `transit/ardtransit.py` 供 Windows/Linux 节点运行，复用 ARD 进程完成打洞、身份认证与 TCP/UDP 传输。中央协调服务仍使用 Python。
 
 ## 身份和内层加密
 
