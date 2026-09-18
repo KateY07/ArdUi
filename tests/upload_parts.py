@@ -20,16 +20,18 @@ def main():
     parser.add_argument('--stage',default='/tmp/ardui-v2.pre2-frd')
     parser.add_argument('--key',type=Path,default=Path.home()/'.ssh/nj_key')
     parser.add_argument('--host',default='root@175.27.160.144')
+    parser.add_argument('--part-size',type=int,default=3*1024*1024)
     args=parser.parse_args()
+    if not 64*1024<=args.part_size<=8*1024*1024: raise ValueError('Part size must be between 64 KiB and 8 MiB')
     if not re.fullmatch(r'/tmp/ardui-v2\.pre2-[a-zA-Z0-9-]+',args.stage): raise ValueError('Unexpected stage')
     source=args.source.resolve(strict=True)
     if not re.fullmatch(r'[a-zA-Z0-9_.-]+',source.name): raise ValueError('Unsafe artifact filename')
     content=source.read_bytes();digest=hashlib.sha256(content).hexdigest()
-    prefix='upload-'+digest[:16]
+    prefix=f'upload-{digest[:16]}-{args.part_size}'
     folder=source.parent/prefix;folder.mkdir(exist_ok=True)
     pieces=[]
-    for index,start in enumerate(range(0,len(content),3*1024*1024)):
-        path=folder/f'{prefix}.part{index:03d}';data=content[start:start+3*1024*1024]
+    for index,start in enumerate(range(0,len(content),args.part_size)):
+        path=folder/f'{prefix}.part{index:03d}';data=content[start:start+args.part_size]
         path.write_bytes(data);pieces.append((path,hashlib.sha256(data).hexdigest()))
     options=['-i',str(args.key),'-o','BatchMode=yes','-o','ConnectTimeout=20']
     output=run(['ssh',*options,args.host,f"mkdir -p {args.stage} && find {args.stage} -maxdepth 1 -name '{prefix}.part*' -type f -exec sha256sum {{}} +"])
@@ -55,7 +57,7 @@ def main():
             transferred=sum(int(line) for line in raw.splitlines())
             now=time.monotonic();speed=max(0,transferred-last_bytes)/(now-last_time)
             remaining=max(0,len(content)-transferred)
-            eta=f'{remaining/speed:.0f}s' if speed>0 else 'pending'
+            eta='0s' if remaining==0 else f'{remaining/speed:.0f}s' if speed>0 else 'pending'
             print(f'Progress {transferred}/{len(content)} bytes ({100*transferred/len(content):.1f}%), {speed/1024:.1f} KiB/s, ETA {eta}',flush=True)
             last_time=now;last_bytes=transferred
     paths=' '.join(f'{args.stage}/{path.name}' for path,_ in pieces)
