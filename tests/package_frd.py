@@ -78,7 +78,7 @@ def main():
         block += '}\n# FRD release manifest end'
         text,count = re.subn(r'# FRD release manifest begin\n.*?# FRD release manifest end',lambda _:block,text,flags=re.S)
         if count!=1: raise ValueError('Installer FRD manifest placeholder missing')
-        installer.write_text(text,encoding='utf-8-sig',newline='\n')
+        installer.write_text(text,encoding='ascii',newline='\n')
     print(json.dumps({key:value for key,value in manifest.items() if key!='files'},indent=2))
     if args.nj_seed:
         if args.format!='tar.xz': raise ValueError('NJ reconstruction metadata requires the final tar.xz')

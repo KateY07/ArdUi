@@ -10,7 +10,7 @@ repo=Path(__file__).resolve().parents[1]
 version='v2.pre2'
 binary=repo/f'dist/final-{version}/ArdUi.exe'
 digest=hashlib.sha256(binary.read_bytes()).hexdigest()
-installer=(repo/'install.ps1').read_text(encoding='utf-8')
+installer=(repo/'install.ps1').read_text(encoding='ascii')
 assert f"$version='{version}'" in installer
 assert f"$expectedSha256='{digest}'" in installer
 assert digest in (repo/'site/index.html').read_text(encoding='utf-8')

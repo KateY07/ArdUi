@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference='Stop'
+$ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $version='v2.pre2'
 $expectedSha256='9daf89bf0b98189e0f93fa3ef0bf7e632d067925280929eb52d87cfc298ea6e7'
@@ -44,7 +44,7 @@ function Protect-ArdUiDirectory([string]$path){
 function Test-VerifiedFile([string]$path,[string]$expected){
     if(-not (Test-Path -LiteralPath $path -PathType Leaf)){return $false}
     try{return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -eq $expected}
-    catch{Write-Warning "无法校验文件 $path ($($_.Exception.Message))";return $false}
+    catch{Write-Warning "Cannot verify file $path ($($_.Exception.Message))";return $false}
 }
 
 function Find-VerifiedPayload([string]$name,[string]$expected){
@@ -61,11 +61,11 @@ function Download-VerifiedPayload([string]$url,[string]$path,[string]$expected,[
     for($attempt=1;$attempt -le 3;$attempt++){
         try{
             Invoke-WebRequest $url -OutFile $path
-            if(-not (Test-VerifiedFile $path $expected)){throw "$label SHA-256 不匹配。"}
+            if(-not (Test-VerifiedFile $path $expected)){throw "$label SHA-256 mismatch."}
             return $path
         }
         catch{
-            Write-Warning "$label 下载或校验失败（第 $attempt 次）：$($_.Exception.Message)"
+            Write-Warning "$label download or verification failed (attempt $attempt): $($_.Exception.Message)"
             Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
             if($attempt -eq 3){throw}
             Start-Sleep -Seconds $attempt
@@ -74,14 +74,14 @@ function Download-VerifiedPayload([string]$url,[string]$path,[string]$expected,[
 }
 
 function Install-VerifiedPayload([string]$source,[string]$target,[string]$expected,[string]$label){
-    if(Test-VerifiedFile $target $expected){Write-Host "复用已校验的 $label";return}
+    if(Test-VerifiedFile $target $expected){Write-Host "Reusing verified $label";return}
     if(Test-Path -LiteralPath $target){
         try{Move-Item -LiteralPath $target -Destination ($target+'.replaced-'+(Get-Date -Format 'yyyyMMddHHmmss'))}
-        catch{throw "$label 正在运行且需要更新或修复。请关闭 ArdUi 后再次执行安装命令。"}
+        catch{throw "$label is in use and needs an update or repair. Close ArdUi and run the install command again."}
     }
     Copy-Item -LiteralPath $source -Destination $target
-    if(-not (Test-VerifiedFile $target $expected)){throw "$label 安装后 SHA-256 校验失败。"}
-    Write-Host "已安装 $label"
+    if(-not (Test-VerifiedFile $target $expected)){throw "$label failed SHA-256 verification after installation."}
+    Write-Host "Installed $label"
 }
 
 function Test-FrdDirectory([string]$path){
@@ -98,16 +98,16 @@ function Install-FrdRuntime {
     foreach($path in @($frdRoot,$frdDestination,$frdCacheRoot,(Join-Path $frdDestination 'ffmpeg'))){
         if((Test-Path -LiteralPath $path) -and ((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'FRD installation directories cannot be links.'}
     }
-    if(Test-FrdDirectory $frdDestination){Write-Host "复用已完整校验的 FRD $frdVersion";return}
+    if(Test-FrdDirectory $frdDestination){Write-Host "Reusing fully verified FRD $frdVersion";return}
     $frdSource=if($env:ARDUI_FRD_SOURCE){[IO.Path]::GetFullPath($env:ARDUI_FRD_SOURCE)}else{Join-Path (Join-Path $env:LOCALAPPDATA 'Programs\FRD') $frdVersion}
-    if(Test-FrdDirectory $frdSource){Write-Host '本机已有完整且校验通过的 FRD，直接复用运行文件。'}
+    if(Test-FrdDirectory $frdSource){Write-Host 'Reusing the existing fully verified local FRD runtime.'}
     else{
         New-Item -ItemType Directory -Force $frdCacheRoot | Out-Null
         $frdArchive=Join-Path $frdCacheRoot $frdArchiveName
-        if(Test-VerifiedFile $frdArchive $frdArchiveSha256){Write-Host '复用已校验的 FRD 安装包缓存。'}
+        if(Test-VerifiedFile $frdArchive $frdArchiveSha256){Write-Host 'Reusing the verified cached FRD package.'}
         else{
             $frdDownload=Join-Path $temporary $frdArchiveName
-            Download-VerifiedPayload "$base/$frdArchiveName" $frdDownload $frdArchiveSha256 'FRD 安装包' | Out-Null
+            Download-VerifiedPayload "$base/$frdArchiveName" $frdDownload $frdArchiveSha256 'FRD package' | Out-Null
             Move-Item -LiteralPath $frdDownload -Destination $frdArchive -Force
         }
         $frdSource=Join-Path $temporary 'frd-runtime'
@@ -138,16 +138,16 @@ function Install-FrdRuntime {
         Install-VerifiedPayload (Join-Path $frdSource $name) (Join-Path $frdDestination $name) $frdFiles[$name] ('FRD '+$name)
     }
     if(-not (Test-FrdDirectory $frdDestination)){throw 'FRD installed files failed SHA-256 verification.'}
-    Write-Host "FRD $frdVersion 已安装到 $frdDestination（内含运行时，无需另装 .NET 10）。"
+    Write-Host "FRD $frdVersion installed at $frdDestination (runtime included; no separate .NET 10 installation needed)."
 }
 
 try{
-    if(-not [Environment]::Is64BitOperatingSystem){throw 'ArdUi 需要 64 位 Windows。'}
+    if(-not [Environment]::Is64BitOperatingSystem){throw 'ArdUi requires 64-bit Windows.'}
     $build=[Environment]::OSVersion.Version.Build
-    if($build -lt 26100){throw "ArdUi 需要 Windows 11 24H2 / Server 2025 或更新版本（build 26100+）；当前为 $build。"}
-    if(-not (Get-Command dotnet -ErrorAction SilentlyContinue)){throw '缺少 .NET 8 Runtime。请先从 https://dotnet.microsoft.com/download/dotnet/8.0 安装 .NET Runtime x64，再重新执行此命令。'}
+    if($build -lt 26100){throw "ArdUi requires Windows 11 24H2 / Server 2025 or newer (build 26100+); found build $build."}
+    if(-not (Get-Command dotnet -ErrorAction SilentlyContinue)){throw 'Missing .NET 8 Runtime. Install .NET Runtime x64 from https://dotnet.microsoft.com/download/dotnet/8.0 and run this command again.'}
     $runtime=@(& dotnet --list-runtimes 2>$null | Where-Object {$_ -match '^Microsoft\.NETCore\.App 8\.'})
-    if(-not $runtime){throw '缺少 .NET 8 Runtime。请先从 https://dotnet.microsoft.com/download/dotnet/8.0 安装 .NET Runtime x64，再重新执行此命令。'}
+    if(-not $runtime){throw 'Missing .NET 8 Runtime. Install .NET Runtime x64 from https://dotnet.microsoft.com/download/dotnet/8.0 and run this command again.'}
     New-Item -ItemType Directory -Force $root,(Join-Path $root 'versions'),$data,$temporary,$destination | Out-Null
     Protect-ArdUiDirectory $root
     $download=Join-Path $temporary 'ArdUi.exe'
@@ -156,15 +156,15 @@ try{
     $installedArd=Join-Path $destination 'ard.exe'
     [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
     $uiSource=Find-VerifiedPayload 'ArdUi.exe' $expectedSha256
-    if($uiSource){Write-Host '本地已找到校验通过的 ArdUi.exe'}else{$uiSource=Download-VerifiedPayload "$base/ArdUi-$version.exe" $download $expectedSha256 'ArdUi.exe'}
+    if($uiSource){Write-Host 'Found a verified local ArdUi.exe'}else{$uiSource=Download-VerifiedPayload "$base/ArdUi-$version.exe" $download $expectedSha256 'ArdUi.exe'}
     $ardSource=Find-VerifiedPayload 'ard.exe' $expectedArdSha256
-    if($ardSource){Write-Host '本地已找到校验通过的 ard.exe'}else{$ardSource=Download-VerifiedPayload "$base/ard-v2.0.0-pre.6.exe" $ardDownload $expectedArdSha256 'ard.exe'}
+    if($ardSource){Write-Host 'Found a verified local ard.exe'}else{$ardSource=Download-VerifiedPayload "$base/ard-v2.0.0-pre.6.exe" $ardDownload $expectedArdSha256 'ard.exe'}
     Install-FrdRuntime
     Install-VerifiedPayload $uiSource $installed $expectedSha256 'ArdUi.exe'
     Install-VerifiedPayload $ardSource $installedArd $expectedArdSha256 'ard.exe'
     $legacy=Join-Path $data 'identity';$current=Join-Path (Join-Path $data 'device') 'identity'
     if((Test-Path $legacy -PathType Leaf) -and -not (Test-Path $current)){
-        if((Get-Item $legacy).Length -ne 32){throw '已有身份文件无效，安装已停止，未覆盖原文件。'}
+        if((Get-Item $legacy).Length -ne 32){throw 'Existing identity is invalid. Installation stopped without overwriting it.'}
         New-Item -ItemType Directory -Force (Split-Path $current) | Out-Null
         Copy-Item $legacy $current
     }
@@ -183,27 +183,27 @@ try{
     $env:ARDUI_DATA_ROOT=$data
     $identityOutput=Join-Path $temporary 'identity.stdout';$identityError=Join-Path $temporary 'identity.stderr'
     $identityProcess=Start-Process -FilePath $installed -ArgumentList @('--identity-store',('"{0}"' -f $data)) -WorkingDirectory $root -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $identityOutput -RedirectStandardError $identityError
-    if($identityProcess.ExitCode -ne 0){throw ('身份初始化失败；已有身份未被覆盖。'+(Get-Content -LiteralPath $identityError -Raw))}
-    if(-not (Test-Path -LiteralPath $current -PathType Leaf)){throw '身份初始化没有生成预期文件，安装已停止。'}
+    if($identityProcess.ExitCode -ne 0){throw ('Identity initialization failed; the existing identity was not overwritten. '+(Get-Content -LiteralPath $identityError -Raw))}
+    if(-not (Test-Path -LiteralPath $current -PathType Leaf)){throw 'Identity initialization did not create the expected file. Installation stopped.'}
     $launcher=Join-Path $root 'ArdUi.cmd'
     [IO.File]::WriteAllLines($launcher,@('@echo off','set "ARDUI_DATA_ROOT=%~dp0data"',('start "" "%~dp0versions\{0}\ArdUi.exe"' -f $version)),[Text.Encoding]::ASCII)
     if($env:ARDUI_INSTALL_NO_SHORTCUT -ne '1'){
         $startup=[Environment]::GetFolderPath([Environment+SpecialFolder]::Startup)
         $shortcut=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $startup 'ArdUi.lnk'))
         $shortcut.TargetPath=$env:ComSpec;$shortcut.Arguments=('/d /c ""{0}""' -f $launcher)
-        $shortcut.WorkingDirectory=$root;$shortcut.WindowStyle=7;$shortcut.Description='ArdUi 开机自启动';$shortcut.Save()
+        $shortcut.WorkingDirectory=$root;$shortcut.WindowStyle=7;$shortcut.Description='ArdUi startup';$shortcut.Save()
     }
     Protect-ArdUiDirectory $root
-    Write-Host "ArdUi $version 已安装到 $root"
+    Write-Host "ArdUi $version installed at $root"
     if($env:ARDUI_INSTALL_NO_START -ne '1'){
         Start-Process -FilePath $launcher -WorkingDirectory $root -WindowStyle Hidden
     }
 }
 finally{
     $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
-    if(-not [IO.Path]::GetFullPath($temporary).StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase)){throw '临时目录路径无效，拒绝清理。'}
+    if(-not [IO.Path]::GetFullPath($temporary).StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Invalid temporary directory. Cleanup refused.'}
     if(Test-Path -LiteralPath $temporary){
-        if((Get-Item -LiteralPath $temporary).Attributes -band [IO.FileAttributes]::ReparsePoint){throw '临时目录是链接，拒绝递归清理。'}
+        if((Get-Item -LiteralPath $temporary).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Temporary directory is a link. Recursive cleanup refused.'}
         Remove-Item -LiteralPath $temporary -Recurse -Force
     }
 }
