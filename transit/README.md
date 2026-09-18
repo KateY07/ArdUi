@@ -2,7 +2,24 @@
 
 独立、明确启用的候选转发节点。它只转发已授权 A/B 会话的内层密文，复用 ARD 建立两段连接；只有 A–C 与 B–C 都为 Direct 且实测质量改善，客户端才会选用。无需静态公网 IP，也不要求所有 ArdUi 客户端互相常驻连接。
 
-依赖 Python 3.10+、`cryptography` 与可信的 ARD 2.0.0-pre.6 可执行文件。不要从陌生来源替换 ARD。安装依赖后以普通用户运行：
+Windows x64 一键安装（普通 PowerShell，无需 Python、.NET 或管理员权限）：
+
+```powershell
+irm https://f.visnova.cn/ardui/install-relay.ps1 | iex
+```
+
+Windows 10 1809 / Server 2019 或更新版本；当前构建 `v2.pre1-relay1`，协议保持 v2.pre1。安装到 `%LOCALAPPDATA%\ArdTransit`，立即后台启动并设置当前用户登录后自动运行；默认最多 2 对会话、节点收发合计 10 Mbps。它是独立转发程序，不开启本机远程桌面或文件共享。首次下载校验 SHA-256；重复执行时复用校验通过的缓存，保留 `data` 身份与 `config.json`。ARD 单独下载，也可复用本机 ArdUi 已校验的 ARD。
+
+查看状态、停止并关闭登录自启：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ArdTransit\Status-ArdTransit.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ArdTransit\Stop-ArdTransit.ps1"
+```
+
+再次执行安装命令即可启动并恢复登录自启。修改 `config.json` 中 `capacity` / `mbps` 后停止并重新运行安装命令；运行日志在 `data\relay.log`，诊断包在 `data\diagnostics.zip`。网络中断时自动重试，注册和心跳成功后才显示在线。日志轮转保留约 8 MiB；停止时清理本实例的 ARD 子进程。
+
+从源码运行需要 Python 3.10+、`cryptography` 与可信的 ARD 2.0.0-pre.6 可执行文件。不要从陌生来源替换 ARD：
 
 ```powershell
 python -m pip install cryptography

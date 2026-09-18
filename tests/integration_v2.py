@@ -20,6 +20,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dll', default='bin/Release/net8.0-windows/ArdUi.dll')
     parser.add_argument('--prototype', action='store_true', help='Run consent, revoke and repeated enrollment regression')
+    parser.add_argument('--transit-exe', help='Use a packaged ArdTransit executable instead of Python source')
     args=parser.parse_args()
     repo=Path(__file__).resolve().parents[1]
     root=repo/'dist'/('v2-integration-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
@@ -55,7 +56,8 @@ def main():
             except OSError as ex:
                 if children[-1].poll() is not None: raise RuntimeError('test directory exited') from ex
                 time.sleep(.1)
-        c=start('transit',[sys.executable,'transit/ardtransit.py','--ard',str(ard),'--server',base,
+        transit=[str((repo/args.transit_exe).resolve())] if args.transit_exe else [sys.executable,'transit/ardtransit.py']
+        c=start('transit',transit+['--ard',str(ard),'--server',base,
              '--relay',relay_url,'--relay-key',relay_key,'--data',str(root/'c'),'--diagnostics',str(root/'transit-diagnostics.zip'),'--test-local-directory'])
         env.update(ARDUI_ARD_PATH=str(ard),ARDUI_TEST_ROOT=str(root),ARDUI_TEST_SERVER=base,ARDUI_TEST_RELAY=relay_url,
                    ARDUI_TEST_RELAY_KEY=relay_key,ARDUI_TEST_TRANSIT_PID=str(c.pid))

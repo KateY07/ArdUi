@@ -5,6 +5,8 @@ import base64
 import collections
 import hashlib
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import secrets
@@ -21,13 +23,91 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 VERSION = 'v2.pre1'
+BUILD = 'relay1'
 DEFAULT_RELAY_KEY = 'spki:3059301306072a8648ce3d020106082a8648ce3d0301070342000462f8877cf66d813f17028e3d1cf44443c481586a04219326d752623dd72ce3b005a7c3a8ea3db565b75f4e7a72209d17f29d30cbfaea2be0c48384672bb2f01f'
 events = collections.deque(maxlen=512)
+runtime_log = logging.getLogger('ArdTransit')
+runtime_log.setLevel(logging.INFO)
+runtime_log.propagate = False
+
+def configure_log(folder):
+    handler = RotatingFileHandler(Path(folder) / 'relay.log', maxBytes=2*1024*1024, backupCount=3, encoding='utf-8')
+    handler.setFormatter(logging.Formatter('%(message)s'))
+    runtime_log.addHandler(handler)
+    return handler
 
 def log(event, **fields):
     row = dict(time=time.time(), event=event, **fields)
     events.append(row)
-    print(json.dumps(row, ensure_ascii=False), flush=True)
+    text = json.dumps(row, ensure_ascii=False)
+    runtime_log.info(text)
+    try: print(text, flush=True)
+    except (OSError,UnicodeError) as ex: runtime_log.error(json.dumps(dict(event='stdout-error', error=str(ex))))
+
+def atomic_json(path, value):
+    fd, pending = tempfile.mkstemp(prefix='.'+path.name+'-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as out:
+            json.dump(value, out, ensure_ascii=False)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(pending, path)
+    finally:
+        if os.path.exists(pending): os.unlink(pending)
+
+class DirectoryTrustError(ValueError):
+    pass
+
+class ChildJob:
+    def __init__(self):
+        self.handle = None
+        if os.name != 'nt': return
+        import ctypes
+        from ctypes import wintypes
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [('PerProcessUserTimeLimit',ctypes.c_int64),('PerJobUserTimeLimit',ctypes.c_int64),
+                ('LimitFlags',wintypes.DWORD),('MinimumWorkingSetSize',ctypes.c_size_t),('MaximumWorkingSetSize',ctypes.c_size_t),
+                ('ActiveProcessLimit',wintypes.DWORD),('Affinity',ctypes.c_size_t),('PriorityClass',wintypes.DWORD),('SchedulingClass',wintypes.DWORD)]
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(name,ctypes.c_uint64) for name in ('ReadOperationCount','WriteOperationCount','OtherOperationCount',
+                'ReadTransferCount','WriteTransferCount','OtherTransferCount')]
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [('BasicLimitInformation',BasicLimits),('IoInfo',IoCounters),('ProcessMemoryLimit',ctypes.c_size_t),
+                ('JobMemoryLimit',ctypes.c_size_t),('PeakProcessMemoryUsed',ctypes.c_size_t),('PeakJobMemoryUsed',ctypes.c_size_t)]
+        self.ctypes, self.api = ctypes, ctypes.WinDLL('kernel32', use_last_error=True)
+        self.api.CreateJobObjectW.argtypes = [wintypes.LPVOID,wintypes.LPCWSTR]
+        self.api.CreateJobObjectW.restype = wintypes.HANDLE
+        self.api.SetInformationJobObject.argtypes = [wintypes.HANDLE,ctypes.c_int,wintypes.LPVOID,wintypes.DWORD]
+        self.api.SetInformationJobObject.restype = wintypes.BOOL
+        self.api.OpenProcess.argtypes = [wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]
+        self.api.OpenProcess.restype = wintypes.HANDLE
+        self.api.AssignProcessToJobObject.argtypes = [wintypes.HANDLE,wintypes.HANDLE]
+        self.api.AssignProcessToJobObject.restype = wintypes.BOOL
+        self.api.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.api.CloseHandle.restype = wintypes.BOOL
+        self.handle = self.api.CreateJobObjectW(None,None)
+        if not self.handle: raise ctypes.WinError(ctypes.get_last_error())
+        limits = ExtendedLimits()
+        limits.BasicLimitInformation.LimitFlags = 0x2000
+        if not self.api.SetInformationJobObject(self.handle,9,ctypes.byref(limits),ctypes.sizeof(limits)):
+            error = ctypes.WinError(ctypes.get_last_error())
+            self.close()
+            raise error
+
+    def assign(self, pid):
+        if self.handle is None: return
+        process = self.api.OpenProcess(0x0101,False,pid)
+        if not process: raise self.ctypes.WinError(self.ctypes.get_last_error())
+        try:
+            if not self.api.AssignProcessToJobObject(self.handle,process):
+                raise self.ctypes.WinError(self.ctypes.get_last_error())
+        finally:
+            if not self.api.CloseHandle(process): log('process-handle-close-error',error=str(self.ctypes.WinError(self.ctypes.get_last_error())))
+
+    def close(self):
+        if self.handle is not None:
+            handle, self.handle = self.handle, None
+            if not self.api.CloseHandle(handle): log('job-close-error',error=str(self.ctypes.WinError(self.ctypes.get_last_error())))
 
 def redact(text):
     text = re.sub(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', '[IPv4]', str(text))
@@ -124,10 +204,10 @@ class Api:
         await self.call('/api/v1/register', {})
         value = await self.call('/api/v2/transit/key', {})
         key = value['endpoint']
-        if not re.fullmatch('[0-9a-f]{64}', key): raise ValueError('directory public key')
+        if not re.fullmatch('[0-9a-f]{64}', key): raise DirectoryTrustError('invalid directory public key')
         path = self.root / 'directory-public-key'
         if path.exists() and path.read_text().strip() != key:
-            raise ValueError('directory signing key changed; inspect before replacing the saved public key')
+            raise DirectoryTrustError('directory signing key changed; inspect before replacing the saved public key')
         path.write_text(key)
         self.server_key = key
 
@@ -201,7 +281,7 @@ class Pair:
             cwd = self.root / str(side)
             cwd.mkdir()
             creation = {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name=='nt' else {}
-            proc = await asyncio.create_subprocess_exec(self.agent.args.ard, '--quiet', 'id', cwd=cwd,
+            proc = await self.agent.spawn(self.agent.args.ard, '--quiet', 'id', cwd=cwd,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **creation)
             try: out, err = await asyncio.wait_for(proc.communicate(), 15)
             except BaseException:
@@ -218,7 +298,7 @@ class Pair:
             transport, protocol = await asyncio.get_running_loop().create_datagram_endpoint(lambda: Datagram(self, side), local_addr=('127.0.0.1',port))
             self.udp[side] = protocol
             peer = self.ticket['aSession' if side==0 else 'bSession']
-            child = await asyncio.create_subprocess_exec(self.agent.args.ard, 'open', str(port), 'to', peer,
+            child = await self.agent.spawn(self.agent.args.ard, 'open', str(port), 'to', peer,
                     '--relay', self.agent.args.relay, '--relay-key', self.agent.args.relay_key, cwd=cwd,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **creation)
             self.children.append(child)
@@ -308,6 +388,36 @@ class Agent:
         self.budget = Budget(args.mbps)
         self.started = time.monotonic()
         self.errors = collections.deque(maxlen=10)
+        self.last_heartbeat = 0
+        self.state = 'starting'
+        self.job = ChildJob()
+
+    async def spawn(self, *command, **kwargs):
+        process = await asyncio.create_subprocess_exec(*command, **kwargs)
+        try: self.job.assign(process.pid)
+        except Exception:
+            if process.returncode is None:
+                try: process.kill()
+                except ProcessLookupError as ex: log('child-already-ended',error=str(ex))
+            await process.wait()
+            raise
+        return process
+
+    def stopping(self): return (self.api.root / 'stop.request').exists()
+
+    async def pause(self, seconds):
+        until = time.monotonic()+seconds
+        while not self.stopping():
+            remaining = until-time.monotonic()
+            if remaining <= 0: return
+            await asyncio.sleep(min(.2,remaining))
+
+    def status(self, state):
+        self.state = state
+        try:
+            atomic_json(self.api.root / 'status.json', dict(version=VERSION,build=BUILD,pid=os.getpid(),endpoint=self.api.endpoint,
+                state=state,lastHeartbeat=self.last_heartbeat,capacity=self.args.capacity,active=len(self.pairs),mbps=self.args.mbps))
+        except OSError as ex: log('status-write-error',error=redact(ex))
 
     def metrics(self, heartbeat=False):
         return dict(version=VERSION, uptimeSeconds=round(time.monotonic()-self.started),
@@ -317,18 +427,51 @@ class Agent:
                     errors=[message[:120] for message in list(self.errors)[-3:]] if heartbeat else list(self.errors))
 
     def diagnostics(self, path):
-        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr('status.json', json.dumps(dict(endpoint=self.api.endpoint, **self.metrics()),ensure_ascii=False,indent=2))
-            archive.writestr('events.jsonl', '\n'.join(json.dumps(row,ensure_ascii=False) for row in events))
+        pending = None
+        try:
+            path = Path(path)
+            fd, pending = tempfile.mkstemp(prefix='.'+path.name+'-', dir=path.parent)
+            os.close(fd)
+            with zipfile.ZipFile(pending, 'w', zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr('status.json', json.dumps(dict(endpoint=self.api.endpoint, **self.metrics()),ensure_ascii=False,indent=2))
+                archive.writestr('events.jsonl', '\n'.join(json.dumps(row,ensure_ascii=False) for row in events))
+            os.replace(pending,path)
+            return True
+        except Exception as ex:
+            log('diagnostics-error',error=redact(ex))
+            return False
+        finally:
+            if pending is not None and os.path.exists(pending):
+                try: os.unlink(pending)
+                except OSError as ex: log('diagnostics-cleanup-error',error=redact(ex))
 
     async def run(self):
-        await self.api.register()
-        log('registered', endpoint=self.api.endpoint, version=VERSION, capacity=self.args.capacity)
+        self.status('starting')
         try:
-            while True:
+            delay = 1
+            while not self.stopping():
+                try:
+                    await self.api.register()
+                    log('registered', endpoint=self.api.endpoint, version=VERSION, capacity=self.args.capacity)
+                    break
+                except DirectoryTrustError as ex:
+                    self.status('offline')
+                    log('directory-trust-error',error=redact(ex))
+                    raise
+                except Exception as ex:
+                    message = redact(ex)[:250]
+                    self.errors.append(message)
+                    self.status('offline')
+                    log('register-retry',error=message,retrySeconds=delay)
+                    await self.pause(delay)
+                    delay = min(30,delay*2)
+            while not self.stopping():
                 try:
                     reply = await self.api.call('/api/v2/transit/heartbeat', dict(capacity=self.args.capacity,
                           active=len(self.pairs), mbps=self.args.mbps, metrics=self.metrics(heartbeat=True)))
+                    self.last_heartbeat = int(time.time())
+                    if self.state != 'online': log('online',endpoint=self.api.endpoint,version=VERSION,build=BUILD)
+                    self.status('online')
                     for route, pair in list(self.pairs.items()):
                         lease = reply['leases'].get(route)
                         if lease is None:
@@ -353,16 +496,26 @@ class Agent:
                 except Exception as ex:
                     message=redact(ex)[:250]
                     self.errors.append(message)
+                    self.status('offline')
                     log('heartbeat-error', error=message)
                 for route,pair in list(self.pairs.items()):
                     if pair.lease<time.time() or time.monotonic()-pair.touched>90 or any(p.returncode is not None for p in pair.children):
                         await pair.close()
                         del self.pairs[route]
+                self.status(self.state)
                 if self.args.diagnostics: self.diagnostics(self.args.diagnostics)
-                await asyncio.sleep(3)
+                await self.pause(3)
         finally:
-            await asyncio.gather(*(p.close() for p in self.pairs.values()))
-            if self.args.diagnostics: self.diagnostics(self.args.diagnostics)
+            try:
+                results = await asyncio.gather(*(p.close() for p in self.pairs.values()),return_exceptions=True)
+                for result in results:
+                    if isinstance(result,BaseException): log('route-shutdown-error',error=redact(result))
+                self.pairs.clear()
+                if self.args.diagnostics: self.diagnostics(self.args.diagnostics)
+            finally:
+                self.job.close()
+                self.status('stopped')
+                log('stopped',endpoint=self.api.endpoint)
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -380,9 +533,18 @@ def main():
     if uri.username or uri.scheme!='https' and not (args.test_local_directory and uri.scheme=='http' and uri.hostname in ('127.0.0.1','localhost','::1')):
         parser.error('directory must be trusted HTTPS')
     if not 1<=args.capacity<=32 or not 1<=args.mbps<=10000: parser.error('invalid capacity or bandwidth')
-    args.ard=str(Path(args.ard).resolve(strict=True))
     try:
-        with Instance(args.data): asyncio.run(Agent(args).run())
+        with Instance(args.data):
+            handler = configure_log(args.data)
+            try:
+                args.ard=str(Path(args.ard).resolve(strict=True))
+                asyncio.run(Agent(args).run())
+            except Exception as ex:
+                log('fatal',error=redact(ex))
+                raise
+            finally:
+                runtime_log.removeHandler(handler)
+                handler.close()
     except KeyboardInterrupt: log('stopped')
 
 if __name__=='__main__': main()
