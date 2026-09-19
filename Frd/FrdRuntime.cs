@@ -4,6 +4,7 @@ sealed record FrdOffer(string Id,int Port,string Token);
 
 static class FrdRuntime
 {
+    public const string Version="v1.pre8";
     public static async Task Cleanup(string name,Func<ValueTask> close,Action<string>? report=null)
     {
         try{await close();}
@@ -16,9 +17,9 @@ static class FrdRuntime
     public static string Resolve(string configured="")
     {
         var paths=new[]{Environment.GetEnvironmentVariable("ARDUI_FRD_PATH"),configured,
-            Path.Combine(Directory.GetParent(Program.DataRoot)!.FullName,"frd","v1.pre6","FRD.exe"),
-            Path.Combine(AppContext.BaseDirectory,"frd","v1.pre6","FRD.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","FRD","v1.pre6","FRD.exe")};
+            Path.Combine(Directory.GetParent(Program.DataRoot)!.FullName,"frd",Version,"FRD.exe"),
+            Path.Combine(AppContext.BaseDirectory,"frd",Version,"FRD.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","FRD",Version,"FRD.exe")};
         foreach(var candidate in paths.Where(p=>!string.IsNullOrWhiteSpace(p)))
         {
             var path=Path.GetFullPath(candidate!);if(!File.Exists(path))continue;
@@ -27,7 +28,7 @@ static class FrdRuntime
                 throw new IOException("FRD 运行文件不完整，请重新执行 ArdUi 安装脚本修复。");
             return path;
         }
-        throw new IOException("未找到 FRD v1.pre6，请重新执行 ArdUi 安装脚本自动部署。");
+        throw new IOException($"未找到 FRD {Version}，请重新执行 ArdUi 安装脚本自动部署。");
     }
 }
 

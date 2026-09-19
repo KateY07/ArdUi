@@ -139,11 +139,15 @@ def main():
     parser.add_argument('stage',type=Path)
     parser.add_argument('--prepare',action='store_true')
     args=parser.parse_args();stage=args.stage.resolve()
-    if stage.parent != Path('/tmp') or not stage.name.startswith('ardui-v2.pre2-'):
+    if stage.parent != Path('/tmp') or not re.fullmatch(r'ardui-v2\.pre[0-9]+-[a-zA-Z0-9-]+',stage.name):
         raise ValueError('Unexpected deployment stage')
     manifest=json.loads((stage/'frd-files.json').read_text())
     expected=manifest['files'];runtime=stage/'frd-runtime';runtime.mkdir(exist_ok=True)
-    extract_ffmpeg(fetch(stage),runtime,expected)
+    if all((runtime/name).is_file() and sha(runtime/name)==digest
+           for name,digest in expected.items() if name.startswith('ffmpeg/')):
+        print('Reusing all SHA-256 verified local FFmpeg dependencies.',flush=True)
+    else:
+        extract_ffmpeg(fetch(stage),runtime,expected)
     if args.prepare: return
     metadata=json.loads((stage/'frd-nj-meta.json').read_text())
     seed=stage/'frd-nj-seed.tar.xz'
@@ -168,6 +172,7 @@ def main():
             info.type=tarfile.REGTYPE
             with (runtime/info.name).open('rb') as source: archive.addfile(info,source)
     digest=sha(output)
+    if digest!=metadata['finalSha256']: raise ValueError('Reconstructed archive differs from the pinned local archive')
     print(json.dumps({'archive':output.name,'sha256':digest,'bytes':output.stat().st_size,
         'matchesLocalArchive':digest==metadata['finalSha256']}),flush=True)
     with tarfile.open(output,'r:xz') as archive:

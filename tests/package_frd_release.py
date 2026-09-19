@@ -7,14 +7,14 @@ import zipfile
 from delta_v2 import make
 
 repo=Path(__file__).resolve().parents[1]
-version='v2.pre2'
+version='v2.pre3'
 binary=repo/f'dist/final-{version}/ArdUi.exe'
 digest=hashlib.sha256(binary.read_bytes()).hexdigest()
 installer=(repo/'install.ps1').read_text(encoding='ascii')
 assert f"$version='{version}'" in installer
 assert f"$expectedSha256='{digest}'" in installer
 assert digest in (repo/'site/index.html').read_text(encoding='utf-8')
-frd=repo/'dist/FRD-v1.pre6-win-x64.tar.xz'
+frd=repo/'dist/FRD-v1.pre8-win-x64.tar.xz'
 frd_digest=hashlib.sha256(frd.read_bytes()).hexdigest()
 assert frd_digest in installer
 payloads={f'ArdUi-{version}.exe':binary,'install.ps1':repo/'install.ps1',
@@ -27,4 +27,4 @@ files['manifest.json']=json.dumps(manifest,indent=2).encode()
 bundle=repo/f'dist/upload-{version}.zip'
 with zipfile.ZipFile(bundle,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as archive:
     for name,data in files.items(): archive.writestr(name,data)
-make(repo,previous='v2.pre1',version=version)
+make(repo,previous='v2.pre2',version=version)

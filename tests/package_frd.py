@@ -1,4 +1,4 @@
-"""Package the approved FRD v1.pre6 runtime without developer/test artifacts."""
+"""Package the approved FRD v1.pre8 runtime without developer/test artifacts."""
 import argparse
 import hashlib
 import json
@@ -8,7 +8,7 @@ import re
 import tarfile
 import zipfile
 
-VERSION = 'v1.pre6'
+VERSION = 'v1.pre8'
 FILES = ['FRD.exe','codec-config.json','THIRD-PARTY-NOTICES.md','ffmpeg/LICENSE.txt',
     'ffmpeg/avcodec-62.dll','ffmpeg/avdevice-62.dll','ffmpeg/avfilter-11.dll','ffmpeg/avformat-62.dll',
     'ffmpeg/avutil-60.dll','ffmpeg/swresample-6.dll','ffmpeg/swscale-9.dll']

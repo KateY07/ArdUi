@@ -1,14 +1,14 @@
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-$version='v2.pre2'
-$expectedSha256='9daf89bf0b98189e0f93fa3ef0bf7e632d067925280929eb52d87cfc298ea6e7'
+$version='v2.pre3'
+$expectedSha256='3e59c4f84f04fea1eb791bf4983f1f3f9b7e99d3b73517870a43ef17989322b9'
 $expectedArdSha256='04ebed96baecc2fd5b67318b1d02742f777b0351c84ee5b1c1b163a05dc98b5d'
 # FRD release manifest begin
-$frdVersion='v1.pre6'
-$frdArchiveName='FRD-v1.pre6-win-x64.tar.xz'
-$frdArchiveSha256='6aee2eb0912d1b0915eef79156c06bcf64c8c008181d2e6b26845137da09944d'
+$frdVersion='v1.pre8'
+$frdArchiveName='FRD-v1.pre8-win-x64.tar.xz'
+$frdArchiveSha256='35470b1634774605486a6154abe6555ec49c458224d9e1daec6c0c91d6570147'
 $frdFiles=@{
-    'FRD.exe'='37c95ff75dceb75c222b5afdc769a7941d7c9a8c96ce5543e09a2927d0ea2286'
+    'FRD.exe'='3d695a80da827b191b70c0d808e2766b298423683f3cf8e190b08d74f319352c'
     'codec-config.json'='2625bdcb5ba824a36e0b8529b981ed036e57a5ecd004c4ac842cd33bc485b939'
     'THIRD-PARTY-NOTICES.md'='850a93669aec92a0a1e49831fc15582fe7cc66df6e37ebb557794dec2cb4ae68'
     'ffmpeg/LICENSE.txt'='8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903'
@@ -138,7 +138,7 @@ function Install-FrdRuntime {
         Install-VerifiedPayload (Join-Path $frdSource $name) (Join-Path $frdDestination $name) $frdFiles[$name] ('FRD '+$name)
     }
     if(-not (Test-FrdDirectory $frdDestination)){throw 'FRD installed files failed SHA-256 verification.'}
-    Write-Host "FRD $frdVersion installed at $frdDestination (runtime included; no separate .NET 10 installation needed)."
+    Write-Host "FRD $frdVersion installed at $frdDestination (.NET 10 Runtime x64 must be installed separately)."
 }
 
 try{
@@ -148,6 +148,8 @@ try{
     if(-not (Get-Command dotnet -ErrorAction SilentlyContinue)){throw 'Missing .NET 8 Runtime. Install .NET Runtime x64 from https://dotnet.microsoft.com/download/dotnet/8.0 and run this command again.'}
     $runtime=@(& dotnet --list-runtimes 2>$null | Where-Object {$_ -match '^Microsoft\.NETCore\.App 8\.'})
     if(-not $runtime){throw 'Missing .NET 8 Runtime. Install .NET Runtime x64 from https://dotnet.microsoft.com/download/dotnet/8.0 and run this command again.'}
+    $frdRuntime=@(& dotnet --list-runtimes 2>$null | Where-Object {$_ -match '^Microsoft\.NETCore\.App 10\.'})
+    if(-not $frdRuntime){throw 'FRD v1.pre8 requires .NET 10 Runtime x64. Install it from https://dotnet.microsoft.com/download/dotnet/10.0 and run this command again. ArdUi still requires .NET 8 Runtime x64.'}
     New-Item -ItemType Directory -Force $root,(Join-Path $root 'versions'),$data,$temporary,$destination | Out-Null
     Protect-ArdUiDirectory $root
     $download=Join-Path $temporary 'ArdUi.exe'

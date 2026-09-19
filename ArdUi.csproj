@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>ArdUi</AssemblyName>
-    <Version>2.0.0-pre.2</Version>
+    <Version>2.0.0-pre.3</Version>
     <SelfContained>false</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
