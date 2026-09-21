@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ArdUi</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0d10;--card:#15191f;--line:#2a313b;--text:#eef2f6;--muted:#a8b2bf;--accent:#7dd3fc}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.65 system-ui,"Microsoft YaHei",sans-serif}.wrap{max-width:820px;margin:auto;padding:56px 22px 80px}h1{font-size:42px;margin:0 0 6px}.tag{color:var(--accent);font-weight:700}section{margin-top:24px;padding:22px;background:var(--card);border:1px solid var(--line);border-radius:14px}h2{margin:0 0 10px;font-size:20px}.muted{color:var(--muted)}code,pre{font-family:ui-monospace,Consolas,monospace}pre{overflow:auto;padding:14px;background:#080a0d;border:1px solid var(--line);border-radius:9px;color:#d8f4ff}a{color:var(--accent)}
+</style>
+</head>
+<body><main class="wrap">
+<div class="tag">Windows remote access</div>
+<h1>ArdUi</h1>
+<p class="muted">基于永久设备身份与端到端 ARD/Iroh 连接，访问已授权 Windows 设备的远程桌面、FRD 与 SMB 文件共享。</p>
+<section><h2>发布渠道</h2><p>本页面由 GitHub Pages 发布。ARD 引擎由受控构建流程编译，公开的 Windows x64 制品将以固定版本发布到 NuGet.org；安装器只接受经过发布校验的版本。</p><p><a href="https://github.com/KateY07/ArdUi">ArdUi 源码</a> · <a href="https://www.nuget.org/packages/KateY07.Ard.WinX64">ARD NuGet 包</a></p></section>
+<section><h2>安全边界</h2><p>首次连接需通过独立渠道核对完整 EndpointId。设备目录与中继可影响可用性及暴露必要的连接元数据，但不能在不持有设备私钥的情况下冒充已核对的设备或解密端到端流量。</p></section>
+<section><h2>状态</h2><p>Pages 已由本仓库的 Actions 自动部署。安装入口与 NuGet 发布将在首个自动化发布 tag 完成后显示。</p></section>
+</main></body>
+</html>
