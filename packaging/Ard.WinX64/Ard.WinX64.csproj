@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <PackageId>KateY07.Ard.WinX64</PackageId>
+    <PackageVersion>2.0.0-pre.6</PackageVersion>
+    <Authors>KateY07</Authors>
+    <Description>ARD Windows x64 runtime used by ArdUi.</Description>
+    <PackageTags>ard;iroh;p2p;tcp;udp;windows;win-x64</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/KateY07/ArdUi</PackageProjectUrl>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+    <None Include="payload\ard.exe" Pack="true" PackagePath="tools/" />
+    <None Include="payload\ard.exe.sha256" Pack="true" PackagePath="tools/" />
+  </ItemGroup>
+</Project>

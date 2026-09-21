@@ -48,6 +48,11 @@ function Test-VerifiedFile([string]$path,[string]$expected){
 }
 
 function Find-VerifiedPayload([string]$name,[string]$expected){
+    if($env:ARDUI_PACKAGE_ROOT){
+        $packageFile=Join-Path ([IO.Path]::GetFullPath($env:ARDUI_PACKAGE_ROOT)) $name
+        if(Test-VerifiedFile $packageFile $expected){return $packageFile}
+        throw "Packaged $name is missing or failed SHA-256 verification."
+    }
     $current=Join-Path $destination $name
     if(Test-VerifiedFile $current $expected){return $current}
     $versions=Join-Path $root 'versions'

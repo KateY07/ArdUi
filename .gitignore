@@ -3,6 +3,15 @@
 /dist/
 /tools/
 /data/
+/packaging/ArdUi.WinX64/payload/
+/packaging/ArdUi.WinX64/bin/
+/packaging/ArdUi.WinX64/obj/
+/packaging/Ard.WinX64/payload/
+/packaging/Ard.WinX64/bin/
+/packaging/Ard.WinX64/obj/
+/packaging/FRD.WinX64/payload/
+/packaging/FRD.WinX64/bin/
+/packaging/FRD.WinX64/obj/
 *.user
 /prototype-data/
 __pycache__/

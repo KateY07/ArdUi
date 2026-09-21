@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <PackageId>KateY07.FRD.WinX64</PackageId>
+    <PackageVersion>1.0.0-pre.8</PackageVersion>
+    <Authors>KateY07</Authors>
+    <Description>FRD Windows x64 runtime used by ArdUi.</Description>
+    <PackageTags>frd;remote-desktop;windows;win-x64</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/KateY07/ArdUi</PackageProjectUrl>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+    <None Include="payload\FRD-v1.pre8-win-x64.tar.xz" Pack="true" PackagePath="tools/" />
+    <None Include="payload\FRD-v1.pre8-win-x64.tar.xz.sha256" Pack="true" PackagePath="tools/" />
+    <None Include="payload\FRD-SHA256SUMS" Pack="true" PackagePath="tools/" />
+  </ItemGroup>
+</Project>

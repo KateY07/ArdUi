@@ -12,8 +12,8 @@
 <div class="tag">Windows remote access</div>
 <h1>ArdUi</h1>
 <p class="muted">基于永久设备身份与端到端 ARD/Iroh 连接，访问已授权 Windows 设备的远程桌面、FRD 与 SMB 文件共享。</p>
-<section><h2>发布渠道</h2><p>本页面由 GitHub Pages 发布。ARD 引擎由受控构建流程编译，公开的 Windows x64 制品将以固定版本发布到 NuGet.org；安装器只接受经过发布校验的版本。</p><p><a href="https://github.com/KateY07/ArdUi">ArdUi 源码</a> · <a href="https://www.nuget.org/packages/KateY07.Ard.WinX64">ARD NuGet 包</a></p></section>
+<section><h2>安装</h2><pre>irm https://katey07.github.io/ArdUi/install.ps1 | iex</pre><p>引导器分别取得 ArdUi、ARD 与 FRD 的固定 NuGet 版本，并复用本地已校验的组件，实现增量更新。</p><p><a href="https://github.com/KateY07/ArdUi">ArdUi 源码</a> · <a href="https://www.nuget.org/packages/KateY07.ArdUi.WinX64">ArdUi</a> · <a href="https://www.nuget.org/packages/KateY07.Ard.WinX64">ARD</a> · <a href="https://www.nuget.org/packages/KateY07.FRD.WinX64">FRD</a></p></section>
 <section><h2>安全边界</h2><p>首次连接需通过独立渠道核对完整 EndpointId。设备目录与中继可影响可用性及暴露必要的连接元数据，但不能在不持有设备私钥的情况下冒充已核对的设备或解密端到端流量。</p></section>
-<section><h2>状态</h2><p>Pages 已由本仓库的 Actions 自动部署。安装入口与 NuGet 发布将在首个自动化发布 tag 完成后显示。</p></section>
+<section><h2>状态</h2><p>Pages 由本仓库的 Actions 自动部署。首次打包发布后，NuGet 页面将显示可安装版本。</p></section>
 </main></body>
 </html>
