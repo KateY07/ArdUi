@@ -1,9 +1,9 @@
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $packages=[ordered]@{
-    'KateY07.ArdUi.WinX64'='2.0.0-pre.3'
+    'KateY07.ArdUi.WinX64'='2.0.0-pre.6'
     'KateY07.Ard.WinX64'='2.0.0-pre.6'
-    'KateY07.FRD.WinX64'='1.0.0-pre.8'
+    'KateY07.FRD.WinX64'='1.0.0-pre.9'
 }
 $root=if($env:ARDUI_INSTALL_ROOT){[IO.Path]::GetFullPath($env:ARDUI_INSTALL_ROOT)}else{Join-Path $env:LOCALAPPDATA 'ArdUi'}
 $cache=Join-Path $root 'cache\nuget'
@@ -39,6 +39,12 @@ function Expand-Package([string]$package,[string]$destination){
     New-Item -ItemType Directory -Path $destination | Out-Null
     [IO.Compression.ZipFile]::ExtractToDirectory($package,$destination)
 }
+function Get-Sha256([string]$path){
+    $stream=[IO.File]::OpenRead($path)
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant()}
+    finally{$sha.Dispose();$stream.Dispose()}
+}
 
 try{
     Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -58,11 +64,12 @@ try{
         Copy-Item -LiteralPath (Join-Path $uiTools $name) -Destination (Join-Path $payload $name)
     }
     Copy-Item -LiteralPath (Join-Path $ardTools 'ard.exe') -Destination (Join-Path $payload 'ard.exe')
+    Copy-Item -LiteralPath (Join-Path $ardTools 'ard.exe.sha256') -Destination (Join-Path $payload 'ard.exe.sha256')
     $ardExpected=((Get-Content -LiteralPath (Join-Path $ardTools 'ard.exe.sha256') -Raw) -split '\s+')[0]
-    if((Get-FileHash -LiteralPath (Join-Path $payload 'ard.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ardExpected){throw 'ARD package checksum failed.'}
-    $frdArchive=Join-Path $frdTools 'FRD-v1.pre8-win-x64.tar.xz'
+    if((Get-Sha256 (Join-Path $payload 'ard.exe')) -cne $ardExpected){throw 'ARD package checksum failed.'}
+    $frdArchive=Join-Path $frdTools 'FRD-v1.pre9-win-x64.tar.xz'
     $frdExpected=((Get-Content -LiteralPath ($frdArchive+'.sha256') -Raw) -split '\s+')[0]
-    if((Get-FileHash -LiteralPath $frdArchive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $frdExpected){throw 'FRD package checksum failed.'}
+    if((Get-Sha256 $frdArchive) -cne $frdExpected){throw 'FRD package checksum failed.'}
     & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf $frdArchive -C $frd
     if($LASTEXITCODE -ne 0){throw 'FRD package extraction failed.'}
     $env:ARDUI_PACKAGE_ROOT=$payload

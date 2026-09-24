@@ -80,7 +80,7 @@ sealed class LocalForwarder : IAsyncDisposable
                 _=task.ContinueWith(t=>{slots.Release();tasks.TryRemove(id,out _);},TaskScheduler.Default);
             }
         }
-        catch(Exception) when(stop.IsCancellationRequested) { }
+        catch(Exception ex) when(stop.IsCancellationRequested){Diagnostics.Log("forward-listener-ended",ex.Message);}
     }
     async Task Forward(TcpClient client)
     {
@@ -90,7 +90,7 @@ sealed class LocalForwarder : IAsyncDisposable
             var session=hub.Current??throw new IOException("设备正在自动重连。");
             using var upstream=await session.OpenTcp(target,stop.Token);await Wire.Bridge(client,upstream,stop.Token);
         }
-        catch(Exception ex) when(ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { }
+        catch(Exception ex) when(ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException){Diagnostics.Log("forward-tcp",ex.Message);}
     }
     async Task ReceiveUdp()
     {
@@ -100,22 +100,36 @@ sealed class LocalForwarder : IAsyncDisposable
             {
                 var packet=await udp!.ReceiveAsync(stop.Token);
                 if(packet.Buffer.Length > Wire.MaxUdp) continue;
-                if(!udpFlows.TryGetValue(packet.RemoteEndPoint,out var flow))
+                LocalUdpFlow? flow=null;
+                try
                 {
-                    if(udpFlows.Count >= 64) continue;
-                    var session=hub.Current;
-                    if(session==null||!session.Live||!session.UdpPorts.Contains(target))continue;
-                    flow=new LocalUdpFlow(session,target,packet.RemoteEndPoint,async (data,remote) =>
-                        await udp.SendAsync(data,remote,stop.Token),stop.Token);
-                    udpFlows[packet.RemoteEndPoint]=flow;
-                    var captured=flow;
-                    _=flow.Completion.ContinueWith(t =>
-                    { udpFlows.TryRemove(new KeyValuePair<IPEndPoint,LocalUdpFlow>(packet.RemoteEndPoint,captured)); captured.Dispose(); },TaskScheduler.Default);
+                    if(udpFlows.TryGetValue(packet.RemoteEndPoint,out flow)&&!ReferenceEquals(flow.Session,hub.Current))
+                    {if(udpFlows.TryRemove(new KeyValuePair<IPEndPoint,LocalUdpFlow>(packet.RemoteEndPoint,flow)))flow.Dispose();flow=null;}
+                    if(!udpFlows.TryGetValue(packet.RemoteEndPoint,out flow))
+                    {
+                        if(udpFlows.Count >= 64) continue;
+                        var session=hub.Current;
+                        if(session==null||!session.Live||!session.UdpPorts.Contains(target))continue;
+                        flow=new LocalUdpFlow(session,target,packet.RemoteEndPoint,async (data,remote) =>
+                            await udp.SendAsync(data,remote,stop.Token),stop.Token);
+                        udpFlows[packet.RemoteEndPoint]=flow;
+                        if(!ReferenceEquals(session,hub.Current))
+                        {if(udpFlows.TryRemove(new KeyValuePair<IPEndPoint,LocalUdpFlow>(packet.RemoteEndPoint,flow)))flow.Dispose();continue;}
+                        var captured=flow;
+                        _=flow.Completion.ContinueWith(t =>
+                        { udpFlows.TryRemove(new KeyValuePair<IPEndPoint,LocalUdpFlow>(packet.RemoteEndPoint,captured)); captured.Dispose(); },TaskScheduler.Default);
+                    }
+                    await flow.Send(packet.Buffer);
                 }
-                await flow.Send(packet.Buffer);
+                catch(Exception ex)when(ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException)
+                {
+                    Diagnostics.Log("forward-udp-flow",ex.Message);
+                    if(flow!=null&&udpFlows.TryRemove(new KeyValuePair<IPEndPoint,LocalUdpFlow>(packet.RemoteEndPoint,flow)))flow.Dispose();
+                }
             }
         }
-        catch(Exception ex) when(ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { }
+        catch(Exception ex) when(ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException)
+        {Diagnostics.Log("forward-udp-ended",$"Stopping={stop.IsCancellationRequested}: {ex.Message}");}
     }
     public void Reset()
     {
@@ -124,44 +138,6 @@ sealed class LocalForwarder : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         stop.Cancel();listener.Stop();udp?.Dispose();foreach(var flow in udpFlows.Values)flow.Dispose();
-        try{await Task.WhenAll(accept,receive);await Task.WhenAll(tasks.Values);}catch{}stop.Dispose();
+        try{await Task.WhenAll(accept,receive);await Task.WhenAll(tasks.Values);}catch(Exception ex){Diagnostics.Log("forward-close",ex.Message);}stop.Dispose();
     }
-}
-
-sealed class LocalUdpFlow : IDisposable
-{
-    readonly UdpClient upstream=new(new IPEndPoint(IPAddress.Loopback,0));
-    readonly Session session;
-    readonly int target;
-    readonly IPEndPoint remote;
-    readonly Func<byte[],IPEndPoint,Task> reply;
-    readonly CancellationTokenSource stop;
-    public Task Completion { get; }
-    public LocalUdpFlow(Session session,int target,IPEndPoint remote,Func<byte[],IPEndPoint,Task> reply,CancellationToken ct)
-    {
-        this.session=session;this.target=target;this.remote=remote;this.reply=reply;
-        stop=CancellationTokenSource.CreateLinkedTokenSource(ct);upstream.Connect(IPAddress.Loopback,session.LocalPort);
-        Wire.ConfigureUdp(upstream);
-        stop.CancelAfter(TimeSpan.FromMinutes(2));Completion=Receive();
-    }
-    public async Task Send(byte[] data)
-    {
-        stop.CancelAfter(TimeSpan.FromMinutes(2));
-        await upstream.SendAsync(Wire.Packet(session.Capability,target,data),stop.Token);
-    }
-    async Task Receive()
-    {
-        try
-        {
-            while(!stop.IsCancellationRequested)
-            {
-                var packet=await upstream.ReceiveAsync(stop.Token);stop.CancelAfter(TimeSpan.FromMinutes(2));
-                if(Wire.ValidPacket(packet.Buffer,session.Capability) && BinaryPrimitives.ReadUInt16BigEndian(packet.Buffer.AsSpan(16)) == target)
-                    await reply(packet.Buffer[18..],remote);
-            }
-        }
-        catch(Exception ex) when(ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { }
-    }
-    int disposed;
-    public void Dispose(){if(Interlocked.Exchange(ref disposed,1)==0){stop.Cancel();upstream.Dispose();}}
 }

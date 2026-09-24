@@ -3,7 +3,17 @@ namespace ArdUi;
 // ARD authenticates each hop; the v2 overlay authenticates and preserves the A–B session.
 static class Program
 {
-    public const string Version = "v2.pre3";
+    public static string Version
+    {
+        get
+        {
+            var value=typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0]
+                ?? throw new InvalidOperationException("缺少程序集版本信息。");
+            var match=Regex.Match(value,@"^(\d+)\.\d+\.\d+-pre\.(\d+)$");
+            if(!match.Success)throw new InvalidOperationException("程序集预发布版本格式无效："+value);
+            return "v"+match.Groups[1].Value+".pre"+match.Groups[2].Value;
+        }
+    }
     public static string DataRoot => Path.GetFullPath(Environment.GetEnvironmentVariable("ARDUI_DATA_ROOT") ?? Path.Combine(AppContext.BaseDirectory,"data"));
     [STAThread]
     public static int Main(string[] args)

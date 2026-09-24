@@ -1,9 +1,9 @@
-param([string]$ArdPath,[string]$FrdArchivePath,[string]$UiPath)
+param([string]$ArdPath,[string]$FrdSourcePath,[string]$UiPath,[string]$OutputDirectory)
 
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$output=Join-Path $repo 'dist/nuget'
+$output=if($OutputDirectory){[IO.Path]::GetFullPath($OutputDirectory)}else{Join-Path $repo 'dist/nuget'}
 $installer=Get-Content -LiteralPath (Join-Path $repo 'install.ps1') -Raw
 
 function Read-Literal([string]$name){
@@ -16,6 +16,7 @@ function Read-PackageVersion([string]$project){
     return [string]$xml.Project.PropertyGroup.PackageVersion
 }
 function Convert-ReleaseVersion([string]$version){
+    if($version -match '^v(\d+\.\d+\.\d+)$'){return $Matches[1]}
     if($version -notmatch '^v(\d+)\.pre(\d+)$'){throw "Unsupported release version: $version"}
     return "$($Matches[1]).0.0-pre.$($Matches[2])"
 }
@@ -63,6 +64,10 @@ $frdRoot=Join-Path $PSScriptRoot 'FRD.WinX64'
 $uiProject=Join-Path $uiRoot 'ArdUi.WinX64.csproj'
 $ardProject=Join-Path $ardRoot 'Ard.WinX64.csproj'
 $frdProject=Join-Path $frdRoot 'FRD.WinX64.csproj'
+$frdSourceInput=if($FrdSourcePath){[IO.Path]::GetFullPath($FrdSourcePath)}else{''}
+$frdPayloadRoot=[IO.Path]::GetFullPath((Join-Path $frdRoot 'payload'))
+$frdPayloadPrefix=$frdPayloadRoot.TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+if($frdSourceInput -and ($frdSourceInput -eq $frdPayloadRoot -or $frdSourceInput.StartsWith($frdPayloadPrefix,[StringComparison]::OrdinalIgnoreCase))){throw 'FRD source cannot be inside the package payload staging directory.'}
 $uiPayload=Reset-Payload $uiRoot
 $ardPayload=Reset-Payload $ardRoot
 $frdPayload=Reset-Payload $frdRoot
@@ -70,42 +75,47 @@ $frdPayload=Reset-Payload $frdRoot
 [xml]$appProject=Get-Content -LiteralPath (Join-Path $repo 'ArdUi.csproj') -Raw
 $uiVersion=[string]$appProject.Project.PropertyGroup.Version
 $releaseVersion=Read-Literal 'version'
-$ardVersion='2.0.0-pre.6'
+$ardSource=if($ArdPath){[IO.Path]::GetFullPath($ArdPath)}else{[IO.Path]::GetFullPath((Join-Path $repo '..\target\release\ard.exe'))}
+$ardOutput=(& $ardSource --version | Out-String).Trim()
+if($LASTEXITCODE -ne 0 -or $ardOutput -notmatch '^ard ([0-9]+\.[0-9]+\.[0-9]+-pre\.[0-9]+)$'){throw "Unsupported ARD binary: $ardOutput"}
+$ardVersion=$Matches[1]
+$ardHash=(Get-FileHash -LiteralPath $ardSource -Algorithm SHA256).Hash.ToLowerInvariant()
 $frdVersion=Convert-ReleaseVersion (Read-Literal 'frdVersion')
+$frdRuntimeSource=Get-Content -LiteralPath (Join-Path $repo 'Frd/FrdRuntime.cs') -Raw
+if($frdRuntimeSource -match 'v\d+\.pre\d+'){throw 'ArdUi runtime resolver must not hardcode an FRD version.'}
 if($uiVersion -cne (Read-PackageVersion $uiProject)){throw 'ArdUi application and package versions differ.'}
 if($uiVersion -cne (Convert-ReleaseVersion $releaseVersion)){throw 'ArdUi application and installer versions differ.'}
 if($ardVersion -cne (Read-PackageVersion $ardProject)){throw 'ARD package version differs from the installer contract.'}
 if($frdVersion -cne (Read-PackageVersion $frdProject)){throw 'FRD package version differs from the installer contract.'}
 if($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -cne $releaseVersion){throw "Tag $env:GITHUB_REF_NAME differs from $releaseVersion"}
 
-$ardHash=Read-Literal 'expectedArdSha256'
-$ardSource=Get-Source $ArdPath 'ard-v2.0.0-pre.6.exe' $ardHash
 Copy-Item -LiteralPath $ardSource -Destination (Join-Path $ardPayload 'ard.exe')
 if((& (Join-Path $ardPayload 'ard.exe') --version | Out-String).Trim() -cne "ard $ardVersion"){throw 'ARD binary version mismatch.'}
 [IO.File]::WriteAllText((Join-Path $ardPayload 'ard.exe.sha256'),"$ardHash  ard.exe`n",[Text.UTF8Encoding]::new($false))
 
-$frdName=Read-Literal 'frdArchiveName'
-$frdHash=Read-Literal 'frdArchiveSha256'
-$frdSource=Get-Source $FrdArchivePath $frdName $frdHash
+$frdSource=$frdSourceInput
+if(-not $frdSource -or -not (Test-Path -LiteralPath $frdSource -PathType Container)){throw 'Pass -FrdSourcePath with the verified binary release delivered by the FRD development team.'}
 $manifestBlock=[regex]::Match($installer,'(?s)# FRD release manifest begin\s*(.*?)\s*# FRD release manifest end')
 if(-not $manifestBlock.Success){throw 'FRD file manifest is missing.'}
 $entries=[regex]::Matches($manifestBlock.Groups[1].Value,"'([^']+)'='([0-9a-f]{64})'")
 if($entries.Count -lt 10){throw 'FRD file manifest is incomplete.'}
 $frdFiles=@{}
 foreach($entry in $entries){$frdFiles[$entry.Groups[1].Value]=$entry.Groups[2].Value}
-$names=@(& tar -tf $frdSource)
-if($LASTEXITCODE -ne 0 -or $names.Count -ne $frdFiles.Count){throw 'FRD archive layout differs from its manifest.'}
-foreach($name in $names){if(-not $frdFiles.ContainsKey($name)){throw "Unexpected FRD archive entry: $name"}}
-$frdCheck=Join-Path $repo 'dist/nuget-frd-check'
-if(Test-Path -LiteralPath $frdCheck){Remove-Item -LiteralPath $frdCheck -Recurse -Force}
-New-Item -ItemType Directory -Path $frdCheck | Out-Null
-& tar -xf $frdSource -C $frdCheck
-if($LASTEXITCODE -ne 0){throw 'FRD extraction failed.'}
-foreach($name in $frdFiles.Keys){Assert-Hash (Join-Path $frdCheck $name) $frdFiles[$name]}
-Copy-Item -LiteralPath $frdSource -Destination (Join-Path $frdPayload $frdName)
-[IO.File]::WriteAllText((Join-Path $frdPayload ($frdName+'.sha256')),"$frdHash  $frdName`n",[Text.UTF8Encoding]::new($false))
+foreach($name in $frdFiles.Keys){
+    $source=Join-Path $frdSource $name
+    Assert-Hash $source $frdFiles[$name]
+    $destination=Join-Path (Join-Path $frdPayload 'runtime') $name
+    New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
+    Copy-Item -LiteralPath $source -Destination $destination
+}
 $frdLines=@($frdFiles.Keys | Sort-Object | ForEach-Object {'{0}  {1}' -f $frdFiles[$_],($_ -replace '\\','/')})
 [IO.File]::WriteAllLines((Join-Path $frdPayload 'FRD-SHA256SUMS'),$frdLines,[Text.UTF8Encoding]::new($false))
+$frdArchiveName=Read-Literal 'frdArchiveName'
+$frdArchive=Join-Path $frdPayload $frdArchiveName
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $frdPayload 'runtime'),$frdArchive,[IO.Compression.CompressionLevel]::Optimal,$false)
+$frdArchiveHash=(Get-FileHash -LiteralPath $frdArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+[IO.File]::WriteAllText(($frdArchive+'.sha256'),"$frdArchiveHash  $frdArchiveName`n",[Text.UTF8Encoding]::new($false))
 
 if($UiPath){$uiSource=[IO.Path]::GetFullPath($UiPath)}
 else{
@@ -122,11 +132,14 @@ $oldHash=Read-Literal 'expectedSha256'
 $oldLine='$expectedSha256='+"'$oldHash'"
 if(-not $installer.Contains($oldLine)){throw 'Could not locate the ArdUi checksum in the installer.'}
 $packageInstaller=$installer.Replace($oldLine,('$expectedSha256='+"'$uiHash'"))
+$archiveLine = '$frdArchiveSha256=' + [char]39 + $frdArchiveHash + [char]39
+$packageInstaller=[regex]::Replace($packageInstaller,'(?m)^\$frdArchiveSha256=''[0-9a-f]*''',$archiveLine)
 [IO.File]::WriteAllText((Join-Path $uiPayload 'install.ps1'),$packageInstaller,[Text.UTF8Encoding]::new($false))
 Copy-Item -LiteralPath (Join-Path $repo 'config.json') -Destination (Join-Path $uiPayload 'config.json')
 Copy-Item -LiteralPath (Join-Path $repo 'THIRD-PARTY-NOTICES.md') -Destination (Join-Path $uiPayload 'THIRD-PARTY-NOTICES.md')
 
 New-Item -ItemType Directory -Force -Path $output | Out-Null
+Get-ChildItem -LiteralPath $output -Filter '*.nupkg' -File -ErrorAction SilentlyContinue | Remove-Item -Force
 Pack-Project $ardProject @()
 Pack-Project $frdProject @()
 Pack-Project $uiProject @($output)
@@ -138,4 +151,4 @@ $expected=@(
 foreach($name in $expected){if(-not (Test-Path -LiteralPath (Join-Path $output $name) -PathType Leaf)){throw "Expected package is missing: $name"}}
 Write-Output "ArdUi package: $uiVersion ($uiHash)"
 Write-Output "ARD package: $ardVersion ($ardHash)"
-Write-Output "FRD package: $frdVersion ($frdHash; $($frdFiles.Count) files)"
+Write-Output "FRD package: $frdVersion (delivered binary $((Read-Literal 'frdVersion')); $($frdFiles.Count) verified runtime files; $frdArchiveHash)"

@@ -19,11 +19,12 @@ sealed class Session : IAsyncDisposable
     public Task Completion=>completed.Task;
     public bool HasOverlay=>Overlay!=null;
     public CancellationToken Token => stop.Token;
-    public bool Live => disposed == 0 && (Overlay!=null?!Overlay.Expired:!Process.Exited.IsCompleted);
+    public bool Live => disposed == 0 && (Overlay!=null?!Overlay.Token.IsCancellationRequested&&(!Overlay.Expired||Process.ProgressAge<90000):!Process.Exited.IsCompleted);
     public string Network => Overlay?.Network??Process.Network;
     public double? TcpRtt { get; set; }
     public double? UdpRtt { get; set; }
     public double? BandwidthMbps { get; set; }
+    public double? BandwidthLowerBoundMbps { get; set; }
     public ForwardHub? Hub { get; }
     readonly Gateway? gateway;
     readonly string directory;
@@ -156,15 +157,10 @@ sealed class Session : IAsyncDisposable
         }
         catch { tcp.Dispose(); throw; }
     }
-    async Task<double> MeasureBandwidth(CancellationToken ct)
+    async Task<double?> MeasureBandwidth(CancellationToken ct)
     {
-        using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct,Token);timeout.CancelAfter(TimeSpan.FromSeconds(12));
-        using var tcp=new TcpClient{NoDelay=true};await tcp.ConnectAsync(IPAddress.Loopback,LocalPort,timeout.Token);
-        var head=new byte[23];"AUI1"u8.CopyTo(head);Capability.CopyTo(head,4);head[20]=3;
-        var watch=Stopwatch.StartNew();await tcp.GetStream().WriteAsync(head,timeout.Token);
-        if((await Wire.Read(tcp.GetStream(),1,timeout.Token))[0]!=0)throw new IOException("带宽探测被拒绝。");
-        _=await Wire.Read(tcp.GetStream(),Wire.BandwidthProbeSize,timeout.Token);watch.Stop();
-        return Wire.BandwidthProbeSize*8d/Math.Max(watch.Elapsed.TotalSeconds,.001)/1_000_000d;
+        if(Overlay?.Link(Overlay.Selected) is not {} link)return null;
+        await Overlay.MeasureThroughput(link,ct);BandwidthLowerBoundMbps=link.BandwidthLowerBoundMbps;return link.BandwidthMbps;
     }
     public void StartMetrics(Action changed)
     {
@@ -192,7 +188,7 @@ sealed class Session : IAsyncDisposable
                     {
                         try{BandwidthMbps=await MeasureBandwidth(stop.Token);}
                         catch(OperationCanceledException)when(stop.IsCancellationRequested){throw;}
-                        catch{BandwidthMbps=null;}
+                        catch(Exception ex){BandwidthMbps=null;BandwidthLowerBoundMbps=null;Diagnostics.Log("bandwidth",ex.Message);}
                     }
                     failures=0;
                     changed();
@@ -200,9 +196,9 @@ sealed class Session : IAsyncDisposable
                 catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
                 catch
                 {
-                    TcpRtt=null;UdpRtt=null;BandwidthMbps=null;changed();
+                    TcpRtt=null;UdpRtt=null;BandwidthMbps=null;BandwidthLowerBoundMbps=null;changed();
                     if(++failures>=2&&Overlay==null){try{await Process.DisposeAsync();}catch(Exception ex){Diagnostics.Log("health-restart",ex.Message);}break;}
-                    if(Overlay?.Expired==true){Diagnostics.Log("overlay-timeout","All paths unavailable for 45 seconds.");break;}
+                    if(!Live){Diagnostics.Log("overlay-ended","Session closed or recovery made no progress within its budget.");break;}
                 }
                 try { await Task.Delay(TimeSpan.FromSeconds(5), stop.Token); }
                 catch (OperationCanceledException) { break; }
@@ -219,6 +215,7 @@ sealed class Session : IAsyncDisposable
             catch(Exception ex){errors.Add(name);Diagnostics.Log("session-cleanup",name+": "+ex.Message);}
         }
         await Cleanup("停止会话",()=>{stop.Cancel();return ValueTask.CompletedTask;});
+        await Cleanup("立即关闭被控入口",()=>{gateway?.Stop();return ValueTask.CompletedTask;});
         completed.TrySetResult();
         await Cleanup("解除转发绑定",()=>{Hub?.Detach(this);return ValueTask.CompletedTask;});
         Volatile.Write(ref frdPort,0);

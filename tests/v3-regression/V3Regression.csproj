@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../Core/Models.cs" Link="Models.cs" />
+    <Compile Include="../../Core/OperationGate.cs" Link="OperationGate.cs" />
+    <Compile Include="../../Transport/Wire.cs" Link="Wire.cs" />
+    <Compile Include="../../Transport/Gateway.cs" Link="Gateway.cs" />
+    <Compile Include="../../Transport/ArdPathState.cs" Link="ArdPathState.cs" />
+    <Compile Include="../../Overlay/*.cs" Link="%(Filename)%(Extension)" />
+    <Compile Include="../../TransitClient/TransitModels.cs" Link="TransitModels.cs" />
+  </ItemGroup>
+</Project>

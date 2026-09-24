@@ -6,6 +6,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../Frd/FrdProtocol.cs" Link="FrdProtocol.cs" />
+    <Compile Include="../../Frd/FrdForwarder.cs" Link="FrdForwarder.cs" />
+    <Compile Include="../../Transport/LocalUdpFlow.cs" Link="LocalUdpFlow.cs" />
+    <Compile Include="../../Transport/Wire.cs" Link="Wire.cs" />
+    <Compile Include="../../Transport/Forwarding.cs" Link="Forwarding.cs" />
   </ItemGroup>
 </Project>

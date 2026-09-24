@@ -1,6 +1,7 @@
 """Isolated real ARD + directory + Python ArdTransit + C# client regression."""
 import argparse
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,17 +22,40 @@ def main():
     parser.add_argument('--dll', default='bin/Release/net8.0-windows/ArdUi.dll')
     parser.add_argument('--prototype', action='store_true', help='Run consent, revoke and repeated enrollment regression')
     parser.add_argument('--frd', action='store_true', help='Run real FRD desktop over the encrypted ARD and candidate paths')
+    parser.add_argument('--frd-exe', help='Explicit FRD binary delivered for black-box integration; alternatively set ARDUI_FRD_PATH')
     parser.add_argument('--transit-exe', help='Use a packaged ArdTransit executable instead of Python source')
+    parser.add_argument('--ard', help='Use an isolated experimental ARD executable; requires --ard-sha256')
+    parser.add_argument('--ard-sha256', help='Expected SHA-256 of the experimental --ard executable')
     args=parser.parse_args()
     repo=Path(__file__).resolve().parents[1]
+    frd_exe=None
+    if args.frd:
+        supplied=args.frd_exe or os.environ.get('ARDUI_FRD_PATH')
+        if not supplied: parser.error('--frd requires --frd-exe or ARDUI_FRD_PATH pointing to a delivered binary')
+        frd_exe=Path(supplied).resolve()
+        if not frd_exe.is_file(): parser.error('FRD binary does not exist: '+str(frd_exe))
+    if bool(args.ard) != bool(args.ard_sha256): parser.error('--ard and --ard-sha256 must be supplied together')
+    ard=(repo/args.ard).resolve() if args.ard else repo/'tools/ard.exe'
+    if args.ard:
+        expected=args.ard_sha256.lower()
+        if re.fullmatch(r'[0-9a-f]{64}',expected) is None: parser.error('--ard-sha256 must contain exactly 64 hexadecimal characters')
+        if not ard.is_file(): parser.error('--ard must name an existing file')
+        actual=hashlib.sha256(ard.read_bytes()).hexdigest()
+        if actual != expected: parser.error(f'experimental ARD SHA-256 mismatch: expected {expected}, received {actual}')
     root=repo/'dist'/('v2-integration-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
     root.mkdir(parents=True)
-    ard=repo/'tools/ard.exe'
     relay=repo.parent/'target/release/ard-relay.exe'
     server_port,relay_port=port(),port()
     relay_url=f'http://127.0.0.2:{relay_port}'
     base=f'http://127.0.0.1:{server_port}'
     env=dict(os.environ,ARDUI_DATABASE=str(root/'directory.sqlite3'),ARDUI_TRANSIT_KEY=str(root/'directory-key'),ARDUI_PORT=str(server_port))
+    if frd_exe:
+        env['ARDUI_FRD_PATH']=str(frd_exe)
+        env['ARDUI_DATA_ROOT']=str(root/'isolated-ui-data')
+        print('FRD binary:',frd_exe,flush=True)
+        print('FRD SHA-256:',hashlib.sha256(frd_exe.read_bytes()).hexdigest(),flush=True)
+    env.pop('ARDUI_BENCH_ARD_SHA256',None)
+    if args.ard: env['ARDUI_BENCH_ARD_SHA256']=expected
     children=[]
     logs=[]
     creation={'creationflags':subprocess.CREATE_NO_WINDOW} if os.name=='nt' else {}

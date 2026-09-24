@@ -41,10 +41,17 @@ static class FrdTest
             Check(session.Overlay!.Selected!="base","Candidate route not selected.");
             await View("frd-transit");
             var revoked=await session.OpenFrd(ct,30,Path.Combine(root,"frd-revoked.json"));
-            await Task.Delay(2000,ct);await bd.Revoke(caller.Id);
-            await revoked.Completion.WaitAsync(TimeSpan.FromSeconds(15),ct);
+            await Task.Delay(2000,ct);Console.WriteLine("TEST: revoking the controller while FRD is running.");await bd.Revoke(caller.Id);
+            Check(incoming.Token.IsCancellationRequested&&!incoming.FrdLive&&!host.Incoming.ContainsKey(caller.Id),"Revocation left the controlled FRD session running.");
+            Console.WriteLine("PASS: revocation removes the incoming session and stops the controlled FRD process.");
+            // The delivered FRD CLI keeps a disconnected viewer open; the owner closes it on explicit disconnect.
+            Console.WriteLine("TEST: explicit local disconnect must close the retained FRD viewer and forwarding entry.");
+            await caller.Disconnect(host.Id);
+            try{await revoked.Completion.WaitAsync(TimeSpan.FromSeconds(15),ct);}
+            catch(TimeoutException ex)
+            {throw new IOException("ArdUi 主动断开后 FRD 主控在 15 秒内未结束，请检查进程和代理清理。",ex);}
             Check(!incoming.FrdLive&&!session.FrdLive,"Revocation left an FRD process or proxy running.");
-            Console.WriteLine("PASS: revocation closes FRD processes and dynamic forwarding permissions.");
+            Console.WriteLine("PASS: explicit disconnect closes the FRD viewer and proxy; revoked target remains stopped.");
             return 0;
         }
         finally{Console.WriteLine("Diagnostics: "+Diagnostics.Export(root,caller));}

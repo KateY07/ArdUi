@@ -8,6 +8,7 @@ global using System.Net;
 global using System.Net.NetworkInformation;
 global using System.Net.Sockets;
 global using System.Runtime.InteropServices;
+global using System.Reflection;
 global using System.Security.Cryptography;
 global using System.Security.AccessControl;
 global using System.Security.Principal;

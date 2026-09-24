@@ -1,7 +1,7 @@
 param([string]$ArdPath,[string]$Python='python')
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-$version='v2.pre3'
+$version='v3.pre8'
 Push-Location $PSScriptRoot
 try {
     New-Item -ItemType Directory -Force tools,dist | Out-Null
@@ -12,7 +12,7 @@ try {
     }
     if(-not (Test-Path tools/ard.exe -PathType Leaf)){throw 'Pass -ArdPath with the trusted ARD binary.'}
     $ardVersion=(& ./tools/ard.exe --version | Out-String).Trim()
-    if($LASTEXITCODE -ne 0 -or $ardVersion -ne 'ard 2.0.0-pre.6'){throw "ARD 2.0.0-pre.6 is required; found '$ardVersion'."}
+    if($LASTEXITCODE -ne 0 -or $ardVersion -ne 'ard 3.0.0-pre.2'){throw "ARD 3.0.0-pre.2 is required; found '$ardVersion'."}
     $output=Join-Path $PSScriptRoot "dist/final-$version"
     $obj=Join-Path $PSScriptRoot "dist/obj-$version/"
     $distRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'dist'))+[IO.Path]::DirectorySeparatorChar

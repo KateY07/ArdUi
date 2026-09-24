@@ -48,11 +48,24 @@ static class SelfTest
             var minute=DateTimeOffset.UtcNow.ToUnixTimeSeconds()/60;var enrollmentPassword=hd.AccessPassword;
             if(!Regex.IsMatch(enrollmentPassword,@"\A[0-9]{6}\z")||enrollmentPassword==hd.AccessPasswordFor(minute+1))throw new Exception("Rotating password failure.");
             await hd.SetAccess(true,ct);hd.Start();cd.Start();
-            var connection = cd.Connect(hd.Code,enrollmentPassword,ct);
+            using var firstAttempt=CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var connection = cd.Connect(hd.Code,enrollmentPassword,firstAttempt.Token);
             await prompt.Task.WaitAsync(ct);
             if (caller.State.Peers.Count != 0 || connection.IsCompleted) throw new Exception("Peer granted before consent.");
+            Console.WriteLine("TEST: disabling host while confirmation is pending.");
+            await hd.SetAccess(false,ct).WaitAsync(TimeSpan.FromSeconds(3),ct);
+            Console.WriteLine("TEST: host disabled; cancelling the caller's pending request independently.");
+            if(hd.Enabled||host.Incoming.Count!=0)throw new Exception("Pending confirmation blocked host disable.");
+            approval.TrySetResult(true);
+            if(hd.Controllers.Length!=0||caller.State.Peers.Count!=0)throw new Exception("Late approval granted a disabled session.");
+            firstAttempt.Cancel();
+            try{await connection.WaitAsync(TimeSpan.FromSeconds(3),ct);throw new Exception("Disabled host granted pending request.");}
+            catch(Exception ex)when(ex is IOException or OperationCanceledException)
+            {Console.WriteLine("PASS: host disable cancels a pending confirmation without a global operation lock.");}
+            await hd.SetAccess(true,ct);prompt=new(TaskCreationOptions.RunContinuationsAsynchronously);approval=new(TaskCreationOptions.RunContinuationsAsynchronously);
+            connection=cd.Connect(hd.Code,hd.AccessPassword,ct);await prompt.Task.WaitAsync(ct);
             approval.SetResult(true); await connection;
-            if (hostChecks != 1 || callerChecks != 1 || caller.State.Peers.Count != 1) throw new Exception("Consent failure.");
+            if (hostChecks != 2 || callerChecks != 1 || caller.State.Peers.Count != 1) throw new Exception("Consent failure.");
             Console.WriteLine("PASS: both fingerprints checked; peer saved only after host approval and signed grant.");
             async Task VerifyFlow()
             {
@@ -76,7 +89,7 @@ static class SelfTest
             await VerifyFlow();Console.WriteLine("PASS: killed ARD child recovered automatically with the same local forwarding port.");
             var savedPeer=caller.State.Peers.Single();await cd.Pause(savedPeer);await host.Disconnect(caller.Id);
             await cd.Connect(hd.Code,"",ct,enrolling:false);
-            if (hostChecks != 1 || callerChecks != 1) throw new Exception("Authorized reconnect prompted again.");
+            if (hostChecks != 2 || callerChecks != 1) throw new Exception("Authorized reconnect prompted again.");
             await VerifyFlow(); Console.WriteLine("PASS: authorized reconnect without enrollment password or consent.");
             await hd.Revoke(caller.Id);
             if (host.Incoming.Count != 0 || hd.Controllers.Length != 0) throw new Exception("Revoke failed.");
@@ -122,6 +135,10 @@ static class SelfTest
             catch (IOException) { }
             if (!File.ReadAllBytes(path).SequenceEqual(new byte[] {1,2,3})) throw new Exception("损坏身份被覆盖。");
             Console.WriteLine("PASS: identity creation, reinstall preservation, corrupt identity refusal.");
+            var custom=Path.Combine(root,"custom-frd");Directory.CreateDirectory(custom);var customExe=Path.Combine(custom,"FRD.exe");File.WriteAllText(customExe,"fixture");
+            var bundled=Path.Combine(AppContext.BaseDirectory,"frd","FRD.exe");var expected=File.Exists(bundled)?bundled:customExe;
+            if(FrdRuntime.Resolve(customExe)!=Path.GetFullPath(expected))throw new Exception("FRD runtime resolution failed.");
+            Console.WriteLine("PASS: bundled FRD layout takes precedence; explicit path remains available without a bundle.");
             var preview=Path.Combine(root,"headless.png"); Preview.Render(preview);
             if(new FileInfo(preview).Length<1000)throw new Exception("无头渲染输出无效。");
             Console.WriteLine("PASS: Avalonia code-only headless layout and rendering.");

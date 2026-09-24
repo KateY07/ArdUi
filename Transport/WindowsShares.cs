@@ -2,7 +2,7 @@ namespace ArdUi;
 
 static class WindowsShares
 {
-    public static async Task<string> Map(Session session,string share,string? user,string? password,CancellationToken ct)
+    public static async Task<string> Map(Session session,string share,CancellationToken ct)
     {
         if(!Regex.IsMatch(share,@"\A[^\\/:*?\""<>|\x00-\x1f]{1,80}\z")) throw new InvalidDataException("请输入单个共享名，例如 Documents。");
         var bridge=session.Forward(445);
@@ -14,11 +14,10 @@ static class WindowsShares
         $letter=90..68 | ForEach-Object { [string][char]$_ } | Where-Object { $_ -notin $used } | Select-Object -First 1
         if(-not $letter){throw '没有可用的盘符。'}
         $argsMap=@{LocalPath=($letter+':');RemotePath=$d.Remote;TcpPort=[uint16]$d.Port;Persistent=$false;ErrorAction='Stop'}
-        if($d.User){$argsMap.Credential=[pscredential]::new($d.User,(ConvertTo-SecureString $d.Password -AsPlainText -Force))}
         New-SmbMapping @argsMap | Out-Null
         Write-Output ($letter+':')
         """;
-        var drive=(await Run(script,new { Remote=remote,Port=bridge.Port,User=user,Password=password },ct)).Trim();
+        var drive=(await Run(script,new { Remote=remote,Port=bridge.Port },ct)).Trim();
         if(!Regex.IsMatch(drive,@"\A[D-Z]:\z")) throw new IOException("Windows 返回无效共享映射。");
         var mappings=session.Hub?.Mappings??throw new IOException("共享转发入口不可用。");
         lock(mappings)mappings[drive]=remote;

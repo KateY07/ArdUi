@@ -3,6 +3,7 @@ namespace ArdUi;
 sealed class OverlayLink : IAsyncDisposable
 {
     readonly TcpClient tcp;
+    readonly Stream output;
     readonly SemaphoreSlim write=new(1);
     readonly CancellationTokenSource stop=new();
     readonly Func<byte[],CancellationToken,Task> sendUdp;
@@ -12,14 +13,16 @@ sealed class OverlayLink : IAsyncDisposable
     public bool Live=>!stop.IsCancellationRequested;
     public string Network=>network();
     public double? RttMs, JitterMs, BandwidthMbps;
+    public double? BandwidthLowerBoundMbps;
+    public long MeasuredAt, ServedAt;
     readonly ConcurrentQueue<double?> samples=new();
     public PathQuality Quality=>PathQuality.From(samples.ToArray(),BandwidthMbps);
     public void Sample(double? ms){samples.Enqueue(ms);while(samples.Count>16)samples.TryDequeue(out _);}
     public long Sent,Received,Probes,Lost;
     public Task Reader{get;set;}=Task.CompletedTask;
     public Action? Closed;
-    public OverlayLink(string name,TcpClient tcp,Func<byte[],CancellationToken,Task> sendUdp,Func<string> network)
-    {Name=name;this.tcp=tcp;tcp.NoDelay=true;this.sendUdp=sendUdp;this.network=network;}
+    public OverlayLink(string name,TcpClient tcp,Func<byte[],CancellationToken,Task> sendUdp,Func<string> network,Stream? output=null)
+    {Name=name;this.tcp=tcp;this.output=output??tcp.GetStream();tcp.NoDelay=true;this.sendUdp=sendUdp;this.network=network;}
     public async Task Send(byte[] data,bool udp,CancellationToken ct)
     {
         if(!Live)throw new IOException("传输路径已关闭。");
@@ -29,8 +32,13 @@ sealed class OverlayLink : IAsyncDisposable
         try
         {
             var header=new byte[4];BinaryPrimitives.WriteInt32BigEndian(header,data.Length);
-            await tcp.GetStream().WriteAsync(header,linked.Token);await tcp.GetStream().WriteAsync(data,linked.Token);
+            await output.WriteAsync(header,linked.Token);await output.WriteAsync(data,linked.Token);
             Interlocked.Add(ref Sent,data.Length);
+        }
+        catch(Exception ex)
+        {
+            Diagnostics.Log("link-write-failed",Name+": "+ex.Message);
+            stop.Cancel();tcp.Dispose();throw;
         }
         finally{write.Release();}
     }

@@ -14,6 +14,9 @@ sealed class DirectoryClient : IAsyncDisposable
     readonly NSec.Cryptography.Key key;
     readonly CancellationTokenSource stop = new();
     readonly SemaphoreSlim edits = new(1), confirmations = new(1);
+    readonly OperationGate connects=new();
+    readonly Dictionary<string,long> revocations=new();
+    long accessRevision;
     readonly object sync = new();
     readonly string path;
     readonly AccessSettings access;
@@ -247,8 +250,10 @@ sealed class DirectoryClient : IAsyncDisposable
     }
     async Task<SignedEnvelope?> AuthorizePassword(ServerTicket ticket, PasswordRequest request, CancellationToken ct)
     {
+        long revision;
         lock(sync)
         {
+            revision=revocations.GetValueOrDefault(ticket.ControllerEndpoint);
             if(!access.Enabled) return null;
             if(!request.Enroll) return access.Controllers.TryGetValue(ticket.ControllerEndpoint,out var saved) ? saved.Receipt : null;
         }
@@ -280,7 +285,7 @@ sealed class DirectoryClient : IAsyncDisposable
             ct.ThrowIfCancellationRequested();
             lock (sync)
             {
-                if (!access.Enabled) return null;
+                if (!access.Enabled||revocations.GetValueOrDefault(ticket.ControllerEndpoint)!=revision) return null;
                 var receipt = Sign("/grant/v1",new GrantReceipt(ticket.ControllerEndpoint,engine.Id,Guid.NewGuid().ToString("N")));
                 access.Controllers[ticket.ControllerEndpoint] = new ControllerGrant(ticket.ControllerCode,receipt); Save(); Changed?.Invoke();
                 return receipt;
@@ -290,17 +295,19 @@ sealed class DirectoryClient : IAsyncDisposable
     }
     public async Task SetAccess(bool enabled, CancellationToken ct = default)
     {
+        var revision=Interlocked.Increment(ref accessRevision);
+        lock(sync){access.Enabled=false;Save();incoming.Cancel();}
+        Changed?.Invoke();
+        await engine.StopIncoming();
         await edits.WaitAsync(ct);
         try
         {
-            lock (sync) { access.Enabled = false; Save(); }
-            incoming.Cancel();
-            await engine.StopIncoming();
             await Task.WhenAll(jobs.Values);
-            incoming.Dispose(); incoming = CancellationTokenSource.CreateLinkedTokenSource(stop.Token);
+            if(revision!=Volatile.Read(ref accessRevision))return;
+            lock(sync){incoming.Dispose();incoming=CancellationTokenSource.CreateLinkedTokenSource(stop.Token);}
             if (code.Length == 0) await Register(ct);
             await Call<JsonElement>("/api/v1/access", new { enabled }, ct);
-            lock (sync) { access.Enabled = enabled; Save(); }
+            lock (sync) { if(revision!=Volatile.Read(ref accessRevision))return;access.Enabled = enabled; Save(); }
             Changed?.Invoke();
         }
         finally { edits.Release(); }
@@ -309,9 +316,21 @@ sealed class DirectoryClient : IAsyncDisposable
     {
         await ConnectOnce(machine,password,enrolling,ct,false);
         machine=Wire.Machine(machine);Peer peer;lock(engine.State.Peers)peer=engine.State.Peers.Single(p=>p.Code==machine);
-        peer.AutoConnect=true;engine.State.Save();EnsureReconnect(peer);Changed?.Invoke();
+        EnsureReconnect(peer);Changed?.Invoke();
     }
     async Task ConnectOnce(string machine,string password,bool enrolling,CancellationToken ct,bool background)
+    {
+        machine=Wire.Machine(machine);
+        using var operation=await connects.Enter(machine,ct);
+        await ConnectOnceCore(machine,password,enrolling,operation.Token,background);
+        operation.Commit(()=>
+        {
+            if(background)return;
+            lock(engine.State.Peers)
+            {var peer=engine.State.Peers.Single(p=>p.Code==machine);peer.AutoConnect=true;engine.State.Save();}
+        });
+    }
+    async Task ConnectOnceCore(string machine,string password,bool enrolling,CancellationToken ct,bool background)
     {
         machine = Wire.Machine(machine);
         password=password.Trim();
@@ -362,13 +381,13 @@ sealed class DirectoryClient : IAsyncDisposable
     public KeyValuePair<string,ControllerGrant>[] Controllers { get { lock(sync) return access.Controllers.ToArray(); } }
     public async Task Revoke(string endpoint)
     {
-        lock(sync){access.Controllers.Remove(endpoint);Save();}
-        if(engine.Incoming.TryRemove(endpoint,out var session))await session.DisposeAsync();
+        lock(sync){revocations[endpoint]=revocations.GetValueOrDefault(endpoint)+1;access.Controllers.Remove(endpoint);Save();}
+        await engine.DropIncoming(endpoint);
         Changed?.Invoke();
     }
     public async Task RemoveLocal(Peer peer)
     {
-        peer.AutoConnect=false;engine.State.Save();await StopReconnect(peer.Id);await engine.RemoveOutgoing(peer.Id);
+        peer.AutoConnect=false;engine.State.Save();connects.Cancel(peer.Code);await engine.RemoveOutgoing(peer.Id);await StopReconnect(peer.Id);
         engine.State.Remove(peer.Id);
         lock(sync){access.Targets.Remove(peer.Code);Save();}
         Changed?.Invoke();
@@ -387,7 +406,7 @@ sealed class DirectoryClient : IAsyncDisposable
     }
     public async Task Pause(Peer peer)
     {
-        peer.AutoConnect=false;engine.State.Save();await StopReconnect(peer.Id);await engine.DropOutgoing(peer.Id);
+        peer.AutoConnect=false;engine.State.Save();connects.Cancel(peer.Code);await engine.DropOutgoing(peer.Id);await StopReconnect(peer.Id);
         engine.SetStatus(peer.Id,"已授权 · 已暂停");Changed?.Invoke();
     }
     public void ExportIdentity(string destination, string password)
@@ -407,6 +426,7 @@ sealed class DirectoryClient : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         stop.Cancel(); incoming.Cancel();
+        await connects.Close();
         foreach(var job in reconnects.Values)job.Stop.Cancel();
         try { await loop; } catch { }
         await engine.StopIncoming();

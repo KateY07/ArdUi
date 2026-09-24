@@ -4,7 +4,12 @@ sealed record FrdOffer(string Id,int Port,string Token);
 
 static class FrdRuntime
 {
-    public const string Version="v1.pre8";
+    static string Accept(string path)
+    {
+        path=Path.GetFullPath(path);
+        Diagnostics.Log("frd-runtime","使用 FRD："+path);
+        return path;
+    }
     public static async Task Cleanup(string name,Func<ValueTask> close,Action<string>? report=null)
     {
         try{await close();}
@@ -16,19 +21,12 @@ static class FrdRuntime
     }
     public static string Resolve(string configured="")
     {
-        var paths=new[]{Environment.GetEnvironmentVariable("ARDUI_FRD_PATH"),configured,
-            Path.Combine(Directory.GetParent(Program.DataRoot)!.FullName,"frd",Version,"FRD.exe"),
-            Path.Combine(AppContext.BaseDirectory,"frd",Version,"FRD.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","FRD",Version,"FRD.exe")};
-        foreach(var candidate in paths.Where(p=>!string.IsNullOrWhiteSpace(p)))
-        {
-            var path=Path.GetFullPath(candidate!);if(!File.Exists(path))continue;
-            var folder=Path.GetDirectoryName(path)!;
-            if(!File.Exists(Path.Combine(folder,"codec-config.json"))||!Directory.Exists(Path.Combine(folder,"ffmpeg")))
-                throw new IOException("FRD 运行文件不完整，请重新执行 ArdUi 安装脚本修复。");
-            return path;
-        }
-        throw new IOException($"未找到 FRD {Version}，请重新执行 ArdUi 安装脚本自动部署。");
+        var bundled=Path.Combine(AppContext.BaseDirectory,"frd","FRD.exe");
+        if(File.Exists(bundled))return Accept(bundled);
+        var environment=Environment.GetEnvironmentVariable("ARDUI_FRD_PATH");
+        if(!string.IsNullOrWhiteSpace(environment))return Accept(environment);
+        if(!string.IsNullOrWhiteSpace(configured))return Accept(configured);
+        throw new IOException("未找到当前版本附带的 FRD 运行文件，请重新执行 ArdUi 安装脚本。");
     }
 }
 
@@ -37,7 +35,6 @@ sealed class FrdProcess : IAsyncDisposable
     readonly Process process;
     readonly ChildJob job;
     readonly Task pump;
-    readonly TaskCompletionSource ready=new(TaskCreationOptions.RunContinuationsAsynchronously);
     readonly string secret;
     readonly object disposeGate=new();
     Task? disposal;
@@ -52,7 +49,8 @@ sealed class FrdProcess : IAsyncDisposable
             RedirectStandardOutput=true,RedirectStandardError=true};
         foreach(var argument in arguments)info.ArgumentList.Add(argument);
         info.ArgumentList.Add("--token");info.ArgumentList.Add(token);
-        process=Process.Start(info)??throw new IOException("FRD 启动失败。");
+        try{process=Process.Start(info)??throw new IOException("FRD 启动失败。");}
+        catch(Exception ex){throw new IOException("无法启动 FRD："+exe+"。"+ex.Message,ex);}
         try{job=new ChildJob(process);}
         catch(Exception ex)
         {
@@ -71,17 +69,11 @@ sealed class FrdProcess : IAsyncDisposable
             while(await reader.ReadLineAsync() is{} text)
             {
                 Diagnostics.Log("frd",text.Replace(secret,"[redacted]",StringComparison.Ordinal));
-                if(text.Contains("Remote listener ready:",StringComparison.Ordinal))ready.TrySetResult();
             }
         }
         catch(Exception ex){Diagnostics.Log("frd-output",ex.Message);}
     }
-    public async Task WaitReady(CancellationToken ct)
-    {
-        await Task.WhenAny(ready.Task,Exited).WaitAsync(TimeSpan.FromSeconds(20),ct);
-        if(Exited.IsCompleted)throw new IOException("FRD 被控端启动失败，请查看诊断日志。");
-        await ready.Task.WaitAsync(ct);
-    }
+    public Task WaitReady(int port,CancellationToken ct)=>FrdListener.Wait(process,port,ct);
     public ValueTask DisposeAsync(){lock(disposeGate)return new(disposal??=Close());}
     async Task Close()
     {
@@ -116,40 +108,38 @@ sealed class FrdProcess : IAsyncDisposable
 sealed class FrdHosted : IAsyncDisposable
 {
     readonly FrdProcess process;
-    readonly FrdHostProxy proxy;
     readonly Gateway gateway;
     readonly Action<string> report;
     readonly object disposeGate=new();
     Task? disposal;
     public FrdOffer Offer{get;}
-    public bool Live=>process.Live&&proxy.Live&&disposal==null;
-    FrdHosted(FrdProcess process,FrdHostProxy proxy,Gateway gateway,string token,Action<string> report)
-    {this.process=process;this.proxy=proxy;this.gateway=gateway;this.report=report;proxy.Failed=report;Offer=new(Guid.NewGuid().ToString("N"),proxy.Port,token);_=Monitor();}
+    public bool Live=>process.Live&&disposal==null;
+    FrdHosted(FrdProcess process,Gateway gateway,int port,string token,CancellationToken lifetime,Action<string> report)
+    {this.process=process;this.gateway=gateway;this.report=report;Offer=new(Guid.NewGuid().ToString("N"),port,token);_=Monitor(lifetime);}
     public static async Task<FrdHosted> Start(string exe,Gateway gateway,CancellationToken lifetime,CancellationToken ct,Action<string> report)
     {
         var token=Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();var port=Wire.Port();
         var process=new FrdProcess(exe,token,"--host","--listen","127.0.0.1","--port",port.ToString());
-        FrdHostProxy? proxy=null;
         try
         {
-            await process.WaitReady(ct);proxy=new(port,token,gateway.PermitFrdUdp,lifetime);gateway.PermitFrdTcp(proxy.Port,true);
-            Diagnostics.Log("frd-host","FRD loopback listener ready.");return new(process,proxy,gateway,token,report);
+            using var startup=CancellationTokenSource.CreateLinkedTokenSource(lifetime,ct);
+            await process.WaitReady(port,startup.Token);lifetime.ThrowIfCancellationRequested();
+            gateway.PermitFrdTcp(port,true);gateway.PermitFrdUdp(port,true);
+            Diagnostics.Log("frd-host",$"FRD loopback listener ready; authorized TCP/UDP --port {port}.");return new(process,gateway,port,token,lifetime,report);
         }
         catch
         {
-            if(proxy!=null)
-            {
-                gateway.PermitFrdTcp(proxy.Port,false);
-                await FrdRuntime.Cleanup("关闭 FRD 被控代理",proxy.DisposeAsync,report);
-            }
+            gateway.PermitFrdTcp(port,false);gateway.PermitFrdUdp(port,false);
             await FrdRuntime.Cleanup("关闭 FRD 被控进程",process.DisposeAsync,report);throw;
         }
     }
-    async Task Monitor()
+    async Task Monitor(CancellationToken lifetime)
     {
         try
         {
-            await Task.WhenAny(process.Exited,proxy.Completion);var stopping=disposal!=null;
+            try{await process.Exited.WaitAsync(lifetime);}
+            catch(OperationCanceledException)when(lifetime.IsCancellationRequested){Diagnostics.Log("frd-host","Authorized session ended.");}
+            var stopping=disposal!=null||lifetime.IsCancellationRequested;
             await DisposeAsync();
             if(!stopping&&process.ExitCode!=0)report("FRD 被控端已退出（退出码 "+process.ExitCode+"），请查看诊断日志。");
         }
@@ -159,7 +149,7 @@ sealed class FrdHosted : IAsyncDisposable
     async Task Close()
     {
         gateway.PermitFrdTcp(Offer.Port,false);
-        await FrdRuntime.Cleanup("关闭 FRD 被控代理",proxy.DisposeAsync,report);
+        gateway.PermitFrdUdp(Offer.Port,false);
         await FrdRuntime.Cleanup("关闭 FRD 被控进程",process.DisposeAsync,report);
         Diagnostics.Log("frd-host","FRD host stopped; temporary forwarding permissions removed.");
     }
@@ -168,7 +158,7 @@ sealed class FrdHosted : IAsyncDisposable
 sealed class FrdOpened : IAsyncDisposable
 {
     readonly FrdProcess process;
-    readonly FrdClientProxy proxy;
+    readonly FrdForwarder proxy;
     readonly Session session;
     readonly FrdOffer offer;
     readonly object disposeGate=new();
@@ -177,12 +167,12 @@ sealed class FrdOpened : IAsyncDisposable
     public Task Completion{get;}
     public bool Live=>process.Live&&proxy.Live&&disposal==null;
     public int ExitCode{get;set;}=-1;
-    FrdOpened(FrdProcess process,FrdClientProxy proxy,Session session,FrdOffer offer)
+    FrdOpened(FrdProcess process,FrdForwarder proxy,Session session,FrdOffer offer)
     {this.process=process;this.proxy=proxy;this.session=session;this.offer=offer;proxy.Failed=Report;Completion=Monitor();}
     void Report(string message){if(Interlocked.Exchange(ref failed,1)==0)session.ReportFrdError(message);}
     public static async Task<FrdOpened> Start(Session session,string exe,FrdOffer offer,int testSeconds,string? report)
     {
-        var proxy=new FrdClientProxy(session,offer.Port,offer.Token,session.Token);
+        var proxy=new FrdForwarder(session,offer.Port,session.Token);
         try
         {
             var args=new List<string>{"--connect","127.0.0.1","--port",proxy.Port.ToString()};

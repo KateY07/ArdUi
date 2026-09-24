@@ -1,6 +1,6 @@
 namespace ArdUi;
 
-sealed record OverlayHello(string Session, string Key);
+sealed record OverlayHello(string Session, string Key, int Version=0, int MaxFlowCredits=16);
 sealed record OverlayControl(string Id, string Method, JsonElement Data, string? Error = null);
 
 sealed class OverlayCipher : IDisposable

@@ -33,10 +33,11 @@ sealed class Child : IAsyncDisposable
     readonly ChildJob job;
     readonly ConcurrentQueue<string> lines = new();
     readonly Task pump;
-    string network = "正在连接";
-    double? pathRtt;
-    public string Network => network;
-    public double? PathRtt => pathRtt;
+    readonly ArdPathState path=new();
+    long progressAt=Environment.TickCount64;
+    public long ProgressAge=>Environment.TickCount64-Interlocked.Read(ref progressAt);
+    public string Network => path.Network;
+    public double? PathRtt => path.Rtt;
     public event Action<string>? Output;
     int disposed;
     public Child(string exe, string cwd, params string[] args)
@@ -57,12 +58,9 @@ sealed class Child : IAsyncDisposable
         {
             lines.Enqueue(line); while (lines.Count > 100) lines.TryDequeue(out _);
             Diagnostics.Log("ard",line);
-            var transport = Regex.Match(line, "transport=\\\"(?<v>direct|relay)\\\"");
-            var kind = Regex.Match(line, "network=\\\"(?<v>ipv4|ipv6|relay)\\\"");
-            var rtt = Regex.Match(line, @"rtt_ms=(?:Some\()?(?<v>[0-9]+(?:\.[0-9]+)?)");
-            if (transport.Success)
-                network = transport.Groups["v"].Value == "direct" ? "P2P 直连 / " + (kind.Success ? kind.Groups["v"].Value.ToUpperInvariant() : "IP") : "ArdRelay 中继";
-            if (rtt.Success && double.TryParse(rtt.Groups["v"].Value, System.Globalization.CultureInfo.InvariantCulture, out var value)) pathRtt = value;
+            path.Observe(line);
+            if(line.Contains("relay online",StringComparison.Ordinal)||line.Contains("READY:",StringComparison.Ordinal)||line.Contains("CONNECTED",StringComparison.Ordinal)||line.Contains("network path selected",StringComparison.Ordinal))
+                Interlocked.Exchange(ref progressAt,Environment.TickCount64);
             Output?.Invoke(line);
         }
     }
@@ -89,11 +87,8 @@ static class Ard
 {
     static readonly Lazy<string> executable = new(() =>
     {
-        const string expected="04ebed96baecc2fd5b67318b1d02742f777b0351c84ee5b1c1b163a05dc98b5d";
         var path=Path.GetFullPath(Environment.GetEnvironmentVariable("ARDUI_ARD_PATH")??Path.Combine(AppContext.BaseDirectory,"ard.exe"));
         if(!File.Exists(path))throw new IOException("缺少 ard.exe，请重新执行官方 install.ps1。");
-        using var file=File.OpenRead(path);var hash=Convert.ToHexString(SHA256.HashData(file)).ToLowerInvariant();
-        if(hash!=expected)throw new IOException("ard.exe 校验失败，请重新执行官方 install.ps1。");
         return path;
     });
     public static string Exe => executable.Value;
@@ -112,5 +107,6 @@ static class Ard
     }
     public static Child Start(string dir, bool host, int port, string peer, Settings settings) =>
         new(Exe, dir, host ? "open" : "forward", port.ToString(), "to", Wire.Endpoint(peer),
-            "--relay", settings.Relay, "--relay-key", settings.RelayKey);
+            "--relay", settings.Relay, "--relay-key", settings.RelayKey,
+            settings.DetailedArdDiagnostics?"-vv":"-v");
 }

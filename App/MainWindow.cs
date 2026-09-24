@@ -33,7 +33,7 @@ sealed class MainWindow : Window
     readonly TextBlock undoText=new(){FontSize=10,VerticalAlignment=VerticalAlignment.Center};
     Engine? engine;
     DirectoryClient? directory;
-    bool closing,closed,busy,ready,passwordVisible;
+    bool closing,closed,ready,passwordVisible;
     DateTimeOffset passwordVisibleUntil;
     DateTimeOffset undoUntil;
     Peer? undoPeer;
@@ -76,7 +76,9 @@ sealed class MainWindow : Window
         var exportDiagnostics=Button("导出诊断包",()=>
         {var path=Diagnostics.Export(Program.DataRoot,engine);Say("诊断包："+path);return Task.CompletedTask;});
         exportDiagnostics.FontSize=9;exportDiagnostics.Padding=new Thickness(5,1);
-        diagnostics=Card(new StackPanel{Spacing=3,Children={networkLog,exportDiagnostics}});diagnostics.IsVisible=false;diagnostics.Padding=new Thickness(5,3);
+        var verboseDiagnostics=new CheckBox{Content="详细网络诊断（新连接生效）",FontSize=9};
+        verboseDiagnostics.IsCheckedChanged+=(_,_)=>{if(engine!=null)engine.Settings.DetailedArdDiagnostics=verboseDiagnostics.IsChecked==true;};
+        diagnostics=Card(new StackPanel{Spacing=3,Children={networkLog,verboseDiagnostics,exportDiagnostics}});diagnostics.IsVisible=false;diagnostics.Padding=new Thickness(5,3);
         diagnosticButton.Click+=(_,_)=>{diagnostics.IsVisible=!diagnostics.IsVisible;diagnosticButton.Content=diagnostics.IsVisible?"诊断⌃":"诊断⌄";};
         var networkRow=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto")};networkRow.Children.Add(networkSummary);
         Grid.SetColumn(diagnosticButton,1);networkRow.Children.Add(diagnosticButton);
@@ -120,13 +122,14 @@ sealed class MainWindow : Window
     Button Button(string text,Func<Task> action)
     {
         var button=new Button{Content=text,HorizontalAlignment=HorizontalAlignment.Stretch};
-        button.Click+=async(_,_)=>await Guard(action);return button;
+        button.Click+=async(_,_)=>
+        {button.IsEnabled=false;try{await Guard(action);}finally{button.IsEnabled=true;}};return button;
     }
     async Task Guard(Func<Task> action)
     {
-        if(busy||closing)return;busy=true;
+        if(closing)return;
         try{await action();}catch(OperationCanceledException){Say("操作已取消或等待确认超时。");}catch(Exception ex){Say(ex.Message);}
-        finally{busy=false;Refresh();}
+        finally{Refresh();}
     }
     void Say(string text){status.Text=text;ToolTip.SetTip(status,text);}
     static string PeerLabel(Peer peer)=>string.IsNullOrWhiteSpace(peer.Name)||peer.Name==peer.Code?peer.Code:peer.Name+" · "+peer.Code;
@@ -250,8 +253,8 @@ sealed class MainWindow : Window
         Add("文件",async () =>
         {
             await directory!.Connect(peer.Code,"",enrolling:false);
-            var input=await ShareDetails();
-            var path=await WindowsShares.Map(engine!.Outgoing[peer.Id],input.Share,input.User,input.Password,CancellationToken.None);
+            var share=await ShareDetails();
+            var path=await WindowsShares.Map(engine!.Outgoing[peer.Id],share,CancellationToken.None);
             await Launch("explorer.exe",path);
         });
         var pause=Add("暂停",async()=>await directory!.Pause(peer));ToolTip.SetTip(pause,"断开当前会话并暂停自动重连；再次打开桌面或文件时恢复。");
@@ -309,10 +312,14 @@ sealed class MainWindow : Window
         content.Children.Add(new TextBlock { Text=pair.Incoming ? "访问密码已验证正确。只有确认后，才会允许这台设备访问 RDP / SMB。" : "确认后才会通过经过身份验证的加密连接发送访问密码。",TextWrapping=TextWrapping.Wrap });
         var buttons=new StackPanel { Orientation=Orientation.Horizontal,Spacing=12 };
         var reject=new Button { Content="拒绝 / 未核对",IsDefault=true }; reject.Click+=(_,_)=>dialog.Close(false);
-        var accept=new Button { Content="已独立核对一致，信任此设备" }; accept.Click+=(_,_)=>dialog.Close(true);
+        var approved=false;
+        var accept=new Button { Content="已独立核对一致，信任此设备" }; accept.Click+=(_,_)=>{approved=true;dialog.Close();};
         buttons.Children.Add(reject);buttons.Children.Add(accept);content.Children.Add(buttons);dialog.Content=content;
         using var cancel=ct.Register(()=>Dispatcher.UIThread.Post(()=>dialog.Close(false)));
-        return await dialog.ShowDialog<bool>(this);
+        var decision=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        dialog.Closed+=(_,_)=>decision.TrySetResult(approved&&!ct.IsCancellationRequested&&!closing);
+        dialog.Show(this);
+        return await decision.Task;
     }
     async Task<string> AskPassword(string title)
     {
@@ -329,16 +336,13 @@ sealed class MainWindow : Window
         dialog.Content=new StackPanel{Margin=new Thickness(24),Spacing=16,Children={input,button}};
         return await dialog.ShowDialog<string?>(this) ?? throw new OperationCanceledException();
     }
-    sealed record ShareInput(string Share,string User,string Password);
-    async Task<ShareInput> ShareDetails()
+    async Task<string> ShareDetails()
     {
-        var dialog=new Window{Title="打开 SMB 文件共享",Width=460,Height=340,CanResize=false,WindowStartupLocation=WindowStartupLocation.CenterOwner};
+        var dialog=new Window{Title="打开 SMB 文件共享",Width=460,Height=220,CanResize=false,WindowStartupLocation=WindowStartupLocation.CenterOwner};
         var share=new TextBox{Watermark="共享名，例如 Documents",MaxLength=80};
-        var user=new TextBox{Watermark="Windows 用户名（留空使用当前账户）",MaxLength=128};
-        var password=new TextBox{Watermark="Windows 账户密码",PasswordChar='●',MaxLength=256};
-        var open=new Button{Content="打开共享"};open.Click+=(_,_)=>dialog.Close(new ShareInput(share.Text??"",user.Text??"",password.Text??""));
-        dialog.Content=new StackPanel{Margin=new Thickness(24),Spacing=14,Children={share,user,password,new TextBlock{Text="这是 Windows 业务账户，与 ArdUi 添加设备口令无关。",TextWrapping=TextWrapping.Wrap},open}};
-        return await dialog.ShowDialog<ShareInput?>(this) ?? throw new OperationCanceledException();
+        var open=new Button{Content="打开共享"};open.Click+=(_,_)=>dialog.Close(share.Text??"");
+        dialog.Content=new StackPanel{Margin=new Thickness(24),Spacing=14,Children={share,new TextBlock{Text="ArdUi 仅透明转发 TCP 445。Windows 会使用当前账户、已有 SMB 凭据或其原生凭据机制完成访问。",TextWrapping=TextWrapping.Wrap},open}};
+        return await dialog.ShowDialog<string?>(this) ?? throw new OperationCanceledException();
     }
     static Task Launch(string file,string argument)
     { var start=new ProcessStartInfo(file) { UseShellExecute=true };start.ArgumentList.Add(argument);Process.Start(start);return Task.CompletedTask; }

@@ -2,7 +2,9 @@ namespace ArdUi;
 
 sealed class OverlaySession : IAsyncDisposable
 {
-    const int Chunk=16384,Window=512,Fragment=1100;
+    const int Chunk=16384,Window=512,Fragment=1100,FlowWindow=FlowCreditBudget.Initial;
+    readonly FlowCreditBudget creditBudget=new();
+    readonly int maxFlowCredits;
     readonly bool caller;
     readonly int basePort,targetPort;
     readonly byte[] capability;
@@ -13,6 +15,8 @@ sealed class OverlaySession : IAsyncDisposable
     readonly ConcurrentDictionary<uint,OverlayFlow> flows=new();
     readonly ConcurrentDictionary<string,TaskCompletionSource<JsonElement>> controls=new();
     readonly ConcurrentDictionary<long,TaskCompletionSource<bool>> probes=new();
+    readonly ConcurrentDictionary<long,(OverlayLink Link,TransferMeter Meter)> transfers=new();
+    readonly SemaphoreSlim servingBandwidth=new(1);
     readonly SortedDictionary<long,byte[]> pending=new(),reorder=new();
     readonly SemaphoreSlim window=new(Window),incomingSignal=new(0,1),controlSlots=new(8),bandwidthGate=new(1);
     readonly Channel<(OverlayLink Link,byte[] Frame,bool Udp)> replies=Channel.CreateBounded<(OverlayLink,byte[],bool)>(128);
@@ -33,7 +37,8 @@ sealed class OverlaySession : IAsyncDisposable
     string selected="base";
     public string Id{get;}
     public int Port=>listener==null?0:((IPEndPoint)listener.LocalEndpoint).Port;
-    public bool Expired=>stop.IsCancellationRequested||missingSince!=0&&Environment.TickCount64-missingSince>45000;
+    // A full session renewal is distinct from killing ARD during its normal recovery.
+    public bool Expired=>stop.IsCancellationRequested||missingSince!=0&&Environment.TickCount64-missingSince>180000;
     public string Selected=>selected;
     public string Network=>selected=="base"?baseNetwork():"ArdTransit / "+selected[..Math.Min(6,selected.Length)];
     public Func<string,JsonElement,CancellationToken,Task<object>>? Control;
@@ -42,9 +47,10 @@ sealed class OverlaySession : IAsyncDisposable
     public CancellationToken Token=>stop.Token;
     sealed class Fragments(int count,long time)
     {public byte[][] Parts{get;}=new byte[count][];public long Time{get;}=time;public int Bytes;}
-    OverlaySession(string id,bool caller,int port,byte[] capability,byte[] secret,byte[] context,Func<string> network)
+    OverlaySession(string id,bool caller,int port,byte[] capability,byte[] secret,byte[] context,Func<string> network,int maxFlowCredits)
     {
         Id=id;this.caller=caller;this.capability=capability;this.baseNetwork=network;
+        this.maxFlowCredits=Math.Clamp(maxFlowCredits,FlowWindow,FlowCreditBudget.Maximum);
         basePort=caller?port:0;targetPort=caller?0:port;cipher=new(secret,context,caller);
         if(caller)
         {
@@ -60,18 +66,19 @@ sealed class OverlaySession : IAsyncDisposable
             throw new CryptographicException("覆盖层密钥曲线无效。");
         return key.DeriveRawSecretAgreement(other.PublicKey);
     }
-    static byte[] Context(OverlayHello a,OverlayHello b,byte[] cap)=>SHA256.HashData(Encoding.UTF8.GetBytes($"ArdUi/2\n{a.Session}\n{a.Key}\n{b.Key}\n{Convert.ToHexString(cap)}"));
-    public static async Task<OverlaySession> Connect(int port,byte[] cap,Func<string> network,CancellationToken ct)
+    static byte[] Context(OverlayHello a,OverlayHello b,byte[] cap)=>SHA256.HashData(Encoding.UTF8.GetBytes($"ArdUi/3\n{a.Session}\n{a.Key}\n{b.Key}\n{Convert.ToHexString(cap)}"));
+    public static async Task<OverlaySession> Connect(int port,byte[] cap,Func<string> network,CancellationToken ct,int maxFlowCredits=FlowCreditBudget.Maximum)
     {
         var tcp=await ConnectBase(port,cap,4,ct);
         try
         {
             using var key=ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
-            var hello=new OverlayHello(Guid.NewGuid().ToString("N"),Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()));
+            var hello=new OverlayHello(Guid.NewGuid().ToString("N"),Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()),3,Math.Clamp(maxFlowCredits,FlowWindow,FlowCreditBudget.Maximum));
             await Wire.WriteJson(tcp.GetStream(),hello,ct);var reply=await Wire.ReadJson<OverlayHello>(tcp.GetStream(),ct);
+            if(reply.Version!=3)throw new IOException("流隔离协议需要双方均升级到 ArdUi v3。");
             if(reply.Session!=hello.Session)throw new IOException("覆盖层会话编号不匹配。");
             var secret=Derive(key,reply.Key);OverlaySession session;
-            try{session=new(hello.Session,true,port,cap,secret,Context(hello,reply,cap),network);}finally{CryptographicOperations.ZeroMemory(secret);}
+            try{session=new(hello.Session,true,port,cap,secret,Context(hello,reply,cap),network,reply.MaxFlowCredits);}finally{CryptographicOperations.ZeroMemory(secret);}
             await session.AttachClientBase(tcp);session.reconnect=session.ReconnectBase();
             for(var attempt=0;attempt<3;attempt++)
             {
@@ -85,12 +92,13 @@ sealed class OverlaySession : IAsyncDisposable
     public static async Task<OverlaySession> AcceptHello(TcpClient tcp,int port,byte[] cap,Func<string> network,CancellationToken ct)
     {
         var hello=await Wire.ReadJson<OverlayHello>(tcp.GetStream(),ct);
+        if(hello.Version!=3)throw new IOException("流隔离协议需要双方均升级到 ArdUi v3。");
         if(!Regex.IsMatch(hello.Session,@"\A[0-9a-f]{32}\z"))throw new IOException("覆盖层编号无效。");
         using var key=ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
-        var reply=new OverlayHello(hello.Session,Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()));var secret=Derive(key,hello.Key);
+        var reply=new OverlayHello(hello.Session,Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()),3,Math.Clamp(hello.MaxFlowCredits,FlowWindow,FlowCreditBudget.Maximum));var secret=Derive(key,hello.Key);
         try
         {
-            var session=new OverlaySession(hello.Session,false,port,cap,secret,Context(hello,reply,cap),network);
+            var session=new OverlaySession(hello.Session,false,port,cap,secret,Context(hello,reply,cap),network,reply.MaxFlowCredits);
             try{await Wire.WriteJson(tcp.GetStream(),reply,ct);return session;}catch{await session.DisposeAsync();throw;}
         }
         finally{CryptographicOperations.ZeroMemory(secret);}
@@ -193,9 +201,10 @@ sealed class OverlaySession : IAsyncDisposable
         if(links.TryGetValue("base",out var fallback)&&fallback.Live){Select("base");return fallback;}
         return null;
     }
-    async Task SendReliable(byte kind,uint flow,byte[] body)
+    async Task SendReliable(byte kind,uint flow,byte[] body,CancellationToken ct=default)
     {
-        await window.WaitAsync(stop.Token);byte[] frame;
+        using var linked=CancellationTokenSource.CreateLinkedTokenSource(ct,stop.Token);
+        await window.WaitAsync(linked.Token);byte[] frame;
         lock(sequenceGate){frame=Frame(kind,++sendSequence,flow,body);pending.Add(sendSequence,frame);}
         if(Active() is{} link)
             try{await SendOn(link,frame,false);}catch(Exception ex)when(!stop.IsCancellationRequested){Diagnostics.Log("send-deferred",ex.Message);}
@@ -221,7 +230,21 @@ sealed class OverlaySession : IAsyncDisposable
         }
         if(kind==10){Reply(link,Frame(11,seq,flow,frame.AsSpan(13)),false);return;}
         if(kind==11){if(probes.TryRemove(seq,out var probe))probe.TrySetResult(true);return;}
-        if(kind is <1 or >6||seq<=0)throw new IOException("覆盖层指令无效。");
+        if(kind==13)
+        {
+            if(Environment.TickCount64-link.ServedAt<30000||!servingBandwidth.Wait(0)){Reply(link,Frame(15,seq,0,[]),false);return;}
+            link.ServedAt=Environment.TickCount64;_=ServeThroughput(link,seq);return;
+        }
+        if(kind is 14 or 15)
+        {
+            if(transfers.TryGetValue(seq,out var transfer)&&ReferenceEquals(transfer.Link,link))
+            {
+                if(kind==14)transfer.Meter.Add(frame.Length-13,(double)Stopwatch.GetTimestamp()/Stopwatch.Frequency);
+                else transfer.Meter.Done.TrySetResult();
+            }
+            return;
+        }
+        if(kind is <1 or >7||seq<=0)throw new IOException("覆盖层指令无效。");
         lock(incomingGate)
         {
             if(seq<=receiveSequence){Duplicates++;}
@@ -271,6 +294,7 @@ sealed class OverlaySession : IAsyncDisposable
         }
         if(!flows.TryGetValue(id,out var existing))return;
         if(kind==4){existing.Close();return;}
+        if(kind==7){existing.Credit(body);return;}
         try{await existing.Enqueue(kind==3?[]:body);}
         catch(Exception ex){Diagnostics.Log("flow-queue",ex.Message);existing.Close();_=ResetFlow(id);}
     }
@@ -305,7 +329,7 @@ sealed class OverlaySession : IAsyncDisposable
         var id=Guid.NewGuid().ToString("N");var waiter=new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);controls[id]=waiter;
         try
         {
-            await SendReliable(5,0,JsonSerializer.SerializeToUtf8Bytes(new OverlayControl(id,method,JsonSerializer.SerializeToElement(value,Wire.Json)),Wire.Json));
+            await SendReliable(5,0,JsonSerializer.SerializeToUtf8Bytes(new OverlayControl(id,method,JsonSerializer.SerializeToElement(value,Wire.Json)),Wire.Json),ct);
             return await waiter.Task.WaitAsync(TimeSpan.FromSeconds(75),ct);
         }
         finally{controls.TryRemove(id,out _);}
@@ -320,7 +344,6 @@ sealed class OverlaySession : IAsyncDisposable
             await waiter.Task.WaitAsync(TimeSpan.FromSeconds(2),stop.Token);
             var rtt=watch.Elapsed.TotalMilliseconds;
             if(udp){link.JitterMs=link.RttMs is{} old?Math.Abs(old-rtt):0;link.RttMs=rtt;link.Sample(rtt);}
-            else if(bytes>1024)link.BandwidthMbps=bytes*8d/Math.Max(.001,watch.Elapsed.TotalSeconds)/1e6;
             return rtt;
         }
         catch{Interlocked.Increment(ref link.Lost);if(udp)link.Sample(null);throw;}
@@ -347,8 +370,7 @@ sealed class OverlaySession : IAsyncDisposable
                     try
                     {
                         await Probe(link,true);
-                        if(round%15==0&&bandwidthGate.Wait(0))
-                            try{await Probe(link,false,32768);}finally{bandwidthGate.Release();}
+                        if(round%120==0&&caller)await MeasureThroughput(link,stop.Token);
                     }
                     catch(Exception ex)when(!stop.IsCancellationRequested)
                     {
@@ -374,15 +396,40 @@ sealed class OverlaySession : IAsyncDisposable
             await Task.Delay(100,ct);
         }
         double? bandwidth=null;
-        await bandwidthGate.WaitAsync(ct);
         try
         {
-            var watch=Stopwatch.StartNew();await Task.WhenAll(Enumerable.Range(0,8).Select(_=>Probe(link,false,32768)));
-            bandwidth=8*32768*8d/Math.Max(.001,watch.Elapsed.TotalSeconds)/1e6;link.BandwidthMbps=bandwidth;
+            await MeasureThroughput(link,ct);bandwidth=link.BandwidthMbps;
         }
         catch(Exception ex){Diagnostics.Log("quality-bandwidth",ex.Message);ct.ThrowIfCancellationRequested();}
-        finally{bandwidthGate.Release();}
         return PathQuality.From(samples.ToArray(),bandwidth);
+    }
+    async Task ServeThroughput(OverlayLink link,long id)
+    {
+        try
+        {
+            var watch=Stopwatch.StartNew();var block=new byte[16384];
+            for(var sent=0;sent<2*1024*1024&&watch.Elapsed<TimeSpan.FromSeconds(1);sent+=block.Length)
+                await SendOn(link,Frame(14,id,0,block),false);
+            await SendOn(link,Frame(15,id,0,[]),false);
+        }
+        catch(Exception ex){Diagnostics.Log("throughput-send",ex.Message);}
+        finally{servingBandwidth.Release();}
+    }
+    public async Task MeasureThroughput(OverlayLink link,CancellationToken ct)
+    {
+        await bandwidthGate.WaitAsync(ct);
+        var id=Interlocked.Increment(ref probeId);
+        try
+        {
+            if(link.MeasuredAt!=0&&Environment.TickCount64-link.MeasuredAt<60000)return;
+            link.MeasuredAt=Environment.TickCount64;var meter=new TransferMeter();transfers[id]=(link,meter);
+            await SendOn(link,Frame(13,id,0,[]),false);
+            await meter.Done.Task.WaitAsync(TimeSpan.FromSeconds(12),ct);
+            (link.BandwidthMbps,link.BandwidthLowerBoundMbps)=meter.Result();
+        }
+        catch(Exception ex)
+        {link.BandwidthMbps=null;link.BandwidthLowerBoundMbps=null;Diagnostics.Log("throughput-measure",ex.Message);ct.ThrowIfCancellationRequested();}
+        finally{transfers.TryRemove(id,out _);bandwidthGate.Release();}
     }
     async Task Accept()
     {
@@ -459,13 +506,26 @@ sealed class OverlaySession : IAsyncDisposable
             lock(udpGate){if(udpRemotes.TryGetValue(flow,out remote))udpTouched[flow]=Environment.TickCount64;}
             if(remote!=null)await facade!.SendAsync(data,remote,stop.Token);return;
         }
-        if(!targetUdp.TryGetValue(flow,out var target))
+        TargetUdp? target=null;
+        try
         {
-            if(targetUdp.Count>=256){UdpDrops++;return;}
-            target=new TargetUdp(targetPort,reply=>SendDatagram(flow,reply),stop.Token,1500);targetUdp[flow]=target;
-            var captured=target;_=target.Completion.ContinueWith(t=>{targetUdp.TryRemove(new KeyValuePair<uint,TargetUdp>(flow,captured));captured.Dispose();},TaskScheduler.Default);
+            if(!targetUdp.TryGetValue(flow,out target))
+            {
+                if(targetUdp.Count>=256){UdpDrops++;return;}
+                target=new TargetUdp(targetPort,reply=>SendDatagram(flow,reply),stop.Token,1500);
+                if(!targetUdp.TryAdd(flow,target)){target.Dispose();target=targetUdp.GetValueOrDefault(flow);if(target==null){UdpDrops++;return;}}
+                else
+                {
+                    var captured=target;_=target.Completion.ContinueWith(t=>{targetUdp.TryRemove(new KeyValuePair<uint,TargetUdp>(flow,captured));captured.Dispose();},TaskScheduler.Default);
+                }
+            }
+            await target.Send(data);
         }
-        await target.Send(data);
+        catch(Exception ex)when(ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException)
+        {
+            UdpDrops++;Diagnostics.Log("overlay-udp-flow",ex.Message);
+            if(target!=null&&targetUdp.TryRemove(new KeyValuePair<uint,TargetUdp>(flow,target)))target.Dispose();
+        }
     }
     public async Task ReceiveBaseUdp(byte[] data)
     {if(Link("base") is{} link)await Receive(link,data,true);}
@@ -473,9 +533,9 @@ sealed class OverlaySession : IAsyncDisposable
     public object Snapshot()
     {
         int buffered;lock(sequenceGate)buffered=pending.Values.Sum(p=>p.Length);
-        return new{selected,flows=flows.Count,udpFlows=caller?udpRemotes.Count:targetUdp.Count,bufferedBytes=buffered,Retransmits,Duplicates,UdpFragments,UdpDrops,Switches,
+        return new{selected,flows=flows.Count,udpFlows=caller?udpRemotes.Count:targetUdp.Count,bufferedBytes=buffered,extraReceiveCredits=creditBudget.Used,maxFlowCredits,Retransmits,Duplicates,UdpFragments,UdpDrops,Switches,
             replayRejected=cipher.Replays,authenticationRejected=cipher.Rejected,
-            paths=links.Values.Select(l=>new{l.Name,l.Live,l.Network,l.RttMs,l.JitterMs,l.BandwidthMbps,l.Probes,l.Lost,l.Sent,l.Received,quality=l.Quality}).ToArray()};
+            paths=links.Values.Select(l=>new{l.Name,l.Live,l.Network,l.RttMs,l.JitterMs,l.BandwidthMbps,l.BandwidthLowerBoundMbps,l.Probes,l.Lost,l.Sent,l.Received,quality=l.Quality}).ToArray()};
     }
     public async ValueTask DisposeAsync()
     {
@@ -487,10 +547,27 @@ sealed class OverlaySession : IAsyncDisposable
     }
     sealed class OverlayFlow(OverlaySession owner,uint id,TcpClient? accepted)
     {
-        readonly Channel<byte[]> received=Channel.CreateBounded<byte[]>(new BoundedChannelOptions(32){SingleReader=true,SingleWriter=true,FullMode=BoundedChannelFullMode.Wait});
+        readonly Channel<byte[]> received=Channel.CreateBounded<byte[]>(new BoundedChannelOptions(owner.maxFlowCredits){SingleReader=true,SingleWriter=true,FullMode=BoundedChannelFullMode.Wait});
+        readonly SemaphoreSlim credits=new(FlowWindow,owner.maxFlowCredits);
+        int receiveCredits=FlowWindow,extraCredits;
         readonly CancellationTokenSource stop=CancellationTokenSource.CreateLinkedTokenSource(owner.Token);
         TcpClient? socket=accepted;
-        public ValueTask Enqueue(byte[] data)=>received.Writer.WriteAsync(data,stop.Token);
+        public ValueTask Enqueue(byte[] data)
+        {
+            stop.Token.ThrowIfCancellationRequested();
+            if(data.Length>Chunk)throw new IOException("TCP 数据帧超过协商上限。");
+            if(Interlocked.Decrement(ref receiveCredits)<0)throw new IOException("对端超出已授予的流信用。");
+            if(!received.Writer.TryWrite(data))throw new IOException("对端超出该流的接收信用窗口。");
+            return ValueTask.CompletedTask;
+        }
+        public void Credit(byte[] body)
+        {
+            if(stop.IsCancellationRequested)return;
+            var count=body.Length==0?1:body.Length==4&&owner.maxFlowCredits>FlowWindow?BinaryPrimitives.ReadInt32BigEndian(body):0;
+            if(count<1||count>owner.maxFlowCredits){Diagnostics.Log("flow-credit","Invalid credit count.");Close();_=owner.ResetFlow(id);return;}
+            try{credits.Release(count);}
+            catch(SemaphoreFullException ex){Diagnostics.Log("flow-credit",ex.Message);Close();_=owner.ResetFlow(id);}
+        }
         public void Start()=>_=Run();
         public void Close(){stop.Cancel();socket?.Dispose();received.Writer.TryComplete();}
         async Task Run()
@@ -502,13 +579,28 @@ sealed class OverlaySession : IAsyncDisposable
                 async Task Read()
                 {
                     var buffer=new byte[Chunk];int size;
-                    while((size=await stream.ReadAsync(buffer,stop.Token))>0)await owner.SendReliable(2,id,buffer[..size]);
-                    await owner.SendReliable(3,id,[]);
+                    while(true)
+                    {
+                        await credits.WaitAsync(stop.Token);
+                        size=await stream.ReadAsync(buffer,stop.Token);
+                        if(size==0)break;
+                        await owner.SendReliable(2,id,buffer[..size],stop.Token);
+                    }
+                    await owner.SendReliable(3,id,[],stop.Token);
                 }
                 async Task Write()
                 {
                     await foreach(var data in received.Reader.ReadAllAsync(stop.Token))
-                    {if(data.Length==0){socket.Client.Shutdown(SocketShutdown.Send);break;}await stream.WriteAsync(data,stop.Token);}
+                    {
+                        if(data.Length==0){socket.Client.Shutdown(SocketShutdown.Send);break;}
+                        await stream.WriteAsync(data,stop.Token);
+                        var count=1;
+                        if(FlowWindow+extraCredits<owner.maxFlowCredits&&owner.creditBudget.TryGrow()){extraCredits++;count++;}
+                        Interlocked.Add(ref receiveCredits,count);
+                        var credit=count==1?Array.Empty<byte>():new byte[4];
+                        if(count>1)BinaryPrimitives.WriteInt32BigEndian(credit,count);
+                        await owner.SendReliable(7,id,credit,stop.Token);
+                    }
                 }
                 var read=Read();var write=Write();var first=await Task.WhenAny(read,write);if(first.IsFaulted||first.IsCanceled)Close();await Task.WhenAll(read,write);
             }
@@ -517,7 +609,7 @@ sealed class OverlaySession : IAsyncDisposable
                 Diagnostics.Log("tcp-flow",ex.Message);
                 if(!owner.stop.IsCancellationRequested)try{await owner.SendReliable(4,id,[]);}catch(Exception sendError){Diagnostics.Log("tcp-reset",sendError.Message);}
             }
-            finally{Close();owner.flows.TryRemove(new KeyValuePair<uint,OverlayFlow>(id,this));}
+            finally{Close();owner.creditBudget.Release(extraCredits);owner.flows.TryRemove(new KeyValuePair<uint,OverlayFlow>(id,this));}
         }
     }
 }

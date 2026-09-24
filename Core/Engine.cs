@@ -12,7 +12,7 @@ sealed class Engine : IAsyncDisposable
     public event Action? Changed;
     public event Action<string>? Notice;
     public DirectoryClient? DirectoryApi { get; set; }
-    readonly SemaphoreSlim operation = new(1);
+    readonly OperationGate operations=new();
     readonly ConcurrentDictionary<string,ForwardHub> hubs = new();
     Engine(State state, Settings settings, string id) { State=state; Settings=settings; Id=id; }
     public static async Task<Engine> Create(string root, Settings settings)
@@ -28,9 +28,10 @@ sealed class Engine : IAsyncDisposable
     string Describe(Session session, bool host)
     {
         var metric=session.UdpRtt is{} udp?$" · RTT {udp:F1} ms":" · RTT -- ms";
-        metric+=session.BandwidthMbps is{} bandwidth?$" · ~{bandwidth:F1} Mbps":" · ~-- Mbps";
+        metric+=session.BandwidthMbps is{} bandwidth?$" · 吞吐 ~{bandwidth:F1} Mbps":session.BandwidthLowerBoundMbps is{} minimum?$" · 吞吐 ≥{minimum:F1} Mbps":" · 吞吐 --";
         if(host)metric="";
-        return (host ? "正在访问本机" : "已连接") + " · " + session.Network + metric;
+        var recovering=session.Overlay is{} overlay&&overlay.Link(overlay.Selected)?.Live!=true;
+        return (recovering?"正在恢复连接":host ? "正在访问本机" : "已连接") + " · " + session.Network + metric;
     }
     void Observe(Session session, bool host)
     {
@@ -56,22 +57,17 @@ sealed class Engine : IAsyncDisposable
     }
     async Task Monitor(Session session,bool host)
     {
-        long baseLost=0;
         while(!session.Token.IsCancellationRequested)
         {
             var child=session.Process;
             try{await Task.WhenAny(child.Exited,Task.Delay(1000,session.Token));session.Token.ThrowIfCancellationRequested();}catch(OperationCanceledException){break;}
             if(!session.Live)break;
-            if(session.Overlay?.Link("base") is{Live:false})
-            {if(baseLost==0)baseLost=Environment.TickCount64;}
-            else baseLost=0;
-            var stalled=baseLost!=0&&Environment.TickCount64-baseLost>=10000;
-            if(!child.Exited.IsCompleted&&!stalled)continue;
+            if(!child.Exited.IsCompleted)continue;
             if(session.Overlay==null||!session.Live)break;
             try
             {
-                if(stalled)Diagnostics.Log("ard-stalled","Base transport remained unavailable for 10 seconds; restarting the same identity.");
-                await Task.Delay(1000,session.Token);await session.RestartArd(session.Token);baseLost=0;Observe(session,host);
+                Diagnostics.Log("ard-exited","Restarting an exited process with the same identity; live ARD recovery is not interrupted.");
+                await Task.Delay(1000,session.Token);await session.RestartArd(session.Token);Observe(session,host);
             }
             catch(OperationCanceledException){break;}
             catch(Exception ex){Diagnostics.Log("ard-restart-failed",ex.Message);break;}
@@ -82,20 +78,15 @@ sealed class Engine : IAsyncDisposable
     }
     public async Task Disconnect(string id)
     {
-        await operation.WaitAsync();
-        try
-        {
-            if(Outgoing.TryRemove(id,out var outgoing)) await outgoing.DisposeAsync();
-            if(Incoming.TryRemove(id,out var incoming)) await incoming.DisposeAsync();
-            Update(id,"未连接");
-        }
-        finally { operation.Release(); }
+        operations.Cancel("out:"+id);operations.Cancel("in:"+id);
+        if(Outgoing.TryRemove(id,out var outgoing))await outgoing.DisposeAsync();
+        if(Incoming.TryRemove(id,out var incoming))await incoming.DisposeAsync();
+        Update(id,"未连接");
     }
     public async Task DropOutgoing(string id)
     {
-        await operation.WaitAsync();
-        try { if(Outgoing.TryRemove(id,out var session))await session.DisposeAsync();Update(id,"未连接"); }
-        finally { operation.Release(); }
+        operations.Cancel("out:"+id);
+        if(Outgoing.TryRemove(id,out var session))await session.DisposeAsync();Update(id,"未连接");
     }
     public async Task RemoveOutgoing(string id)
     {
@@ -104,13 +95,54 @@ sealed class Engine : IAsyncDisposable
     }
     public async Task StopIncoming()
     {
-        await operation.WaitAsync();
-        try { foreach(var pair in Incoming.ToArray()) if(Incoming.TryRemove(pair.Key,out var session)) { await session.DisposeAsync(); Update(pair.Key,"被控访问已关闭"); } }
-        finally { operation.Release(); }
+        operations.CancelWhere(key=>key.StartsWith("in:",StringComparison.Ordinal));
+        await Task.WhenAll(Incoming.ToArray().Select(async pair=>
+        {if(Incoming.TryRemove(pair)){await pair.Value.DisposeAsync();Update(pair.Key,"被控访问已关闭");}}));
+    }
+    public async Task DropIncoming(string id)
+    {
+        operations.Cancel("in:"+id);
+        if(Incoming.TryRemove(id,out var session))await session.DisposeAsync();
+        Update(id,"被控访问已撤销");
+    }
+    static bool IsTransientArdStartupFailure(Exception error)
+    {
+        var text=error.ToString();
+        return text.Contains("ArdRelay TLS preflight could not complete",StringComparison.Ordinal)||
+            text.Contains("timed out",StringComparison.OrdinalIgnoreCase)||
+            Regex.IsMatch(text,@"os error \d+");
+    }
+    async Task<Child> StartArdWithRetry(string peer,string dir,bool host,int port,string remote,string ready,CancellationToken ct)
+    {
+        Exception? last=null;
+        for(var attempt=1;attempt<=3;attempt++)
+        {
+            Child? child=null;
+            try
+            {
+                child=Ard.Start(dir,host,port,remote,Settings);
+                await child.WaitFor(ready,ct);
+                return child;
+            }
+            catch(Exception error) when(IsTransientArdStartupFailure(error)&&attempt<3)
+            {
+                last=error;
+                if(child!=null)await child.DisposeAsync();
+                Update(peer,$"网络预检暂时失败，正在重试（{attempt}/3）…");
+                Diagnostics.Log("ard-start-retry",$"peer={peer} attempt={attempt} {error.Message}");
+                await Task.Delay(TimeSpan.FromSeconds(attempt),ct);
+            }
+            catch
+            {
+                if(child!=null)await child.DisposeAsync();
+                throw;
+            }
+        }
+        throw new IOException("ARD 网络预检连续失败。",last);
     }
     public async Task<string> AcceptServerSession(ServerTicket ticket, Func<PasswordRequest, CancellationToken, Task<SignedEnvelope?>> verifyPassword, CancellationToken ct)
     {
-        await operation.WaitAsync(ct);
+        using var operation=await operations.Enter("in:"+ticket.ControllerEndpoint,ct);ct=operation.Token;
         string? dir = null; Gateway? gateway = null; Child? child = null; Session? session = null;
         try
         {
@@ -124,13 +156,12 @@ sealed class Engine : IAsyncDisposable
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, token);
                 return await verifyPassword(password, linked.Token);
             });
-            child = Ard.Start(dir, true, gateway.Port, ticket.ClientSessionId, Settings);
-            await child.WaitFor("relay online", ct);
+            child = await StartArdWithRetry(peer.Id,dir,true,gateway.Port,ticket.ClientSessionId,"relay online",ct);
             session = new Session(peer.Id, peer.Address, gateway.Port, capability, Settings.TcpPorts, Settings.UdpPorts, child, dir, gateway);
             session.OverlayReady+=()=>ConfigureOverlay(session);
             var attached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             gateway.Attached += () => { attached.TrySetResult(); Update(peer.Id, "已连接 · 对方正在访问本机"); };
-            if (!Incoming.TryAdd(peer.Id, session)) throw new IOException("已有同设备会话。");
+            operation.Commit(()=>{if(!Incoming.TryAdd(peer.Id,session))throw new IOException("已有同设备会话。");});
             Observe(session, true);
             var owned = session;
             var registration = ct.Register(() => { _ = owned.DisposeAsync(); });
@@ -155,19 +186,17 @@ sealed class Engine : IAsyncDisposable
             }
             throw;
         }
-        finally { operation.Release(); }
     }
     public async Task ConnectServerSession(MachineInfo target, string dir, ServerOffer offer, bool enrolling, string password, CancellationToken ct)
     {
-        await operation.WaitAsync(ct);
+        using var operation=await operations.Enter("out:"+target.Endpoint,ct);ct=operation.Token;
         Child? child = null; Session? session = null;
         var peer = new Peer { Id = target.Endpoint, Code = target.Code };
         try
         {
             var port = Wire.Port();
-            child = Ard.Start(dir, false, port, offer.SessionId, Settings);
             Update(peer.Id, "正在建立经过身份签名的连接…");
-            await child.WaitFor("READY:", ct);
+            child = await StartArdWithRetry(peer.Id,dir,false,port,offer.SessionId,"READY:",ct);
             using var tcp = new TcpClient(); await tcp.ConnectAsync(IPAddress.Loopback, port, ct);
             var header = new byte[23]; "AUI1"u8.CopyTo(header); header[20] = 2;
             await tcp.GetStream().WriteAsync(header, ct);
@@ -181,13 +210,16 @@ sealed class Engine : IAsyncDisposable
             if (admission.Grant == null) throw new IOException("缺少被控端签名的授权。");
             var grant = DirectoryClient.Verify<GrantReceipt>(admission.Grant, "/grant/v1", target.Endpoint, false);
             if (grant.ControllerEndpoint != Id || grant.TargetEndpoint != target.Endpoint) throw new IOException("授权未绑定当前设备。");
-            peer = State.GetOrAdd(target.Endpoint, target.Code, admission.Grant);
+            operation.Commit(()=>peer=State.GetOrAdd(target.Endpoint,target.Code,admission.Grant));
             var hub=hubs.GetOrAdd(peer.Id,_=>new ForwardHub());
             session = new Session(peer.Id, peer.Address, port, Convert.FromHexString(admission.Token), admission.TcpPorts, admission.UdpPorts, child, dir, hub:hub);
             await session.EnableOverlay(ct);ConfigureOverlay(session);
             using (await session.OpenTcp(0, ct)) { }
-            if (!Outgoing.TryAdd(peer.Id, session)) throw new IOException("该设备已有连接。");
-            hub.Attach(session);
+            operation.Commit(()=>
+            {
+                if(!Outgoing.TryAdd(peer.Id,session))throw new IOException("该设备已有连接。");
+                hub.Attach(session);
+            });
             Observe(session, false); _ = Monitor(session, false);
         }
         catch
@@ -196,18 +228,13 @@ sealed class Engine : IAsyncDisposable
             else { if (child != null) await child.DisposeAsync(); try { Directory.Delete(dir, true); } catch (IOException) { } }
             Update(peer.Id, "连接未获批准或已失败"); throw;
         }
-        finally { operation.Release(); }
     }
 
     public async ValueTask DisposeAsync()
     {
-        await operation.WaitAsync();
-        try
-        {
+        await operations.Close();
             foreach(var session in Outgoing.Values.Concat(Incoming.Values)) await session.DisposeAsync();
             Outgoing.Clear(); Incoming.Clear(); State.Dispose();
             foreach(var hub in hubs.Values)await hub.DisposeAsync();hubs.Clear();
-        }
-        finally { operation.Release(); }
     }
 }

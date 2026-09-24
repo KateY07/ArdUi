@@ -7,6 +7,7 @@ sealed class Settings
     public string Relay { get; set; } = "http://175.27.160.144:8080";
     public string RelayKey { get; set; } = DefaultRelayKey;
     public string FrdPath { get; set; } = "";
+    public bool DetailedArdDiagnostics { get; set; }
     public int[] TcpPorts { get; set; } = [3389, 445];
     public int[] UdpPorts { get; set; } = [3389];
     public void Validate()

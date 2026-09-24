@@ -8,6 +8,7 @@ sealed class Gateway : IAsyncDisposable
     readonly byte[] token;
     readonly CancellationTokenSource stop = new();
     readonly ConcurrentDictionary<int, Task> tasks = new();
+    readonly ConcurrentDictionary<int,TcpClient> clients=new();
     readonly ConcurrentDictionary<string, TargetUdp> udpFlows = new();
     readonly ConcurrentDictionary<int,byte> frdTcp=new(),frdUdp=new();
     public void PermitFrdTcp(int port,bool enabled){if(enabled)frdTcp[port]=0;else frdTcp.TryRemove(port,out _);}
@@ -20,7 +21,7 @@ sealed class Gateway : IAsyncDisposable
     }
     readonly SemaphoreSlim tcpSlots = new(128);
     readonly Task acceptTask, udpTask;
-    int serial;
+    int serial,stopped;
     public int Port { get; }
     public event Action? Attached;
     public Func<TcpClient,byte,CancellationToken,Task>? AttachOverlay;
@@ -48,8 +49,10 @@ sealed class Gateway : IAsyncDisposable
                 var client = await listener.AcceptTcpClientAsync(stop.Token);
                 if (!tcpSlots.Wait(0)) { client.Dispose(); continue; }
                 var id = Interlocked.Increment(ref serial);
+                clients[id]=client;
+                if(stop.IsCancellationRequested){clients.TryRemove(id,out _);client.Dispose();tcpSlots.Release();break;}
                 var task = Serve(client); tasks[id] = task;
-                _ = task.ContinueWith(t => { tcpSlots.Release(); tasks.TryRemove(id, out _); }, TaskScheduler.Default);
+                _ = task.ContinueWith(t => { tcpSlots.Release(); tasks.TryRemove(id, out _);clients.TryRemove(id,out _); }, TaskScheduler.Default);
             }
         }
         catch (Exception) when (stop.IsCancellationRequested) { }
@@ -110,6 +113,8 @@ sealed class Gateway : IAsyncDisposable
             while (!stop.IsCancellationRequested)
             {
                 var packet = await udp.ReceiveAsync(stop.Token);
+                try
+                {
                 if (!IPAddress.IsLoopback(packet.RemoteEndPoint.Address) || !Wire.ValidPacket(packet.Buffer, token)) continue;
                 var port = (int)BinaryPrimitives.ReadUInt16BigEndian(packet.Buffer.AsSpan(16));
                 if(port==65535&&Overlay!=null)
@@ -134,15 +139,24 @@ sealed class Gateway : IAsyncDisposable
                 }
                 try { await flow.Send(packet.Buffer.AsMemory(18)); }
                 catch (Exception ex) when (ex is SocketException or OperationCanceledException or ObjectDisposedException) { Diagnostics.Log("gateway-udp",ex.Message); }
+                }
+                catch(Exception ex)when(!stop.IsCancellationRequested&&(ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException or CryptographicException))
+                {Diagnostics.Log("gateway-udp-packet",ex.Message);}
             }
         }
         catch (Exception) when (stop.IsCancellationRequested) { }
     }
+    public void Stop()
+    {
+        if(Interlocked.Exchange(ref stopped,1)!=0)return;
+        stop.Cancel(); listener.Stop(); udp.Dispose();
+        foreach(var client in clients.Values)client.Dispose();
+        foreach (var flow in udpFlows.Values) flow.Dispose();
+    }
     public async ValueTask DisposeAsync()
     {
-        stop.Cancel(); listener.Stop(); udp.Dispose();
-        foreach (var flow in udpFlows.Values) flow.Dispose();
-        try { await Task.WhenAll(acceptTask, udpTask); } catch { }
+        Stop();
+        try { await Task.WhenAll(acceptTask, udpTask); } catch(Exception ex){Diagnostics.Log("gateway-close",ex.Message);}
         await Task.WhenAll(tasks.Values); stop.Dispose();
     }
 }
