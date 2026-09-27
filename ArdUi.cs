@@ -20,6 +20,13 @@ static class Program
     {
         try
         {
+            if(args.Contains("--child-readiness-fixture"))
+            {
+                Console.Error.WriteLine("relay online");Console.Error.WriteLine("READY:");
+                for(var i=0;i<500;i++)Console.Error.WriteLine("diagnostic flood "+i);
+                Console.Error.WriteLine("fixture-flood-complete");
+                Thread.Sleep(10000);return 0;
+            }
             if (args.Length == 2 && args[0] == "--identity-store")
             { Console.WriteLine(IdentityStore.Prepare(args[1])); return 0; }
             if (args.Length == 4 && args[0] == "--verify-release")

@@ -120,8 +120,23 @@ static class SelfTest
             if (Directory.Exists(root)) Directory.Delete(root,true);
         }
     }
+    static async Task CheckChildReadiness()
+    {
+        var exe=Environment.ProcessPath??throw new IOException("Missing process path.");
+        var args=new List<string>();
+        if(Path.GetFileNameWithoutExtension(exe).Equals("dotnet",StringComparison.OrdinalIgnoreCase))
+            args.Add(Path.GetFullPath(Environment.GetCommandLineArgs()[0]));
+        args.Add("--child-readiness-fixture");
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await using var child=new Child(exe,AppContext.BaseDirectory,args.ToArray());
+        await child.WaitFor("fixture-flood-complete",timeout.Token);
+        await child.WaitFor("relay online",timeout.Token);
+        await child.WaitFor("READY:",timeout.Token);
+        Console.WriteLine("PASS: startup milestones survive 500 diagnostic lines before the caller begins waiting.");
+    }
     public static Task<int> RunAsync()
     {
+        CheckChildReadiness().GetAwaiter().GetResult();
         var root = Path.Combine(Path.GetTempPath(), "ArdUi-identity-test-" + Guid.NewGuid().ToString("N"));
         try
         {

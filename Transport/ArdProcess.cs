@@ -32,6 +32,8 @@ sealed class Child : IAsyncDisposable
     public Task Exited { get; }
     readonly ChildJob job;
     readonly ConcurrentQueue<string> lines = new();
+    static readonly string[] startupMarkers=["relay online","READY:"];
+    readonly ConcurrentDictionary<string,byte> startupSignals = new();
     readonly Task pump;
     readonly ArdPathState path=new();
     long progressAt=Environment.TickCount64;
@@ -56,6 +58,9 @@ sealed class Child : IAsyncDisposable
     {
         while (await reader.ReadLineAsync() is { } line)
         {
+            // Startup milestones survive bounded diagnostic history eviction.
+            foreach(var signal in startupMarkers)
+                if(line.Contains(signal,StringComparison.Ordinal))startupSignals.TryAdd(signal,0);
             lines.Enqueue(line); while (lines.Count > 100) lines.TryDequeue(out _);
             Diagnostics.Log("ard",line);
             path.Observe(line);
@@ -67,7 +72,7 @@ sealed class Child : IAsyncDisposable
     public async Task WaitFor(string text, CancellationToken ct)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(65));
-        while (!lines.Any(l => l.Contains(text, StringComparison.Ordinal)))
+        while (!startupSignals.ContainsKey(text) && !lines.Any(l => l.Contains(text, StringComparison.Ordinal)))
         {
             if (Exited.IsCompleted) { await pump; throw new IOException($"{Path.GetFileName(Process.StartInfo.FileName)} 启动失败：\n{string.Join('\n', lines.TakeLast(5))}"); }
             try { await Task.Delay(70, timeout.Token); }

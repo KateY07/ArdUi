@@ -1,4 +1,5 @@
-﻿$ErrorActionPreference='Stop'
+﻿param([string]$ArdPath)
+$ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 
 $root=Split-Path $PSScriptRoot -Parent
@@ -18,10 +19,11 @@ $frdArchive=($frdCandidates | Sort-Object Major,Pre -Descending | Select-Object 
 $outputRoot='D:\pub\ArdUi'
 $output=Join-Path $outputRoot ($version+'_setup.exe')
 $sidecar=$output+'.sha256'
+$archive=Join-Path $outputRoot ($version+'.zip')
 $stage=Join-Path $root ('dist\'+$version+'-onesetup')
 $publish=Join-Path $root ('dist\final-'+$version)
 
-foreach($path in @($output,$sidecar,$stage,$publish)){
+foreach($path in @($output,$sidecar,$archive,($archive+'.sha256'),$stage,$publish)){
     if(Test-Path -LiteralPath $path){throw "Refusing to overwrite existing release or staging path: $path"}
 }
 foreach($path in @($packer,$frdArchive)){
@@ -31,17 +33,22 @@ foreach($path in @($packer,$frdArchive)){
 dotnet publish $project -c Release -r win-x64 --self-contained false -o $publish -p:PublishSingleFile=true -p:PublishTrimmed=false
 if($LASTEXITCODE -ne 0){throw 'ArdUi publish failed.'}
 $ui=Join-Path $publish 'ArdUi.exe'
-$ard=Join-Path (Split-Path $root -Parent) 'target\release\ard.exe'
+$ard=if($ArdPath){(Resolve-Path -LiteralPath $ArdPath).Path}else{Join-Path (Split-Path $root -Parent) 'target\release\ard.exe'}
 foreach($path in @($ui,$ard)){
     if(-not (Test-Path -LiteralPath $path -PathType Leaf)){throw "Required payload file is missing: $path"}
 }
 & $ui --self-test
 if($LASTEXITCODE -ne 0){throw 'ArdUi self-test failed.'}
+$ardVersion=(& $ard --version | Out-String).Trim()
+if($LASTEXITCODE -ne 0 -or $ardVersion -notmatch '^ard \S+$'){throw 'ARD version command failed.'}
 
 $payload=Join-Path $stage 'payload'
 New-Item -ItemType Directory -Force -Path (Join-Path $payload 'frd') | Out-Null
 Copy-Item -LiteralPath $ui,(Join-Path $root 'config.json'),(Join-Path $root 'THIRD-PARTY-NOTICES.md') -Destination $payload
 Copy-Item -LiteralPath $ard -Destination (Join-Path $payload 'ard.exe')
+$ardHash=(Get-FileHash -LiteralPath $ard -Algorithm SHA256).Hash.ToLowerInvariant()
+$components=[ordered]@{ardui=$version;ard=[ordered]@{version=$ardVersion;sha256=$ardHash};frdArchive=(Split-Path $frdArchive -Leaf)}
+[IO.File]::WriteAllText((Join-Path $stage 'components.json'),($components|ConvertTo-Json -Depth 3),[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $payload 'release.txt'),$version+[Environment]::NewLine,[Text.Encoding]::ASCII)
 Expand-Archive -LiteralPath $frdArchive -DestinationPath (Join-Path $payload 'frd')
 if(-not (Test-Path -LiteralPath (Join-Path $payload 'frd\FRD.exe') -PathType Leaf)){throw 'FRD.exe is missing from the FRD release.'}
@@ -50,6 +57,8 @@ $installer=Join-Path $root 'install.ps1'
 $bytes=[IO.File]::ReadAllBytes($installer)
 if($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF){throw 'install.ps1 must be UTF-8 with BOM.'}
 Copy-Item -LiteralPath $installer,(Join-Path $root 'packaging\offline\install.bat') -Destination $stage
+$notes=Join-Path $root "docs\releases\$version.md"
+if(Test-Path -LiteralPath $notes){Copy-Item -LiteralPath $notes -Destination (Join-Path $stage 'RELEASE-NOTES.md')}
 [IO.File]::WriteAllText((Join-Path $stage 'RELEASE.txt'),@"
 ArdUi $version
 This self-extracting installer invokes install.bat after extracting to a temporary directory.
@@ -63,3 +72,13 @@ if($LASTEXITCODE -ne 0){throw 'OneSetup packaging failed.'}
 $hash=(Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText($sidecar,"$hash *$(Split-Path $output -Leaf)`n",[Text.Encoding]::ASCII)
 Write-Host "$output`nSHA256 $hash`n$([math]::Round((Get-Item -LiteralPath $output).Length/1MB,2)) MiB"
+$temporary=Join-Path $root ('dist\'+[guid]::NewGuid().ToString('N')+'.zip')
+Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $temporary -CompressionLevel Optimal
+[IO.File]::Move($temporary,$archive)
+$archiveHash=(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+$checksum=[IO.File]::Open($archive+'.sha256',[IO.FileMode]::CreateNew,[IO.FileAccess]::Write)
+try{
+    $checksumBytes=[Text.Encoding]::ASCII.GetBytes("$archiveHash *$(Split-Path $archive -Leaf)`n")
+    $checksum.Write($checksumBytes,0,$checksumBytes.Length)
+}finally{$checksum.Dispose()}
+Write-Host "$archive`nSHA256 $archiveHash"
