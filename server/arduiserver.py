@@ -224,7 +224,9 @@ def dispatch(path, endpoint, data, ip, envelope):
         target_id=text(data,'targetEndpoint',ENDPOINT)
         ticket=text(data,'requestId',TICKET)
         expires=data.get('expires')
-        if type(expires) is not int or not now < expires <= now+360 or set(data)!={'code','sessionId','targetEndpoint','requestId','expires'}:
+        fields={'code','sessionId','targetEndpoint','requestId','expires'}
+        if data.get('transport')=='easytier-v1': fields.add('transport')
+        if type(expires) is not int or not now < expires <= now+360 or set(data)!=fields:
             raise ApiError(400,'连接请求无效；服务器不接收密码。')
         limit('connect-device:'+endpoint,20,60)
         with database() as db:
@@ -258,7 +260,13 @@ def dispatch(path, endpoint, data, ip, envelope):
                     text(data,'sessionId',ENDPOINT)
                     if data.get('requestId')!=ticket or data.get('controllerEndpoint')!=row['caller'] or data.get('targetEndpoint')!=endpoint or data.get('clientSessionId')!=row['client_session'] or data.get('expires')!=row['expires']:
                         raise ApiError(400,'会话签名内容不匹配。')
-                    if set(data)!={'sessionId','requestId','controllerEndpoint','targetEndpoint','clientSessionId','expires'}:
+                    fields={'sessionId','requestId','controllerEndpoint','targetEndpoint','clientSessionId','expires'}
+                    requested=json.loads(base64.b64decode(json.loads(row['proof'])['payload'],validate=True))
+                    if requested.get('transport')=='easytier-v1':
+                        fields.update(('transport','transportPort'))
+                        if data.get('transport')!='easytier-v1' or type(data.get('transportPort')) is not int or not 1<=data['transportPort']<=65535:
+                            raise ApiError(400,'无效传输协议或端口。')
+                    if set(data)!=fields:
                         raise ApiError(400,'无效会话响应；禁止发送密码或流量密钥。')
                     db.execute("UPDATE requests SET status='ready',offer=? WHERE id=?",(json.dumps(envelope),ticket))
                 return {'ok':True}

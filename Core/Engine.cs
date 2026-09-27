@@ -20,7 +20,7 @@ sealed class Engine : IAsyncDisposable
         settings.Validate();
         if (!File.Exists(Path.Combine(root,"device","identity"))) throw new IOException("本机身份尚未安装，请重新执行官方 install.ps1。运行客户端不会自动生成新身份。");
         var state=new State(root);
-        try { return new Engine(state,settings,await Ard.Identity(state.IdentityDirectory,CancellationToken.None)); }
+        try { await Task.CompletedTask;return new Engine(state,settings,EasyTier.DeviceIdentity(state.IdentityDirectory)); }
         catch { state.Dispose(); throw; }
     }
     void Update(string id,string message) { Status[id]=message; Changed?.Invoke(); }
@@ -112,7 +112,7 @@ sealed class Engine : IAsyncDisposable
             text.Contains("timed out",StringComparison.OrdinalIgnoreCase)||
             Regex.IsMatch(text,@"os error \d+");
     }
-    async Task<Child> StartArdWithRetry(string peer,string dir,bool host,int port,string remote,string ready,CancellationToken ct)
+    async Task<Child> StartArdWithRetry(string peer,string dir,bool host,int port,string remote,string ready,CancellationToken ct,int remotePort=0)
     {
         Exception? last=null;
         for(var attempt=1;attempt<=3;attempt++)
@@ -120,7 +120,7 @@ sealed class Engine : IAsyncDisposable
             Child? child=null;
             try
             {
-                child=Ard.Start(dir,host,port,remote,Settings);
+                child=EasyTier.Start(dir,host,port,remote,remotePort);
                 await child.WaitFor(ready,ct);
                 return child;
             }
@@ -149,7 +149,7 @@ sealed class Engine : IAsyncDisposable
             if(Incoming.TryRemove(ticket.ControllerEndpoint,out var previous))await previous.DisposeAsync();
             var peer = new Peer { Id = ticket.ControllerEndpoint, Code = ticket.ControllerCode };
             dir = State.NewSessionDirectory();
-            var local = await Ard.Identity(dir, ct);
+            var local = EasyTier.SessionIdentity(dir);
             var capability = RandomNumberGenerator.GetBytes(16);
             gateway = new Gateway(Settings, capability, async (password, token) =>
             {
@@ -196,7 +196,7 @@ sealed class Engine : IAsyncDisposable
         {
             var port = Wire.Port();
             Update(peer.Id, "正在建立经过身份签名的连接…");
-            child = await StartArdWithRetry(peer.Id,dir,false,port,offer.SessionId,"READY:",ct);
+            child = await StartArdWithRetry(peer.Id,dir,false,port,offer.SessionId,"READY:",ct,offer.TransportPort);
             using var tcp = new TcpClient(); await tcp.ConnectAsync(IPAddress.Loopback, port, ct);
             var header = new byte[23]; "AUI1"u8.CopyTo(header); header[20] = 2;
             await tcp.GetStream().WriteAsync(header, ct);

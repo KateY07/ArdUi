@@ -50,6 +50,8 @@ static class SelfTest
             await hd.SetAccess(true,ct);hd.Start();cd.Start();
             using var firstAttempt=CancellationTokenSource.CreateLinkedTokenSource(ct);
             var connection = cd.Connect(hd.Code,enrollmentPassword,firstAttempt.Token);
+            await Task.WhenAny(prompt.Task,connection).WaitAsync(ct);
+            if(connection.IsCompleted)await connection;
             await prompt.Task.WaitAsync(ct);
             if (caller.State.Peers.Count != 0 || connection.IsCompleted) throw new Exception("Peer granted before consent.");
             Console.WriteLine("TEST: disabling host while confirmation is pending.");

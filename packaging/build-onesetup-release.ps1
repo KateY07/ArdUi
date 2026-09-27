@@ -1,4 +1,4 @@
-﻿param([string]$ArdPath)
+﻿param([string]$ArdPath,[string]$EasyTierDirectory)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 
@@ -30,6 +30,12 @@ foreach($path in @($packer,$frdArchive)){
     if(-not (Test-Path -LiteralPath $path -PathType Leaf)){throw "Required release input is missing: $path"}
 }
 
+if(-not $EasyTierDirectory){throw 'Specify the official EasyTier runtime directory with -EasyTierDirectory.'}
+foreach($name in @('easytier-core.exe','easytier-cli.exe','Packet.dll','wintun.dll','relay.json','LICENSE')){
+    if(-not (Test-Path -LiteralPath (Join-Path $EasyTierDirectory $name) -PathType Leaf)){throw "Missing EasyTier packaging input: $name"}
+}
+$easyTierVersion=(& (Join-Path $EasyTierDirectory 'easytier-core.exe') --version | Out-String).Trim()
+if($LASTEXITCODE -ne 0){throw 'Official EasyTier binary failed to start. Verify its DLL dependencies.'}
 dotnet publish $project -c Release -r win-x64 --self-contained false -o $publish -p:PublishSingleFile=true -p:PublishTrimmed=false
 if($LASTEXITCODE -ne 0){throw 'ArdUi publish failed.'}
 $ui=Join-Path $publish 'ArdUi.exe'
@@ -37,8 +43,8 @@ $ard=if($ArdPath){(Resolve-Path -LiteralPath $ArdPath).Path}else{Join-Path (Spli
 foreach($path in @($ui,$ard)){
     if(-not (Test-Path -LiteralPath $path -PathType Leaf)){throw "Required payload file is missing: $path"}
 }
-& $ui --self-test
-if($LASTEXITCODE -ne 0){throw 'ArdUi self-test failed.'}
+$test=Start-Process -FilePath $ui -ArgumentList '--self-test' -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput (Join-Path $publish 'self-test.log') -RedirectStandardError (Join-Path $publish 'self-test.err.log')
+if($test.ExitCode -ne 0){throw ('ArdUi self-test failed: '+(Get-Content (Join-Path $publish 'self-test.err.log') -Raw))}
 $ardVersion=(& $ard --version | Out-String).Trim()
 if($LASTEXITCODE -ne 0 -or $ardVersion -notmatch '^ard \S+$'){throw 'ARD version command failed.'}
 
@@ -46,8 +52,12 @@ $payload=Join-Path $stage 'payload'
 New-Item -ItemType Directory -Force -Path (Join-Path $payload 'frd') | Out-Null
 Copy-Item -LiteralPath $ui,(Join-Path $root 'config.json'),(Join-Path $root 'THIRD-PARTY-NOTICES.md') -Destination $payload
 Copy-Item -LiteralPath $ard -Destination (Join-Path $payload 'ard.exe')
+New-Item -ItemType Directory -Path (Join-Path $payload 'easytier') | Out-Null
+foreach($name in @('easytier-core.exe','easytier-cli.exe','Packet.dll','wintun.dll','relay.json','LICENSE')){
+    Copy-Item -LiteralPath (Join-Path $EasyTierDirectory $name) -Destination (Join-Path $payload 'easytier')
+}
 $ardHash=(Get-FileHash -LiteralPath $ard -Algorithm SHA256).Hash.ToLowerInvariant()
-$components=[ordered]@{ardui=$version;ard=[ordered]@{version=$ardVersion;sha256=$ardHash};frdArchive=(Split-Path $frdArchive -Leaf)}
+$components=[ordered]@{ardui=$version;easytier=[ordered]@{version=$easyTierVersion;sha256=(Get-FileHash (Join-Path $EasyTierDirectory 'easytier-core.exe') -Algorithm SHA256).Hash.ToLowerInvariant()};legacyCandidateArd=[ordered]@{version=$ardVersion;sha256=$ardHash};frdArchive=(Split-Path $frdArchive -Leaf)}
 [IO.File]::WriteAllText((Join-Path $stage 'components.json'),($components|ConvertTo-Json -Depth 3),[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $payload 'release.txt'),$version+[Environment]::NewLine,[Text.Encoding]::ASCII)
 Expand-Archive -LiteralPath $frdArchive -DestinationPath (Join-Path $payload 'frd')

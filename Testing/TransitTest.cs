@@ -6,7 +6,7 @@ static class TransitTest
     public static async Task<int> Run(string[] args)
     {
         if(args.Contains("--integration-only")){await Integration(args);return 0;}
-        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(60));var ct=timeout.Token;
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(args.Contains("--easytier-overlay-test")?120:60));var ct=timeout.Token;
         var baseline=PathQuality.From([40,41,42,42,43,44,45,46],20);
         Check(PathQuality.From([20,21,22,22,23,24,25,26],20).BetterThan(baseline),"significant RTT improvement rejected");
         Check(!PathQuality.From([38,39,40,40,41,42,43,44],20).BetterThan(baseline),"marginal improvement triggered switch");
@@ -70,9 +70,17 @@ static class TransitTest
         };
         var root=Path.Combine(Path.GetTempPath(),"ArdUi-v2-test-"+Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
+        Child? easyHost=null,easyClient=null;
         try
         {
-            await using var caller=await OverlaySession.Connect(gateway.Port,cap,()=>"P2P / localhost-test",ct);
+            var basePort=gateway.Port;
+            if(args.Contains("--easytier-overlay-test"))
+            {
+                var a=Path.Combine(root,"et-a");var b=Path.Combine(root,"et-b");var aid=EasyTier.SessionIdentity(a);var bid=EasyTier.SessionIdentity(b);
+                easyHost=EasyTier.Start(b,true,gateway.Port,aid,0);await easyHost.WaitFor("relay online",ct);
+                basePort=Wire.Port();easyClient=EasyTier.Start(a,false,basePort,bid,gateway.Port);await easyClient.WaitFor("READY:",ct);
+            }
+            await using var caller=await OverlaySession.Connect(basePort,cap,()=>easyClient?.Network??"P2P / localhost-test",ct);
             using var tcp=new TcpClient{NoDelay=true};await tcp.ConnectAsync(IPAddress.Loopback,caller.Port,ct);
             var header=new byte[23];"AUI1"u8.CopyTo(header);cap.CopyTo(header,4);header[20]=1;BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(21),(ushort)echoPort);
             await tcp.GetStream().WriteAsync(header,ct);Check((await Wire.Read(tcp.GetStream(),1,ct))[0]==0,"gateway open");
@@ -122,7 +130,7 @@ static class TransitTest
         {Console.Error.WriteLine("Diagnostics: "+Diagnostics.Export(root,null));throw;}
         finally
         {
-            if(host!=null)await host.DisposeAsync();timeout.Cancel();echo.Stop();echoUdp.Dispose();
+            if(host!=null)await host.DisposeAsync();if(easyClient!=null)await easyClient.DisposeAsync();if(easyHost!=null)await easyHost.DisposeAsync();timeout.Cancel();echo.Stop();echoUdp.Dispose();
             await Task.WhenAll(accept,udpEcho);await Task.WhenAll(echoTasks);
         }
     }

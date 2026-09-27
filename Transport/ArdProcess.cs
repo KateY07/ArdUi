@@ -31,19 +31,25 @@ sealed class Child : IAsyncDisposable
     public Process Process { get; }
     public Task Exited { get; }
     readonly ChildJob job;
+    readonly string executable,workingDirectory;
+    readonly string[] arguments;
     readonly ConcurrentQueue<string> lines = new();
     static readonly string[] startupMarkers=["relay online","READY:"];
     readonly ConcurrentDictionary<string,byte> startupSignals = new();
     readonly Task pump;
     readonly ArdPathState path=new();
+    readonly CancellationTokenSource diagnosticStop=new();
+    Task diagnosticTask=Task.CompletedTask;
+    EasyTier.Status? easyTier;
     long progressAt=Environment.TickCount64;
     public long ProgressAge=>Environment.TickCount64-Interlocked.Read(ref progressAt);
-    public string Network => path.Network;
-    public double? PathRtt => path.Rtt;
+    public string Network => easyTier?.Network??path.Network;
+    public double? PathRtt => easyTier?.Rtt??path.Rtt;
     public event Action<string>? Output;
     int disposed;
     public Child(string exe, string cwd, params string[] args)
     {
+        executable=exe;workingDirectory=cwd;arguments=args.ToArray();
         var start = new ProcessStartInfo(exe) { WorkingDirectory = cwd, UseShellExecute = false,
             CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
         start.Environment.Remove("RUST_LOG"); start.Environment["NO_COLOR"] = "1";
@@ -69,6 +75,23 @@ sealed class Child : IAsyncDisposable
             Output?.Invoke(line);
         }
     }
+    public void Track(EasyTier.Status status)
+    {
+        easyTier=status;diagnosticTask=status.Run(this,diagnosticStop.Token);
+    }
+    public void Report(string line,string? milestone=null)
+    {
+        if(milestone!=null)startupSignals.TryAdd(milestone,0);
+        lines.Enqueue(line);while(lines.Count>100)lines.TryDequeue(out _);
+        Interlocked.Exchange(ref progressAt,Environment.TickCount64);
+        Diagnostics.Log("easytier",line);Output?.Invoke(line);
+    }
+    public Child Restart()
+    {
+        var child=new Child(executable,workingDirectory,arguments);
+        if(easyTier!=null)child.Track(easyTier.Copy());
+        return child;
+    }
     public async Task WaitFor(string text, CancellationToken ct)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(65));
@@ -83,8 +106,9 @@ sealed class Child : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
-        try { if (!Process.HasExited) Process.Kill(true); await Exited; await pump; }
-        finally { job.Dispose(); Process.Dispose(); }
+        diagnosticStop.Cancel();
+        try { if (!Process.HasExited) Process.Kill(true); await Exited; await pump;await diagnosticTask; }
+        finally { job.Dispose(); Process.Dispose();diagnosticStop.Dispose(); }
     }
 }
 

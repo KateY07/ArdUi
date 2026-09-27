@@ -5,6 +5,7 @@ sealed class Session : IAsyncDisposable
     public string PeerId { get; }
     public string Address { get; }
     readonly int basePort;
+    public int ServicePort=>basePort;
     public int LocalPort => !Host&&Overlay!=null?Overlay.Port:basePort;
     public byte[] Capability { get; }
     public int[] TcpPorts { get; }
@@ -132,7 +133,7 @@ sealed class Session : IAsyncDisposable
     }
     public async Task RestartArd(CancellationToken ct)
     {
-        await Process.DisposeAsync();ct.ThrowIfCancellationRequested();Process=new Child(Ard.Exe,directory,ardArguments);
+        var previous=Process;await previous.DisposeAsync();ct.ThrowIfCancellationRequested();Process=previous.Restart();
         Diagnostics.Log("ard-restart",PeerId);
     }
     public async Task<TcpClient> OpenTcp(int port, CancellationToken ct)

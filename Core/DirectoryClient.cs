@@ -235,11 +235,13 @@ sealed class DirectoryClient : IAsyncDisposable
         {
             if (!Enabled || ticket.Expires <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return;
             var request = Verify<ServerRequest>(ticket.Proof, "/api/v1/connect", Wire.Endpoint(ticket.ControllerEndpoint));
+            if(request.Transport!=EasyTier.Protocol)throw new IOException("双方需要升级到 ArdUi v4（EasyTier）。");
             if (request.TargetEndpoint != engine.Id || request.Code != Code || request.SessionId != ticket.ClientSessionId || request.RequestId != ticket.Id || request.Expires != ticket.Expires)
                 throw new InvalidDataException("连接请求与设备签名不匹配。");
             var sessionId = await engine.AcceptServerSession(ticket, (request, token) => AuthorizePassword(ticket, request, token), ct);
             await Call<JsonElement>($"/api/v1/tickets/{ticket.Id}/ready",
-                new ServerOffer(sessionId, ticket.Id, ticket.ControllerEndpoint, engine.Id, ticket.ClientSessionId, ticket.Expires), ct);
+                new ServerOffer(sessionId, ticket.Id, ticket.ControllerEndpoint, engine.Id, ticket.ClientSessionId, ticket.Expires,
+                    EasyTier.Protocol,engine.Incoming[ticket.ControllerEndpoint].ServicePort), ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex)
@@ -358,8 +360,8 @@ sealed class DirectoryClient : IAsyncDisposable
         var transferred = false;
         try
         {
-            var local = await Ard.Identity(dir, timeout.Token);
-            var request = new ServerRequest(machine,target.Endpoint,local,Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow.AddSeconds(background?60:300).ToUnixTimeSeconds());
+            var local = EasyTier.SessionIdentity(dir);
+            var request = new ServerRequest(machine,target.Endpoint,local,Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow.AddSeconds(background?60:300).ToUnixTimeSeconds(),EasyTier.Protocol);
             await Call<JsonElement>("/api/v1/connect", request, timeout.Token);
             ServerOffer? offer = null;
             while (offer == null)
@@ -372,6 +374,8 @@ sealed class DirectoryClient : IAsyncDisposable
                 if (offer.RequestId != request.RequestId || offer.ControllerEndpoint != engine.Id || offer.TargetEndpoint != target.Endpoint || offer.ClientSessionId != local || offer.Expires != request.Expires)
                     throw new InvalidDataException("对端签名没有绑定当前会话，已阻止连接。");
                 Wire.Endpoint(offer.SessionId);
+                if(offer.Transport!=EasyTier.Protocol||offer.TransportPort is <1 or >65535)
+                    throw new IOException("对端没有提供有效的 EasyTier 会话，请将双方升级到 ArdUi v4。");
             }
             transferred = true;
             await engine.ConnectServerSession(target, dir, offer, enrolling, password, timeout.Token);

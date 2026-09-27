@@ -1,14 +1,14 @@
 # Third-party components
 
-ArdUi application logic is organized by responsibility as documented in `ARCHITECTURE.md`. The framework-dependent single-file UI contains its managed and native UI dependencies; `ard.exe` and the FRD runtime are downloaded and verified separately by the installer. FRD's own third-party notices and FFmpeg license are retained in its installation directory.
+The offline installer carries the framework-dependent UI, official EasyTier runtime, legacy candidate-relay ARD and FRD. Actual component versions and distribution hashes are recorded in the generated components.json. FRD's notices and FFmpeg license are retained in its installation directory.
 
 | Component | Version | Source / license |
 | --- | --- | --- |
-| ARD | 2.0.0-pre.6 | https://github.com/KateY07/ard2 |
+| EasyTier | See components.json | https://github.com/EasyTier/EasyTier — Apache-2.0; included easytier/LICENSE |
+| ARD (legacy candidate relay) | See components.json | https://github.com/KateY07/ard2 |
 | Avalonia | 11.3.13 | https://github.com/AvaloniaUI/Avalonia — MIT |
 | NSec.Cryptography | 25.4.0 | https://github.com/ektrah/nsec — MIT |
-| ZXing.Net | 0.16.11 | https://github.com/micjahn/ZXing.Net — Apache-2.0 |
 | Tmds.DBus.Protocol | 0.21.3 | https://github.com/tmds/Tmds.DBus — MIT |
 | SkiaSharp | Avalonia dependency | https://github.com/mono/SkiaSharp — MIT and native Skia notices |
 
-Running ArdUi requires the Microsoft .NET 8 Desktop Runtime. ArdUi does not distribute or call Wintun or tun2socks.
+Running ArdUi requires the Microsoft .NET 8 Desktop Runtime; bundled FRD requires .NET 10. The official EasyTier runtime includes DLL dependencies, including wintun.dll, but ArdUi uses no-TUN mode and does not create or install a virtual network adapter. No tun2socks is used.

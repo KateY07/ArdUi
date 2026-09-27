@@ -14,9 +14,8 @@ Copy-Item -Path (Join-Path $payload '*') -Destination $destination -Recurse -For
 if(-not (Test-Path -LiteralPath $data -PathType Container)){
     New-Item -ItemType Directory -Path $data | Out-Null
     Copy-Item -LiteralPath (Join-Path $payload 'config.json') -Destination (Join-Path $data 'config.json')
-    & (Join-Path $destination 'ArdUi.exe') --identity-store $data
-    $identityExit=Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue
-    if($null -ne $identityExit -and $identityExit -ne 0){throw '首次设备身份创建失败。'}
+    $identity=Start-Process -FilePath (Join-Path $destination 'ArdUi.exe') -ArgumentList ('--identity-store "{0}"' -f $data) -WindowStyle Hidden -Wait -PassThru
+    if($identity.ExitCode -ne 0){throw '首次设备身份创建失败。'}
 }
 
 $launcher=Join-Path $root 'ArdUi.cmd'

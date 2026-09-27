@@ -1,6 +1,6 @@
 namespace ArdUi;
 
-// ARD authenticates each hop; the v2 overlay authenticates and preserves the A–B session.
+// Signed session identities bind EasyTier's private network; the overlay preserves the A–B session.
 static class Program
 {
     public static string Version
@@ -33,6 +33,8 @@ static class Program
             { Release.Verify(args[1],args[2],args[3]); return 0; }
             if (args.Contains("--self-test"))
                 return SelfTest.RunAsync().GetAwaiter().GetResult();
+            if(args.Contains("--easytier-test"))return EasyTierTest.Run().GetAwaiter().GetResult();
+            if(args.Contains("--easytier-overlay-test"))return TransitTest.Run(args).GetAwaiter().GetResult();
             if (args.Contains("--prototype-test"))
                 return SelfTest.Prototype().GetAwaiter().GetResult();
             if (args.Contains("--transit-test"))
