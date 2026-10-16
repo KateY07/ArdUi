@@ -17,7 +17,8 @@ sealed class OverlaySession : IAsyncDisposable
     readonly ConcurrentDictionary<long,TaskCompletionSource<bool>> probes=new();
     readonly ConcurrentDictionary<long,(OverlayLink Link,TransferMeter Meter)> transfers=new();
     readonly SemaphoreSlim servingBandwidth=new(1);
-    readonly SortedDictionary<long,byte[]> pending=new(),reorder=new();
+    readonly SortedDictionary<long,PendingFrame> pending=new();
+    readonly SortedDictionary<long,byte[]> reorder=new();
     readonly SemaphoreSlim window=new(Window),incomingSignal=new(0,1),controlSlots=new(8),bandwidthGate=new(1);
     readonly Channel<(OverlayLink Link,byte[] Frame,bool Udp)> replies=Channel.CreateBounded<(OverlayLink,byte[],bool)>(128);
     readonly SemaphoreSlim ackSignal=new(0,1);
@@ -30,16 +31,21 @@ sealed class OverlaySession : IAsyncDisposable
     readonly ConcurrentDictionary<uint,IPEndPoint> udpRemotes=new();
     readonly ConcurrentDictionary<uint,TargetUdp> targetUdp=new();
     readonly Dictionary<(uint,long),Fragments> fragments=new();
-    readonly Task maintenance,orderedReceiver,replyWriter,ackWriter;
+    readonly Task maintenance,health,orderedReceiver,replyWriter,ackWriter;
     Task accept=Task.CompletedTask,datagramReader=Task.CompletedTask,reconnect=Task.CompletedTask;
     long sendSequence,receiveSequence,probeId,udpSequence,missingSince,lastResend;
+    long acknowledgedSequence;
+    int duplicateAcks;
     int flowSerial,disposed;
     string selected="base";
+    string? healthFallback;
+    readonly object selectionGate=new();
     public string Id{get;}
     public int Port=>listener==null?0:((IPEndPoint)listener.LocalEndpoint).Port;
     // A full session renewal is distinct from killing ARD during its normal recovery.
     public bool Expired=>stop.IsCancellationRequested||missingSince!=0&&Environment.TickCount64-missingSince>180000;
     public string Selected=>selected;
+    public bool RecoveringSelectedPath{get{lock(selectionGate)return healthFallback!=null;}}
     public string Network=>selected=="base"?baseNetwork():"ArdTransit / "+selected[..Math.Min(6,selected.Length)];
     public Func<string,JsonElement,CancellationToken,Task<object>>? Control;
     public Action? Changed;
@@ -47,6 +53,13 @@ sealed class OverlaySession : IAsyncDisposable
     public CancellationToken Token=>stop.Token;
     sealed class Fragments(int count,long time)
     {public byte[][] Parts{get;}=new byte[count][];public long Time{get;}=time;public int Bytes;}
+    sealed class PendingFrame(byte[] data)
+    {
+        public byte[] Data{get;}=data;
+        public readonly SemaphoreSlim Write=new(1);
+        public OverlayLink? SentOn;
+        public int ReplayRequested,ReplaySent;
+    }
     OverlaySession(string id,bool caller,int port,byte[] capability,byte[] secret,byte[] context,Func<string> network,int maxFlowCredits)
     {
         Id=id;this.caller=caller;this.capability=capability;this.baseNetwork=network;
@@ -57,7 +70,7 @@ sealed class OverlaySession : IAsyncDisposable
             listener=new TcpListener(IPAddress.Loopback,0);listener.Start();facade=new UdpClient(new IPEndPoint(IPAddress.Loopback,Port));Wire.ConfigureUdp(facade);
             accept=Accept();datagramReader=ReadFacade();
         }
-        orderedReceiver=ReceiveOrdered();replyWriter=WriteReplies();ackWriter=WriteAcks();maintenance=Maintain();
+        orderedReceiver=ReceiveOrdered();replyWriter=WriteReplies();ackWriter=WriteAcks();maintenance=Maintain();health=MonitorHealth();
     }
     static byte[] Derive(ECDiffieHellman key,string remote)
     {
@@ -156,6 +169,10 @@ sealed class OverlaySession : IAsyncDisposable
     {if(links.TryRemove(name,out var link))await link.DisposeAsync();if(selected==name)Select("base");}
     public void Select(string name)
     {
+        lock(selectionGate){healthFallback=null;SelectCore(name);}
+    }
+    void SelectCore(string name)
+    {
         if(selected==name)return;if(!links.TryGetValue(name,out var link)||!link.Live)throw new IOException("目标路径未就绪。");
         selected=name;Interlocked.Increment(ref Switches);lastResend=0;Diagnostics.Log("path-selected",name);Changed?.Invoke();
     }
@@ -197,17 +214,54 @@ sealed class OverlaySession : IAsyncDisposable
     }
     OverlayLink? Active()
     {
-        if(links.TryGetValue(selected,out var active)&&active.Live)return active;
-        if(links.TryGetValue("base",out var fallback)&&fallback.Live){Select("base");return fallback;}
+        lock(selectionGate)
+        {
+        // A transient health fallback does not revoke the authenticated peer's selection.
+        // Explicit selection cancels recovery, so a replaced or revoked route cannot return.
+        if(healthFallback is{} recovery&&selected=="base"&&links.TryGetValue(recovery,out var restored)&&
+            restored.Live&&restored.Responsive&&restored.Network.StartsWith("P2P",StringComparison.Ordinal)&&
+            // Old blackout losses must not veto a responsive recovered transport;
+            // sustained measured latency still prevents restoring a degraded route.
+            !(links.TryGetValue("base",out var healthyBase)&&healthyBase.Live&&healthyBase.Responsive&&restored.RecoverySlowerThan(healthyBase)))
+        {healthFallback=null;Diagnostics.Log("path-health-restored",recovery);SelectCore(recovery);}
+        if(links.TryGetValue(selected,out var active)&&active.Live&&(selected=="base"||active.Responsive))return active;
+        if(links.TryGetValue("base",out var fallback)&&fallback.Live)
+        {
+            if(selected!="base")
+            {healthFallback=active?.Live==true?selected:null;Diagnostics.Log("path-health-fallback",selected);SelectCore("base");}
+            return fallback;
+        }
         return null;
+        }
     }
     async Task SendReliable(byte kind,uint flow,byte[] body,CancellationToken ct=default)
     {
         using var linked=CancellationTokenSource.CreateLinkedTokenSource(ct,stop.Token);
-        await window.WaitAsync(linked.Token);byte[] frame;
-        lock(sequenceGate){frame=Frame(kind,++sendSequence,flow,body);pending.Add(sendSequence,frame);}
+        await window.WaitAsync(linked.Token);PendingFrame frame;long sequence;
+        lock(sequenceGate){sequence=++sendSequence;frame=new(Frame(kind,sequence,flow,body));pending.Add(sequence,frame);}
+        if(kind is 5 or 6)Diagnostics.Log("control-wire-queued",$"kind={kind} sequence={sequence}");
         if(Active() is{} link)
-            try{await SendOn(link,frame,false);}catch(Exception ex)when(!stop.IsCancellationRequested){Diagnostics.Log("send-deferred",ex.Message);}
+            try
+            {
+                await SendPending(link,frame);
+                if(kind is 5 or 6)Diagnostics.Log("control-wire-sent",$"kind={kind} sequence={sequence} link={link.Name}");
+            }
+            catch(Exception ex)when(!stop.IsCancellationRequested){Diagnostics.Log("send-deferred",ex.Message);}
+    }
+    async Task<bool> SendPending(OverlayLink link,PendingFrame frame)
+    {
+        await frame.Write.WaitAsync(stop.Token);
+        try
+        {
+            // TCP retries its own loss. End-to-end duplicate ACKs can still
+            // request one missing frame if an untrusted hop discarded it.
+            var requested=Volatile.Read(ref frame.ReplayRequested);
+            if(ReferenceEquals(Volatile.Read(ref frame.SentOn),link)&&requested==Volatile.Read(ref frame.ReplaySent))return false;
+            await SendOn(link,frame.Data,false);
+            Volatile.Write(ref frame.ReplaySent,requested);
+            Volatile.Write(ref frame.SentOn,link);return true;
+        }
+        finally{frame.Write.Release();}
     }
     async Task Receive(OverlayLink link,byte[] packet,bool udp)
     {
@@ -224,6 +278,13 @@ sealed class OverlaySession : IAsyncDisposable
             lock(sequenceGate)
             {
                 if(seq<0||seq>sendSequence)throw new IOException("覆盖层确认越界。");
+                if(seq>acknowledgedSequence){acknowledgedSequence=seq;duplicateAcks=0;}
+                else if(seq==acknowledgedSequence&&pending.TryGetValue(seq+1,out var missing)&&
+                    ReferenceEquals(Volatile.Read(ref missing.SentOn),link)&&++duplicateAcks>=3)
+                {
+                    duplicateAcks=0;Interlocked.Increment(ref missing.ReplayRequested);
+                    Diagnostics.Log("reliable-gap-retry",$"sequence={seq+1} link={link.Name}");
+                }
                 foreach(var id in pending.Keys.TakeWhile(n=>n<=seq).ToArray()){pending.Remove(id);window.Release();}
             }
             return;
@@ -232,8 +293,8 @@ sealed class OverlaySession : IAsyncDisposable
         if(kind==11){if(probes.TryRemove(seq,out var probe))probe.TrySetResult(true);return;}
         if(kind==13)
         {
-            if(Environment.TickCount64-link.ServedAt<30000||!servingBandwidth.Wait(0)){Reply(link,Frame(15,seq,0,[]),false);return;}
-            link.ServedAt=Environment.TickCount64;_=ServeThroughput(link,seq);return;
+            if(!link.CanServeBandwidth(Environment.TickCount64)||!servingBandwidth.Wait(0)){Reply(link,Frame(15,seq,0,[]),false);return;}
+            link.ServedAt=Environment.TickCount64;link.ServedRttMs=link.RttMs;_=ServeThroughput(link,seq);return;
         }
         if(kind is 14 or 15)
         {
@@ -245,6 +306,14 @@ sealed class OverlaySession : IAsyncDisposable
             return;
         }
         if(kind is <1 or >7||seq<=0)throw new IOException("覆盖层指令无效。");
+        // Record authenticated arrival separately from ordered dispatch; a missing
+        // earlier frame must not be mistaken for slow candidate activation.
+        if(kind is 5 or 6)
+        {
+            long expected;int buffered;
+            lock(incomingGate){expected=receiveSequence+1;buffered=reorder.Count;}
+            Diagnostics.Log("control-wire-received",$"kind={kind} sequence={seq} expected={expected} buffered={buffered} link={link.Name}");
+        }
         lock(incomingGate)
         {
             if(seq<=receiveSequence){Duplicates++;}
@@ -302,6 +371,9 @@ sealed class OverlaySession : IAsyncDisposable
     {try{await SendReliable(4,id,[]);}catch(Exception ex){Diagnostics.Log("flow-reset",ex.Message);}}
     async Task HandleControl(OverlayControl message)
     {
+        var watch=Stopwatch.StartNew();
+        var trace=message.Method is "transit-prepare" or "transit-activate" or "transit-select";
+        if(trace)Diagnostics.Log("control-received",$"{message.Method} id={message.Id}");
         try
         {
             object result;
@@ -321,18 +393,36 @@ sealed class OverlaySession : IAsyncDisposable
                 try{await SendReliable(6,0,JsonSerializer.SerializeToUtf8Bytes(message with{Data=JsonSerializer.SerializeToElement(new{}),Error=ex.Message},Wire.Json));}
                 catch(Exception sendError){Diagnostics.Log("control-reply",sendError.Message);}
         }
-        finally{controlSlots.Release();}
+        finally
+        {
+            if(trace)Diagnostics.Log("control-handler-finished",$"{message.Method} id={message.Id} elapsed_ms={watch.Elapsed.TotalMilliseconds:F2}");
+            controlSlots.Release();
+        }
     }
     public async Task<JsonElement> Request(string method,object value,CancellationToken ct)
     {
         if(controls.Count>=16)throw new IOException("协调请求过多。");
         var id=Guid.NewGuid().ToString("N");var waiter=new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);controls[id]=waiter;
+        var watch=Stopwatch.StartNew();var completed=false;
+        var trace=method is "transit-prepare" or "transit-activate" or "transit-select";
+        if(trace)Diagnostics.Log("control-request-start",$"{method} id={id}");
         try
         {
             await SendReliable(5,0,JsonSerializer.SerializeToUtf8Bytes(new OverlayControl(id,method,JsonSerializer.SerializeToElement(value,Wire.Json)),Wire.Json),ct);
-            return await waiter.Task.WaitAsync(TimeSpan.FromSeconds(75),ct);
+            if(trace)Diagnostics.Log("control-request-sent",$"{method} id={id} elapsed_ms={watch.Elapsed.TotalMilliseconds:F2}");
+            var result=await waiter.Task.WaitAsync(TimeSpan.FromSeconds(75),ct);completed=true;return result;
         }
-        finally{controls.TryRemove(id,out _);}
+        finally
+        {
+            if(trace)Diagnostics.Log("control-request-finished",$"{method} id={id} completed={completed} elapsed_ms={watch.Elapsed.TotalMilliseconds:F2}");
+            controls.TryRemove(id,out _);
+        }
+    }
+    public Task RegisterDatagramPath(OverlayLink link)
+    {
+        // An authenticated unsolicited probe reply registers C's return endpoint without
+        // claiming an RTT sample. Both peers do this before declaring activation complete.
+        return SendOn(link,Frame(11,Interlocked.Increment(ref probeId),0,[]),true);
     }
     public async Task<double> Probe(OverlayLink link,bool udp,int bytes=32)
     {
@@ -343,15 +433,14 @@ sealed class OverlaySession : IAsyncDisposable
             await SendOn(link,Frame(10,id,0,new byte[bytes]),udp);
             await waiter.Task.WaitAsync(TimeSpan.FromSeconds(2),stop.Token);
             var rtt=watch.Elapsed.TotalMilliseconds;
-            if(udp){link.JitterMs=link.RttMs is{} old?Math.Abs(old-rtt):0;link.RttMs=rtt;link.Sample(rtt);}
+            if(udp){link.JitterMs=link.RttMs is{} old?Math.Abs(old-rtt):0;link.RttMs=rtt;link.Sample(rtt);link.ObserveResponse(true);}
             return rtt;
         }
-        catch{Interlocked.Increment(ref link.Lost);if(udp)link.Sample(null);throw;}
+        catch{Interlocked.Increment(ref link.Lost);if(udp){link.Sample(null);link.ObserveResponse(false);}throw;}
         finally{probes.TryRemove(id,out _);}
     }
     async Task Maintain()
     {
-        var round=0;
         while(!stop.IsCancellationRequested)
         {
             try
@@ -362,26 +451,76 @@ sealed class OverlaySession : IAsyncDisposable
                 else{missingSince=0;if(active.Name!=selected)Select(active.Name);}
                 if(Environment.TickCount64-lastResend>=1000&&active!=null)
                 {
-                    lastResend=Environment.TickCount64;byte[][] frames;lock(sequenceGate)frames=pending.Values.Take(64).ToArray();
-                    foreach(var frame in frames){await SendOn(active,frame,false);Retransmits++;}
+                    lastResend=Environment.TickCount64;PendingFrame[] frames;
+                    lock(sequenceGate)frames=pending.Values.Where(frame=>!ReferenceEquals(Volatile.Read(ref frame.SentOn),active)||
+                        Volatile.Read(ref frame.ReplayRequested)!=Volatile.Read(ref frame.ReplaySent)).Take(64).ToArray();
+                    foreach(var frame in frames)if(await SendPending(active,frame))Interlocked.Increment(ref Retransmits);
+                    // An ACK written on an abandoned path may not reach its peer.
+                    // Repeat the cumulative ACK on the current path, not the payload.
+                    Ack();
                 }
-                foreach(var link in links.Values.Where(l=>l.Live).ToArray())
+                await Task.Delay(500,stop.Token);
+            }
+            catch(OperationCanceledException)when(stop.IsCancellationRequested){break;}
+            catch(Exception ex){Diagnostics.Log("overlay-maintenance",ex.Message);await Task.Delay(300,stop.Token).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);}
+        }
+    }
+    async Task MonitorHealth()
+    {
+        var workers=new Dictionary<OverlayLink,Task>();
+        try
+        {
+            while(!stop.IsCancellationRequested)
+            {
+                foreach(var entry in workers.Where(p=>p.Value.IsCompleted).ToArray())
+                {await entry.Value;workers.Remove(entry.Key);}
+                foreach(var link in links.Values.Where(l=>l.Live&&l.HealthReady))
+                    if(!workers.ContainsKey(link))workers.Add(link,MonitorLinkHealth(link));
+                await Task.Delay(500,stop.Token);
+            }
+        }
+        catch(OperationCanceledException)when(stop.IsCancellationRequested){Diagnostics.Log("overlay-health-stopped",Id);}
+        finally{await Task.WhenAll(workers.Values);}
+    }
+    async Task MonitorLinkHealth(OverlayLink link)
+    {
+        var round=0;
+        while(!stop.IsCancellationRequested&&link.Live)
+        {
+            try
+            {
+                // Each path owns its cadence; timeout or bandwidth work on another path cannot delay it.
+                if(link.HealthReady)
                 {
                     try
                     {
                         await Probe(link,true);
-                        if(round%120==0&&caller)await MeasureThroughput(link,stop.Token);
+                        link.UnresponsiveSince=0;
+                        // Do not saturate a newly established control path before its RTT baseline exists.
+                        // Explicit evaluation still measures throughput; migration refresh keeps its cadence.
+                        if(caller&&(link.MeasuredAt==0?link.Quality.Eligible:round%120==0||link.NeedsBandwidthRefresh(Environment.TickCount64)))
+                            await MeasureThroughput(link,stop.Token);
                     }
                     catch(Exception ex)when(!stop.IsCancellationRequested)
                     {
                         Diagnostics.Log("probe",link.Name+": "+ex.Message);
-                        try{await Probe(link,false);}catch(Exception tcpError){Diagnostics.Log("path-unhealthy",tcpError.Message);await link.DisposeAsync();}
+                        try{await Probe(link,false);link.UnresponsiveSince=0;}
+                        catch(Exception tcpError)
+                        {
+                            var now=Environment.TickCount64;
+                            if(link.UnresponsiveSince==0)link.UnresponsiveSince=now;
+                            Diagnostics.Log("path-unhealthy",link.Name+": "+tcpError.Message);
+                            // Health failure redirects traffic immediately; it must not abort
+                            // Iroh migration during a short network blackout.
+                            if(now-link.UnresponsiveSince>=30000)
+                            {Diagnostics.Log("path-recovery-expired",link.Name);await link.DisposeAsync();}
+                        }
                     }
                 }
                 round++;await Task.Delay(500,stop.Token);
             }
             catch(OperationCanceledException)when(stop.IsCancellationRequested){break;}
-            catch(Exception ex){Diagnostics.Log("overlay-maintenance",ex.Message);await Task.Delay(300,stop.Token).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);}
+            catch(Exception ex){Diagnostics.Log("overlay-health",ex.ToString());await Task.Delay(300,stop.Token).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);}
         }
     }
     public async Task<PathQuality> Evaluate(OverlayLink link,CancellationToken ct)
@@ -421,11 +560,18 @@ sealed class OverlaySession : IAsyncDisposable
         var id=Interlocked.Increment(ref probeId);
         try
         {
-            if(link.MeasuredAt!=0&&Environment.TickCount64-link.MeasuredAt<60000)return;
-            link.MeasuredAt=Environment.TickCount64;var meter=new TransferMeter();transfers[id]=(link,meter);
+            var now=Environment.TickCount64;
+            if(link.MeasuredAt!=0&&now-link.MeasuredAt<60000&&!link.NeedsBandwidthRefresh(now))return;
+            // Migration can invalidate bandwidth long before its normal cache expiry.
+            // Remeasure after a large RTT change, with a five-second rate limit.
+            link.MeasuredAt=now;link.BandwidthRttMs=link.RttMs;var meter=new TransferMeter();transfers[id]=(link,meter);
             await SendOn(link,Frame(13,id,0,[]),false);
             await meter.Done.Task.WaitAsync(TimeSpan.FromSeconds(12),ct);
-            (link.BandwidthMbps,link.BandwidthLowerBoundMbps)=meter.Result();
+            var result=meter.Result();
+            link.BandwidthRefreshPending=result.Rate==null&&result.LowerBound==null;
+            if(!link.BandwidthRefreshPending)(link.BandwidthMbps,link.BandwidthLowerBoundMbps)=result;
+            Diagnostics.Log("throughput-result",$"{link.Name}: rate={result.Rate}; lower_bound={result.LowerBound}; retry={link.BandwidthRefreshPending}; rtt={link.RttMs}");
+            link.HealthChanged?.Invoke();
         }
         catch(Exception ex)
         {link.BandwidthMbps=null;link.BandwidthLowerBoundMbps=null;Diagnostics.Log("throughput-measure",ex.Message);ct.ThrowIfCancellationRequested();}
@@ -532,17 +678,17 @@ sealed class OverlaySession : IAsyncDisposable
     public async Task ReceiveUdp(OverlayLink link,byte[] data)=>await Receive(link,data,true);
     public object Snapshot()
     {
-        int buffered;lock(sequenceGate)buffered=pending.Values.Sum(p=>p.Length);
+        int buffered;lock(sequenceGate)buffered=pending.Values.Sum(p=>p.Data.Length);
         return new{selected,flows=flows.Count,udpFlows=caller?udpRemotes.Count:targetUdp.Count,bufferedBytes=buffered,extraReceiveCredits=creditBudget.Used,maxFlowCredits,Retransmits,Duplicates,UdpFragments,UdpDrops,Switches,
             replayRejected=cipher.Replays,authenticationRejected=cipher.Rejected,
-            paths=links.Values.Select(l=>new{l.Name,l.Live,l.Network,l.RttMs,l.JitterMs,l.BandwidthMbps,l.BandwidthLowerBoundMbps,l.Probes,l.Lost,l.Sent,l.Received,quality=l.Quality}).ToArray()};
+            paths=links.Values.Select(l=>new{l.Name,l.Live,l.Network,l.Responsive,l.HealthReady,l.RttMs,l.JitterMs,l.BandwidthMbps,l.BandwidthLowerBoundMbps,l.Probes,l.Lost,l.Sent,l.Received,quality=l.Quality}).ToArray()};
     }
     public async ValueTask DisposeAsync()
     {
         if(Interlocked.Exchange(ref disposed,1)!=0)return;stop.Cancel();listener?.Stop();facade?.Dispose();
         foreach(var pendingControl in controls.Values)pendingControl.TrySetCanceled();
         foreach(var link in links.Values)await link.DisposeAsync();foreach(var flow in flows.Values)flow.Close();foreach(var udp in targetUdp.Values)udp.Dispose();
-        try{await Task.WhenAll(links.Values.Select(l=>l.Reader).Concat([maintenance,orderedReceiver,replyWriter,ackWriter,accept,datagramReader,reconnect]));}catch(Exception ex){Diagnostics.Log("overlay-close",ex.Message);}
+        try{await Task.WhenAll(links.Values.Select(l=>l.Reader).Concat([maintenance,health,orderedReceiver,replyWriter,ackWriter,accept,datagramReader,reconnect]));}catch(Exception ex){Diagnostics.Log("overlay-close",ex.Message);}
         cipher.Dispose();
     }
     sealed class OverlayFlow(OverlaySession owner,uint id,TcpClient? accepted)

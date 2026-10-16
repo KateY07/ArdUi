@@ -21,6 +21,7 @@ static class SelfTest
             var a = Path.Combine(root,"a"); var b = Path.Combine(root,"b");
             IdentityStore.Prepare(a); IdentityStore.Prepare(b);
             var settings = new Settings { TcpPorts = [port], UdpPorts = [] };
+            if(Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY") is not null)settings.StaticRelay=true;
             settings.Relay=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY")??settings.Relay;
             settings.RelayKey=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY_KEY")??settings.RelayKey;
             await using var host = await Engine.Create(a, settings);

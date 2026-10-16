@@ -200,11 +200,13 @@ sealed class DirectoryClient : IAsyncDisposable
                 }
                 await Poll(stop.Token);
                 StartReconnects();
+                // The status line keeps the last notice, so recovery must replace the earlier failure text.
+                if (announced) Notice?.Invoke("可信服务器连接已恢复");
                 online = true; announced = false; Changed?.Invoke();
             }
             catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
             catch (Exception ex)
-            { online = false; Changed?.Invoke(); if (!announced) Notice?.Invoke(ex.Message); announced = true; }
+            { online = false; Changed?.Invoke(); if (!announced) Notice?.Invoke("无法连接可信服务器，每 3 秒自动重试：" + ex.Message); announced = true; }
             try { await Task.Delay(3000, stop.Token); } catch (OperationCanceledException) { break; }
         }
     }

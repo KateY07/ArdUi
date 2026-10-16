@@ -111,7 +111,11 @@ static class Ard
         return Wire.Endpoint(await output);
     }
     public static Child Start(string dir, bool host, int port, string peer, Settings settings) =>
-        new(Exe, dir, host ? "open" : "forward", port.ToString(), "to", Wire.Endpoint(peer),
-            "--relay", settings.Relay, "--relay-key", settings.RelayKey,
-            settings.DetailedArdDiagnostics?"-vv":"-v");
+        settings.StaticRelay
+            ? new(Exe, dir, host ? "open" : "forward", port.ToString(), "to", Wire.Endpoint(peer),
+                "--relay", settings.Relay, "--relay-key", settings.RelayKey,
+                settings.DetailedArdDiagnostics?"-vv":"-v")
+            : new(Exe, dir, host ? "open" : "forward", port.ToString(), "to", Wire.Endpoint(peer),
+                "--relay-directory", settings.DirectoryUrl, "--master", settings.MasterUrl, "--master-key", settings.MasterKey,
+                settings.DetailedArdDiagnostics?"-vv":"-v");
 }

@@ -13,7 +13,36 @@ static class TransitTest
         Check(!PathQuality.From([10,11,12,12,13,14,null,null],20).BetterThan(baseline),"lossy candidate selected");
         Check(!PathQuality.From([10,11,12,12,13,14,15,16],10).BetterThan(baseline),"insufficient bandwidth selected");
         Check(PathQuality.From([40,41,42,42,43,44,45,46],31).BetterThan(baseline),"material bandwidth improvement rejected");
+        Check(PathQuality.From([2,2,2,3,3,3,4,4],90).BetterThan(PathQuality.From([520,null,520,null,530,null,530,null],null)),"healthy candidate blocked by lossy baseline without bandwidth");
+        Check(!PathQuality.From([1,1,1,1,1,1,1,1,null,null,null,null,null,null,null,null],90).Eligible,"long lossy sample window incorrectly eligible");
         Console.WriteLine("PASS: candidate quality rejects noise, loss and bandwidth regression; accepts meaningful gains.");
+        using(var socket=new TcpClient())
+        using(var output=new MemoryStream())
+        await using(var link=new OverlayLink("quality-recovery",socket,(_,_)=>Task.CompletedTask,()=>"P2P",output))
+        {
+            var notifications=0;link.HealthChanged=()=>notifications++;
+            for(var i=0;i<16;i++)link.Sample(2);
+            Check(notifications==1,"initial quality eligibility was not notified exactly once");
+            for(var i=0;i<16;i++)link.Sample(null);
+            Check(!link.Quality.Eligible&&notifications==2,"quality degradation was not notified");
+            for(var i=0;i<14;i++)link.Sample(2);
+            Check(link.Responsive&&link.Quality.Eligible&&notifications==3,"quality recovery without responsiveness change was not notified");
+            link.Sample(2);link.Sample(2);
+            Check(notifications==5,"eligible loss improvements did not wake route comparison");
+            for(var i=0;i<32;i++)link.Sample(2+i%3);
+            Check(notifications==5,"ordinary healthy RTT jitter caused repeated coordinator wakeups");
+            link.MeasuredAt=1000;link.BandwidthMbps=6;link.BandwidthRttMs=800;link.RttMs=2;
+            Check(!link.NeedsBandwidthRefresh(5999)&&link.NeedsBandwidthRefresh(6000),"migrated bandwidth refresh cadence incorrect");
+            link.RttMs=790;
+            Check(!link.NeedsBandwidthRefresh(7000),"minor jitter invalidated bandwidth cache");
+            link.BandwidthMbps=null;
+            Check(link.NeedsBandwidthRefresh(7000),"empty throttled measurement suppressed retry");
+            link.ServedAt=1000;link.ServedRttMs=800;link.RttMs=2;
+            Check(!link.CanServeBandwidth(5999)&&link.CanServeBandwidth(6000),"peer migration measurement limit disagrees with caller");
+            link.RttMs=790;
+            Check(!link.CanServeBandwidth(7000)&&link.CanServeBandwidth(31000),"stable peer bandwidth rate limit changed");
+        }
+        Console.WriteLine("PASS: quality recovery wakes selection without weakening sampling or polling on healthy jitter.");
         using(var receive=new UdpClient(new IPEndPoint(IPAddress.Loopback,0)))
         using(var send=new UdpClient(new IPEndPoint(IPAddress.Loopback,0)))
         {
@@ -100,7 +129,62 @@ static class TransitTest
             await using var relay=await TestRelay.Create(caller,host!,ct);
             await caller.Request("select",new{path="test-C"},ct);caller.Select("test-C");
             await Exchange(100000);await Datagram();Console.WriteLine("PASS: same TCP socket survives base-to-C switch; UDP traverses C with fragmentation.");
+            var pausedCaller=caller.Link("test-C")!;var pausedHost=host!.Link("test-C")!;
+            pausedCaller.HealthReady=false;pausedHost.HealthReady=false;
+            await Task.Delay(1200,ct);
+            var retriesBefore=Interlocked.Read(ref caller.Retransmits);
+            relay.Paused=true;
+            var delayedExchange=Exchange(32768);
+            try
+            {
+                await Task.Delay(2300,ct);
+                Check(!delayedExchange.IsCompleted,"paused relay did not delay the business stream");
+                Check(Interlocked.Read(ref caller.Retransmits)==retriesBefore,"live TCP backlog was duplicated while awaiting ACK");
+            }
+            finally{relay.Paused=false;pausedCaller.HealthReady=true;pausedHost.HealthReady=true;}
+            await delayedExchange;
+            Console.WriteLine("PASS: delayed TCP delivery does not duplicate queued payload; original stream resumes intact.");
+            var discardRetries=Interlocked.Read(ref caller.Retransmits);
+            relay.DropNextLargeTcpFrame=1;
+            await Exchange(32768);
+            Check(relay.DroppedTcpFrames==1,"untrusted relay did not discard a complete TCP frame");
+            Check(Interlocked.Read(ref caller.Retransmits)>discardRetries,"discarded frame did not exercise reliable retransmission");
+            Check(caller.Link("test-C")!.Live,"single discarded frame destroyed the candidate connection");
+            Console.WriteLine("PASS: one discarded opaque TCP frame is recovered end-to-end without corrupting the original stream.");
+            var candidate=caller.Link("test-C")!;candidate.HealthReady=false;
+            candidate.ObserveResponse(false);await Exchange(1000);
+            Check(caller.Selected=="base","unresponsive candidate did not temporarily fall back");
+            Check(caller.RecoveringSelectedPath,"failure replacement lost the failed selection context");
+            candidate.ObserveResponse(true);await Exchange(1000);
+            Check(caller.Selected=="test-C","recovered candidate left selection stranded on base");
+            candidate.ObserveResponse(false);await Exchange(1000);
+            var basePath=caller.Link("base")!;
+            for(var i=0;i<16;i++){basePath.Sample(10);candidate.Sample(2);}
+            candidate.RttMs=400;candidate.Sample(400);candidate.ObserveResponse(true);await Exchange(1000);
+            Check(caller.Selected=="base","first slow recovery sample was hidden by historical P90");
+            for(var i=0;i<16;i++){basePath.Sample(10);candidate.Sample(400);}
+            candidate.ObserveResponse(true);await Exchange(1000);
+            Check(caller.Selected=="base","responsive but measured degraded candidate bypassed recovery quality gate");
+            for(var i=0;i<16;i++)candidate.Sample(2);
+            candidate.RttMs=2;
+            await Exchange(1000);
+            Check(caller.Selected=="test-C","quality-recovered candidate failed to restore business");
+            candidate.ObserveResponse(false);await Exchange(1000);caller.Select("base");
+            candidate.ObserveResponse(true);await Exchange(1000);
+            Check(caller.Selected=="base","explicit base selection was overridden by health recovery");
+            Check(!caller.RecoveringSelectedPath,"explicit selection retained obsolete failure context");
+            candidate.HealthReady=true;caller.Select("test-C");
+            Console.WriteLine("PASS: temporary health fallback recovers; explicit selection cancels recovery.");
             relay.DuplicateUdp=true;await Datagram();Console.WriteLine("PASS: duplicated relay datagrams rejected without duplicate business delivery.");
+            var healthyBase=caller.Link("base")!;
+            var probesBefore=Interlocked.Read(ref healthyBase.Probes);
+            relay.Paused=true;await Task.Delay(6500,ct);
+            Check(Interlocked.Read(ref healthyBase.Probes)-probesBefore>=4,"failed candidate delayed independent healthy base probes");
+            Check(candidate.Live&&host!.Link("test-C")!.Live,"temporary blackout destroyed live candidate transports");
+            relay.Paused=false;
+            await caller.Probe(candidate,true);await Exchange(1000);await Datagram();
+            Check(caller.Selected=="test-C","candidate did not recover after temporary blackout");
+            Console.WriteLine("PASS: 6.5 second forwarding blackout preserves candidate connection and restores business.");
             await caller.Remove("base");await Exchange(50000);
             await Task.Delay(2000,ct);Check(caller.Link("base")?.Live==true,"base did not resume");
             Console.WriteLine("PASS: standby base TCP connection reconnects while C carries business.");
@@ -152,7 +236,7 @@ static class TransitTest
             try{while(!ct.IsCancellationRequested){var p=await udpEcho.ReceiveAsync(ct);await udpEcho.SendAsync(p.Buffer,p.RemoteEndPoint,ct);}}
             catch(Exception ex){Diagnostics.Log("integration-udp",ex.Message);}
         });
-        var settings=new Settings{Relay=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY")!,RelayKey=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY_KEY")!,TcpPorts=[port],UdpPorts=[port]};
+        var settings=new Settings{StaticRelay=true,Relay=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY")!,RelayKey=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY_KEY")!,TcpPorts=[port],UdpPorts=[port]};
         var server=Environment.GetEnvironmentVariable("ARDUI_TEST_SERVER")!;
         var a=Path.Combine(root,"a");var b=Path.Combine(root,"b");IdentityStore.Prepare(a);IdentityStore.Prepare(b);
         await using var caller=await Engine.Create(a,settings);await using var host=await Engine.Create(b,settings);
@@ -225,6 +309,8 @@ static class TransitTest
         readonly List<Task> tasks=new();
         IPEndPoint? ra,rb;
         public bool DuplicateUdp;
+        public volatile bool Paused;
+        public int DropNextLargeTcpFrame,DroppedTcpFrames;
         TestRelay(TcpClient a,TcpClient b){this.a=a;this.b=b;}
         public static async Task<TestRelay> Create(OverlaySession caller,OverlaySession host,CancellationToken ct)
         {
@@ -232,12 +318,12 @@ static class TransitTest
             var ca=new TcpClient();await ca.ConnectAsync(IPAddress.Loopback,port,ct);var a=await listener.AcceptTcpClientAsync(ct);
             var cb=new TcpClient();await cb.ConnectAsync(IPAddress.Loopback,port,ct);var b=await listener.AcceptTcpClientAsync(ct);listener.Stop();
             var relay=new TestRelay(a,b);
-            relay.tasks.Add(Task.Run(async()=>{try{await Wire.Bridge(a,b,relay.stop.Token);}catch(Exception ex){Diagnostics.Log("test-relay",ex.Message);}}));
+            relay.tasks.Add(relay.Copy(a,b));relay.tasks.Add(relay.Copy(b,a));
             relay.tasks.Add(relay.Udp(true));relay.tasks.Add(relay.Udp(false));
             async Task Add(OverlaySession target,TcpClient socket,int endpoint)
             {
                 var udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));udp.Connect(IPAddress.Loopback,endpoint);
-                var link=new OverlayLink("test-C",socket,async(data,cancel)=>await udp.SendAsync(data,cancel),()=>"P2P / localhost-test");
+                var link=new OverlayLink("test-C",socket,async(data,cancel)=>await udp.SendAsync(data,cancel),()=>"P2P / localhost-test"){HealthReady=false};
                 link.Closed+=()=>udp.Dispose();await target.Add(link);
                 relay.tasks.Add(Task.Run(async()=>
                 {try{while(!relay.stop.IsCancellationRequested){var p=await udp.ReceiveAsync(relay.stop.Token);await target.ReceiveUdp(link,p.Buffer);}}
@@ -245,7 +331,15 @@ static class TransitTest
             }
             await Add(caller,ca,((IPEndPoint)relay.ua.Client.LocalEndPoint!).Port);
             await Add(host,cb,((IPEndPoint)relay.ub.Client.LocalEndPoint!).Port);
-            await Task.Delay(2300,ct);return relay;
+            var callerLink=caller.Link("test-C")!;var hostLink=host.Link("test-C")!;
+            await Task.WhenAll(caller.RegisterDatagramPath(callerLink),host.RegisterDatagramPath(hostLink));
+            using var registration=CancellationTokenSource.CreateLinkedTokenSource(ct);registration.CancelAfter(1000);
+            while(relay.ra==null||relay.rb==null)await Task.Delay(10,registration.Token);
+            Check(callerLink.Probes==0&&hostLink.Probes==0,"UDP registration counted as measured health evidence");
+            Check(await caller.Probe(callerLink,true)<1000&&await host.Probe(hostLink,true)<1000,"first UDP probe waited for missing return registration");
+            callerLink.HealthReady=true;hostLink.HealthReady=true;
+            Console.WriteLine("PASS: UDP return registration precedes real first round-trip probes without fabricated samples.");
+            return relay;
         }
         async Task Udp(bool side)
         {
@@ -255,11 +349,31 @@ static class TransitTest
                 while(!stop.IsCancellationRequested)
                 {
                     var packet=await from.ReceiveAsync(stop.Token);if(side)ra=packet.RemoteEndPoint;else rb=packet.RemoteEndPoint;
-                    var remote=side?rb:ra;if(remote==null)continue;
+                    var remote=side?rb:ra;if(remote==null||Paused)continue;
                     await to.SendAsync(packet.Buffer,remote,stop.Token);if(DuplicateUdp)await to.SendAsync(packet.Buffer,remote,stop.Token);
                 }
             }
             catch(Exception ex){Diagnostics.Log("test-relay-udp-stop",ex.Message);}
+        }
+        async Task Copy(TcpClient from,TcpClient to)
+        {
+            try
+            {
+                while(!stop.IsCancellationRequested)
+                {
+                    var header=await Wire.Read(from.GetStream(),4,stop.Token);
+                    var size=BinaryPrimitives.ReadInt32BigEndian(header);
+                    if(size is <38 or >65536)throw new IOException("Invalid test relay frame size.");
+                    var buffer=await Wire.Read(from.GetStream(),size,stop.Token);
+                    while(Paused)await Task.Delay(25,stop.Token);
+                    if(ReferenceEquals(from,a)&&size>1000&&Interlocked.Exchange(ref DropNextLargeTcpFrame,0)==1)
+                    {Interlocked.Increment(ref DroppedTcpFrames);Diagnostics.Log("test-relay-discard","Dropped one opaque TCP frame.");continue;}
+                    await to.GetStream().WriteAsync(header,stop.Token);
+                    await to.GetStream().WriteAsync(buffer,stop.Token);
+                }
+                to.Client.Shutdown(SocketShutdown.Send);
+            }
+            catch(Exception ex){Diagnostics.Log("test-relay",ex.Message);}
         }
         public Task Fail(){stop.Cancel();a.Dispose();b.Dispose();ua.Dispose();ub.Dispose();return Task.CompletedTask;}
         public async ValueTask DisposeAsync(){await Fail();await Task.WhenAll(tasks);}

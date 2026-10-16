@@ -6,6 +6,14 @@ sealed class Settings
     public string Server { get; set; } = "https://f.visnova.cn/";
     public string Relay { get; set; } = "http://175.27.160.144:8080";
     public string RelayKey { get; set; } = DefaultRelayKey;
+    // Test harnesses that run a private relay without M set this; production always resolves relays through M.
+    public bool StaticRelay { get; set; }
+    // The configured relay address and key identify the trusted centre (M): its directory is served over HTTPS on the
+    // same host and port, and its signalling/QAD listens on the default ARD port.
+    public const int MasterQadPort = 7842;
+    public string DirectoryUrl { get { var u = new Uri(Relay); return $"https://{u.Host}:{u.Port}/directory"; } }
+    public string MasterUrl => $"https://{new Uri(Relay).Host}:{MasterQadPort}/";
+    public string MasterKey => RelayKey["spki:".Length..];
     public string FrdPath { get; set; } = "";
     public bool DetailedArdDiagnostics { get; set; }
     public int[] TcpPorts { get; set; } = [3389, 445];

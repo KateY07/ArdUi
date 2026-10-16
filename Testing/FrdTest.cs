@@ -7,7 +7,7 @@ static class FrdTest
     {
         var root=Environment.GetEnvironmentVariable("ARDUI_TEST_ROOT")??throw new IOException("Run tests/integration_v2.py --frd to start an isolated fixture.");
         using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(150));var ct=timeout.Token;
-        var settings=new Settings{Relay=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY")!,RelayKey=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY_KEY")!,TcpPorts=[],UdpPorts=[]};
+        var settings=new Settings{StaticRelay=true,Relay=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY")!,RelayKey=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY_KEY")!,TcpPorts=[],UdpPorts=[]};
         var a=Path.Combine(root,"frd-a");var b=Path.Combine(root,"frd-b");IdentityStore.Prepare(a);IdentityStore.Prepare(b);
         await using var caller=await Engine.Create(a,settings);await using var host=await Engine.Create(b,settings);
         var server=Environment.GetEnvironmentVariable("ARDUI_TEST_SERVER")!;
