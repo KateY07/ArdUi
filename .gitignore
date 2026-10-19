@@ -21,3 +21,8 @@ __pycache__/
 **/bin/
 **/obj/
 .vs/
+
+# promo video outputs (large / generated)
+promo/*.mp4
+promo/_audio.wav
+promo/__pycache__/

@@ -28,6 +28,8 @@ static class ConnectFlowTests
         Check(ConnectFlow.NormaliseCode("A7B2K") == null, "short code rejected");
         Check(ConnectFlow.NormaliseCode("A7B2K9X") == null, "long code rejected");
         Check(ConnectFlow.NormaliseCode("A7B2K!") == null, "symbols are not part of a code");
+        Check(ConnectFlow.NormaliseCode("ＡＢＣ１２３") == null, "full-width letters are not a code");
+        Check(ConnectFlow.NormaliseCode("设备A7B2K9") == "A7B2K9", "non-ASCII characters are ignored");
         return failures == 0 ? 0 : 1;
     }
 }

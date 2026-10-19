@@ -105,10 +105,11 @@ sealed class ConnectCard : Border
         if (problem != null) { BorderBrush = Red; subtitle.Foreground = Red; }
         subtitle.Text = problem ?? "请输入对方提供的 6 位连接密码，通过后以后不再需要。";
         var box = new TextBox { MaxLength = 6, Watermark = "连接密码", FontFamily = new FontFamily("Consolas"), FontSize = 16, LetterSpacing = 4, MinHeight = 34, HorizontalContentAlignment = HorizontalAlignment.Center };
+        Avalonia.Input.InputMethod.SetIsInputMethodEnabled(box, false);   // digits only
         box.PropertyChanged += (_, e) =>
         {
             if (e.Property != TextBox.TextProperty) return;
-            var clean = new string((box.Text ?? "").Where(char.IsDigit).ToArray());
+            var clean = new string((box.Text ?? "").Where(c => c is >= '0' and <= '9').ToArray());
             if (clean != box.Text) box.Text = clean;
         };
         void Submit() { if ((box.Text ?? "").Length == 6) result.TrySetResult(box.Text); }

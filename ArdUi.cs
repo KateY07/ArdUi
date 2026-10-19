@@ -34,6 +34,8 @@ static class Program
             { Console.WriteLine(IdentityStore.Prepare(args[1])); return 0; }
             if (args.Length == 4 && args[0] == "--verify-release")
             { Release.Verify(args[1],args[2],args[3]); return 0; }
+            if (args.Contains("--perm-test"))
+                return PermissionTests.Run().GetAwaiter().GetResult();
             if (args.Contains("--connect-flow-test"))
                 return ConnectFlowTests.Run();
             if (args.Contains("--self-test"))

@@ -36,11 +36,24 @@ static class Chrome
         BoxShadow = BoxShadows.Parse("0 6 18 0 #1A301E14"), VerticalAlignment = VerticalAlignment.Center,
     };
 
-    public static Border Disc(Control child) => new()
+    public static Border Disc(Control child)
     {
-        Child = child, Width = 32, Height = 32, CornerRadius = new CornerRadius(16), Background = GlassFill, BorderBrush = GlassEdge, BorderThickness = new Thickness(1),
-        BoxShadow = BoxShadows.Parse("0 4 12 0 #14301E14"), VerticalAlignment = VerticalAlignment.Center,
-    };
+        var rest = BoxShadows.Parse("0 4 12 0 #14301E14"); var lifted = BoxShadows.Parse("0 8 18 0 #26301E14");
+        var disc = new Border
+        {
+            Child = child, Width = 32, Height = 32, CornerRadius = new CornerRadius(16), Background = GlassFill, BorderBrush = GlassEdge, BorderThickness = new Thickness(1),
+            BoxShadow = rest, VerticalAlignment = VerticalAlignment.Center, RenderTransformOrigin = RelativePoint.Center,
+            Transitions = new Transitions
+            {
+                new BrushTransition { Property = Border.BackgroundProperty, Duration = Motion.Ms(140) },
+                new BoxShadowsTransition { Property = Border.BoxShadowProperty, Duration = Motion.Ms(160) },
+            },
+        };
+        // The glass brightens and lifts a little under the pointer.
+        disc.PointerEntered += (_, _) => { disc.Background = new SolidColorBrush(Color.FromArgb(235, 255, 255, 255)); disc.BoxShadow = lifted; };
+        disc.PointerExited += (_, _) => { disc.Background = GlassFill; disc.BoxShadow = rest; };
+        return disc;
+    }
 
     public static Button IconButton(string path, double size = 14, double box = 30)
     {

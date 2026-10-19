@@ -35,7 +35,7 @@ static class ConnectFlow
     // Device codes are six letters / digits; anything else is rejected before touching the network.
     public static string? NormaliseCode(string? text)
     {
-        var code = new string((text ?? "").Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
+        var code = new string((text ?? "").Where(c => c is >= '0' and <= '9' or >= 'A' and <= 'Z' or >= 'a' and <= 'z').ToArray()).ToUpperInvariant();   // ASCII only
         return code.Length == 6 && code.All(c => c is >= 'A' and <= 'Z' or >= '0' and <= '9') ? code : null;
     }
 

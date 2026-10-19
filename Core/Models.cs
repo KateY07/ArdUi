@@ -40,6 +40,8 @@ sealed class Peer
     public string Name { get; set; } = "";
     public SignedEnvelope? Grant { get; set; }
     public bool AutoConnect { get; set; } = true;
+    // A device accepted "only this once": it lives for the session, is never written to peers.json and is never reconnected.
+    [System.Text.Json.Serialization.JsonIgnore] public bool Temporary { get; set; }
     // Unix seconds of the last established session (0 = never); devices are listed most recently used first.
     public long LastConnectedAt { get; set; }
     public string Group { get; set; } = "";
@@ -58,8 +60,8 @@ sealed record PresenceReply(Dictionary<string, PresenceEntry> Peers);
 sealed record TicketReply(string Status, SignedEnvelope? Offer);
 sealed record PasswordRequest(bool Enroll, string Password);
 sealed record GrantReceipt(string ControllerEndpoint, string TargetEndpoint, string GrantId);
-sealed record ControllerGrant(string Code, SignedEnvelope Receipt);
-sealed record AdmissionReply(bool Accepted, string? Error, string? Token, int[] TcpPorts, int[] UdpPorts, SignedEnvelope? Grant);
+sealed record ControllerGrant(string Code, SignedEnvelope Receipt, int Perms = (int)Perm.All);   // grants stored before permissions existed deserialise as All
+sealed record AdmissionReply(bool Accepted, string? Error, string? Token, int[] TcpPorts, int[] UdpPorts, SignedEnvelope? Grant, int Perms = (int)Perm.All, bool Once = false);
 sealed record Pairing(string Code, string Endpoint, bool Incoming);
 sealed class AccessSettings
 {

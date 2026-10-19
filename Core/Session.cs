@@ -26,6 +26,12 @@ sealed class Session : IAsyncDisposable
     public double? BandwidthMbps { get; set; }
     public double? BandwidthLowerBoundMbps { get; set; }
     public ForwardHub? Hub { get; }
+    // Controller side: what the controlled machine allowed (from its admission reply). Host side: what this controller was granted.
+    public Perm Perms { get => Host ? (gateway?.Perms ?? Perm.All) : perms; set => perms = value; }
+    Perm perms = Perm.All;
+    // The authorisation lasts only for this session.
+    public bool Once { get; set; }
+    public bool OnceGranted => gateway?.Once == true;
     readonly Gateway? gateway;
     readonly string directory;
     readonly CancellationTokenSource stop = new();
@@ -63,6 +69,7 @@ sealed class Session : IAsyncDisposable
         {
             if(method=="frd-start")
             {
+                if(!gateway.FrdAllowed)throw new IOException("被控端未允许 FRD。");
                 if(frdHost!=null&&!frdHost.Live){await frdHost.DisposeAsync();frdHost=null;}
                 frdHost??=await FrdHosted.Start(FrdRuntime.Resolve(frdPath),gateway,Token,ct,ReportFrdError);
                 return frdHost.Offer;

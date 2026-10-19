@@ -94,6 +94,8 @@ sealed partial class MainWindow : Window
             if(e.Property==WindowStateProperty&&WindowState==WindowState.Minimized&&!previewMode&&!exiting)Dispatcher.UIThread.Post(HideToTray);
         };
         Title = "ArdUi " + Program.Version; Width = 400; Height = 650; MinWidth = 360; MinHeight = 340;
+        if(preview&&int.TryParse(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_WIDTH"),out var previewWidth)){Width=previewWidth;MinWidth=previewWidth;}
+        if(preview&&int.TryParse(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_HEIGHT"),out var previewHeight)){Height=previewHeight;MinHeight=previewHeight;}
         Icon=AppIcon.Create();
         // Borderless: the client area covers the title bar; the capsule bar below drags the window and carries settings / minimise / close.
         ExtendClientAreaToDecorationsHint=true;ExtendClientAreaChromeHints=Avalonia.Platform.ExtendClientAreaChromeHints.NoChrome;
@@ -140,7 +142,8 @@ sealed partial class MainWindow : Window
         connectingOverlay.Child=new StackPanel{Spacing=14,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center,
             Children={new Logo(72){Animate=true,HorizontalAlignment=HorizontalAlignment.Center},T_("正在连接网络…")}};
         connectingOverlay.IsVisible=!previewMode;
-        Content=new Grid{Children={Chrome.Backdrop(!previewMode),pageArea,connectingOverlay,bar,inviteOverlay,approvalOverlay,toastHost}};
+        titleBar=bar;SetupAttention(!previewMode&&Motion.Enabled);
+        Content=new Grid{Children={Chrome.Backdrop(!previewMode),scrim,pageArea,connectingOverlay,bar,inviteOverlay,approvalOverlay,toastHost}};
         ToolTip.SetTip(endpoint,"本机永久 EndpointId，用于首次连接时核对身份。");
         Opened += async (_,_) =>
         {
@@ -160,6 +163,7 @@ sealed partial class MainWindow : Window
                 directory=await Task.Run(()=>new DirectoryClient(engine!));
                 StartupTrace.Mark("directory client constructed");
                 directory.Confirm=async(pair,ct)=>await Dispatcher.UIThread.InvokeAsync(()=>ConfirmPair(pair,ct));
+                directory.ConfirmIncoming=async(pair,ct)=>await Dispatcher.UIThread.InvokeAsync(()=>ConfirmIncoming(pair,ct));
                 directory.Changed+=()=>Dispatcher.UIThread.Post(Refresh);
                 directory.Notice+=message=>Dispatcher.UIThread.Post(()=>Say(message));
                 allow.IsChecked=directory.Enabled;identityCard.IsVisible=directory.Enabled;allow.OnContent=allow.OffContent="允许被控";allow.IsEnabled=true;ready=true;directory.Start();passwordTimer.Start();UpdatePassword();Say("正在连接网络…");
@@ -180,11 +184,12 @@ sealed partial class MainWindow : Window
             allow.OnContent=allow.OffContent="允许被控";allow.IsEnabled=true;allow.IsChecked=false;Say("就绪");
             noDevices.IsVisible=false;
             // Representative rows for the headless preview: connected, online, connecting, offline, and a group.
-            var recents=new List<(Peer,bool?)>();
+            var recents=new List<(Peer,bool?)>();var samples=new List<Peer>();previewPeers=()=>samples.ToArray();
             void Sample(string id,string code,string name,string computer,string text,bool live,bool reachable)
             {
                 var sample=new Peer{Id=new string(id[0],64),Code=code,Name=name,ComputerName=computer};
                 if(recents.Count<5)recents.Add((sample,reachable));
+                samples.Add(sample);
                 if(live)
                 {
                     var card=Device(sample);SetStatus(card.Status,text);Dot(card.Indicator,text);card.Connect.IsVisible=false;card.Pause.IsVisible=true;
@@ -213,6 +218,12 @@ sealed partial class MainWindow : Window
             }
             controllers.Children.Add(new TextBlock{Text="尚无授权",Foreground=Muted});
             FillRecents(recents);
+            switch(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_FOCUS"))
+            {
+                case "typing":remote.Text="K4";OnCodeChanged();ApplyAttention(Attention.Typing);break;
+                case "armed":remote.Text="K4DD0B";OnCodeChanged();ApplyAttention(Attention.Typing);break;
+                case "hover":ApplyAttention(Attention.Hover);break;
+            }
             switch(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_FLOW"))
             {
                 case "startup":connectingOverlay.IsVisible=true;break;
@@ -240,13 +251,20 @@ sealed partial class MainWindow : Window
                 allow.IsChecked=true;identityCard.IsVisible=true;
                 if(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_INVITE")=="1")OpenInvite();
                 controllers.Children.Clear();
-                foreach(var code in new[]{"Q8X2ND","7TLM4P"})
+                foreach(var (code,perms) in new[]{("7TLM4P",Perm.Frd),("Q8X2ND",Perm.All),("K4DD0B",Perm.Frd|Perm.Files)})
                 {
-                    var line=new StackPanel{Orientation=Orientation.Horizontal,Spacing=8,Children={new TextBlock{Text=code+" · 5889f4c2…",VerticalAlignment=VerticalAlignment.Center},Button("撤销",()=>Task.CompletedTask)}};
-                    controllers.Children.Add(line);
+                    var revoke=new Button{Content="撤销",MinHeight=26,Padding=new Thickness(10,3),VerticalAlignment=VerticalAlignment.Center};
+                    var head=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto")};
+                    head.Children.Add(new StackPanel{Children={new TextBlock{Text=code,FontWeight=FontWeight.SemiBold,FontSize=14},new TextBlock{Text="5889f4c2…",Foreground=Muted,FontSize=11,FontFamily=new FontFamily("Consolas")}}});
+                    Grid.SetColumn(revoke,1);head.Children.Add(revoke);
+                    controllers.Children.Add(Card(new StackPanel{Spacing=8,Children={head,new PermissionPicker(perms,false)}}));
                 }
+                var liveRow=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto")};
+                liveRow.Children.Add(new StackPanel{VerticalAlignment=VerticalAlignment.Center,Children={new TextBlock{Text="7TLM4P  · 仅此一次",FontWeight=FontWeight.SemiBold,FontSize=14},new TextBlock{Text="FRD · IPv6 · 18 Mbps · 9 ms",Foreground=Muted,FontSize=12}}});
+                var dropPreview=new Button{Content=Look.Icon(Look.CrossPath,10,Brushes.White,2.4),Width=26,Height=26};dropPreview.Classes.Add("circlex");Grid.SetColumn(dropPreview,1);liveRow.Children.Add(dropPreview);
+                activeIncoming.Children.Add(Card(liveRow));incomingArea.IsVisible=true;
                 if(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_REQUEST")=="1")
-                    _=ConfirmPair(new Pairing("Q8X2ND",new string('a',64),true),CancellationToken.None);   // the real approval card
+                    _=ConfirmIncoming(new Pairing("Q8X2ND",new string('a',64),true),CancellationToken.None);   // the real approval card
             }
         }
         passwordTimer.Tick+=(_,_)=>{UpdatePassword();UpdateConnecting();};
@@ -308,6 +326,12 @@ sealed partial class MainWindow : Window
         void Quiet(string text)=>title.Inlines.Add(new Avalonia.Controls.Documents.Run("  "+text){FontWeight=FontWeight.Normal,FontSize=12,Foreground=Muted});
         if(hasNote&&peer.ComputerName.Length!=0&&peer.ComputerName!=peer.Name)Quiet(peer.ComputerName);
         if(primary!=peer.Code)Quiet(peer.Code);
+    }
+    // FRD and file sharing appear only when the controlled machine allowed them.
+    static void ShowLaunchers(DeviceDisplay view,bool live,Perm perms)
+    {
+        view.Launchers[0].IsVisible=live&&perms.HasFlag(Perm.Frd);
+        view.Launchers[1].IsVisible=live&&perms.HasFlag(Perm.Files);
     }
     // Status text of a device row. For a live session the path kind (IPv6 / IPv4 / Relay) is highlighted, then speed and latency.
     static string StatusOf(TextBlock t)=>t.Tag as string??t.Text??"";
@@ -437,7 +461,7 @@ sealed partial class MainWindow : Window
             var parked=IsParked(peer);ApplyDensity(view,parked);
             view.Connect.IsVisible=!live&&!parked;view.Connect.Content=busy?"连接中…":"连接";
             view.Connect.Opacity=reachable?1:.4;view.Connect.IsHitTestVisible=reachable&&!busy;
-            foreach(var launcher in view.Launchers)launcher.IsVisible=live;
+            ShowLaunchers(view,live,engine.Outgoing.TryGetValue(peer.Id,out var allowedSession)?allowedSession.Perms:Perm.All);
             view.Pause.IsVisible=live||directory?.IsReconnecting(peer.Id)==true;
             Pulse(view.Indicator,stateText.StartsWith("正在",StringComparison.Ordinal));
             ToolTip.SetTip(view.Title,title+"\n"+peer.Id);ToolTip.SetTip(view.Status,reachable?stateText:stateText+" · 对方在线后才能连接");
@@ -451,7 +475,7 @@ sealed partial class MainWindow : Window
             if(live&&!pendingCards.ContainsKey(peer.Code))liveIds.Add(peer.Id);   // its placeholder is still on screen
             FillTitle(hv.Title,peer);SetStatus(hv.Status,StatusOf(dv.Status));Dot(hv.Indicator,StatusOf(dv.Status));
             hv.Connect.IsVisible=false;
-            foreach(var launcher in hv.Launchers)launcher.IsVisible=live;
+            ShowLaunchers(hv,live,liveSession?.Perms??Perm.All);
             hv.Pause.IsVisible=dv.Pause.IsVisible;
         }
         var sessionKey=string.Join("|",liveIds);
@@ -469,17 +493,29 @@ sealed partial class MainWindow : Window
         foreach(var session in engine.Incoming.Values.Where(s=>s.Live))
         {
             var code=directory?.Controllers.FirstOrDefault(p=>p.Key==session.PeerId).Value?.Code??session.PeerId[..8];
-            var row=new StackPanel{Orientation=Orientation.Horizontal,Spacing=8,Children={new TextBlock{Text=code+" · "+engine.Status.GetValueOrDefault(session.PeerId,"正在控制"),VerticalAlignment=VerticalAlignment.Center},Button("断开",async()=>await engine.Disconnect(session.PeerId))}};
-            activeIncoming.Children.Add(row);
+            var info=new StackPanel{VerticalAlignment=VerticalAlignment.Center,Children=
+            {
+                new TextBlock{Text=code+(session.OnceGranted?"  · 仅此一次":""),FontWeight=FontWeight.SemiBold,FontSize=14},
+                new TextBlock{Text=Permissions.Describe(session.Perms)+" · "+engine.Status.GetValueOrDefault(session.PeerId,"正在控制"),Foreground=Muted,FontSize=12,TextTrimming=TextTrimming.CharacterEllipsis},
+            }};
+            var drop=new Button{Content=Look.Icon(Look.CrossPath,10,Brushes.White,2.4),Width=26,Height=26,VerticalAlignment=VerticalAlignment.Center};drop.Classes.Add("circlex");
+            ToolTip.SetTip(drop,"断开对方");var sessionPeer=session.PeerId;drop.Click+=async(_,_)=>await Guard(async()=>await engine.Disconnect(sessionPeer));
+            var line=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto")};line.Children.Add(info);Grid.SetColumn(drop,1);line.Children.Add(drop);
+            activeIncoming.Children.Add(Card(line));
         }
         incomingArea.IsVisible=activeIncoming.Children.Count!=0;
         controllers.Children.Clear();
         if(directory!=null)foreach(var pair in directory.Controllers)
         {
-            var endpointId=pair.Key;var row=new StackPanel{Orientation=Orientation.Horizontal,Spacing=8};
-            var controllerText=new TextBlock{Text=pair.Value.Code+" · "+endpointId[..8]+"…",VerticalAlignment=VerticalAlignment.Center};
-            ToolTip.SetTip(controllerText,endpointId);row.Children.Add(controllerText);
-            row.Children.Add(Button("撤销",async()=>await directory.Revoke(endpointId)));controllers.Children.Add(row);
+            var endpointId=pair.Key;
+            var revoke=new Button{Content="撤销",MinHeight=26,Padding=new Thickness(10,3),VerticalAlignment=VerticalAlignment.Center};
+            revoke.Click+=async(_,_)=>await Guard(async()=>await directory.Revoke(endpointId));
+            var head=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto")};
+            var headText=new StackPanel{Children={new TextBlock{Text=pair.Value.Code,FontWeight=FontWeight.SemiBold,FontSize=14},new TextBlock{Text=endpointId[..8]+"…",Foreground=Muted,FontSize=11,FontFamily=new FontFamily("Consolas")}}};
+            ToolTip.SetTip(headText,endpointId);head.Children.Add(headText);Grid.SetColumn(revoke,1);head.Children.Add(revoke);
+            var picker=new PermissionPicker(Permissions.Parse(pair.Value.Perms),false);
+            picker.Changed+=async value=>await Guard(()=>directory.SetControllerPerms(endpointId,value));
+            controllers.Children.Add(Card(new StackPanel{Spacing=8,Children={head,picker}}));
         }
         if(controllers.Children.Count==0)controllers.Children.Add(new TextBlock{Text="尚无授权",Foreground=Muted});
         if(directory!=null)
@@ -488,7 +524,7 @@ sealed partial class MainWindow : Window
             identityCard.IsVisible=directory.Enabled;
             if(!directory.Enabled)CloseInvite();
             // The invitation worked: a new device was authorised while the overlay was open.
-            if(inviteOverlay.IsVisible&&directory.Controllers.Length>inviteControllers){CloseInvite();Say("邀请成功：新设备已获得授权。");}
+            if(inviteOverlay.IsVisible&&(directory.Controllers.Length>inviteControllers||engine.Incoming.Count>inviteIncoming)){CloseInvite();Say("邀请成功：新设备已获得授权。");}
             netDot.Fill=directory.Online?Online:Relay;netText.Text=directory.Online?"在线":"正在连接网络…";
             UpdatePassword();UpdateConnecting();
             Title="ArdUi "+Program.Version+(directory.Enabled&&directory.Code.Length!=0?" · "+directory.Code:"");
@@ -502,20 +538,20 @@ sealed partial class MainWindow : Window
     }
     // The invitation overlay: first-time password with an authenticator-style ring, the device ID always visible for checking.
     readonly Border inviteOverlay=new(){Background=Brush.Parse("#8C1F1E1D"),IsVisible=false};
-    readonly TextBlock invitePassword=new(){Text="••••••",FontFamily=new FontFamily("Consolas"),FontSize=34,FontWeight=FontWeight.SemiBold,LetterSpacing=6,VerticalAlignment=VerticalAlignment.Center};
+    readonly TextBlock invitePassword=new(){Text="••••••",FontFamily=new FontFamily("Consolas"),FontSize=28,FontWeight=FontWeight.SemiBold,LetterSpacing=4,VerticalAlignment=VerticalAlignment.Center};
     readonly TextBlock inviteSeconds=new(){FontSize=15,FontWeight=FontWeight.SemiBold,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center};
     readonly Avalonia.Controls.Shapes.Arc inviteArc=new(){StrokeThickness=6,StartAngle=-90,SweepAngle=360,Margin=new Thickness(3),StrokeLineCap=PenLineCap.Round};
     readonly Button inviteRefresh=new(){Content="显示新密码",IsVisible=false,HorizontalAlignment=HorizontalAlignment.Left};
     readonly TextBlock inviteCode=new(){FontSize=24,FontWeight=FontWeight.SemiBold,LetterSpacing=3,FontFamily=new FontFamily("Consolas"),VerticalAlignment=VerticalAlignment.Center};
-    long inviteMinute;int inviteControllers;
+    long inviteMinute;int inviteControllers,inviteIncoming;
     Border BuildInvite()
     {
         inviteArc.Stroke=Look.Accent;
-        var ring=new Grid{Width=76,Height=76,Children={new Ellipse{Stroke=Look.Ghost,StrokeThickness=6,Margin=new Thickness(3)},inviteArc,inviteSeconds}};
+        var ring=new Grid{Width=64,Height=64,Children={new Ellipse{Stroke=Look.Ghost,StrokeThickness=6,Margin=new Thickness(3)},inviteArc,inviteSeconds}};
         inviteRefresh.Classes.Add("primary");
         inviteRefresh.Click+=(_,_)=>{inviteMinute=DateTimeOffset.UtcNow.ToUnixTimeSeconds()/60;UpdatePassword();};
         var passwordBlock=new StackPanel{Spacing=4,VerticalAlignment=VerticalAlignment.Center,Children={new TextBlock{Text="连接密码",Foreground=Muted,FontSize=12},invitePassword,inviteRefresh}};
-        var passwordRow=new StackPanel{Orientation=Orientation.Horizontal,Spacing=20,Children={ring,passwordBlock}};
+        var passwordRow=new StackPanel{Orientation=Orientation.Horizontal,Spacing=14,Children={ring,passwordBlock}};
         endpoint.Width=double.NaN;endpoint.Height=double.NaN;endpoint.FontSize=12;endpoint.TextWrapping=TextWrapping.Wrap;endpoint.MinHeight=0;
         var copy=Button("一键复制",async()=>{await Clipboard!.SetTextAsync(InviteText());Toast("已复制邀请信息");});copy.Content=Look.IconText(Look.CopyPath,"一键复制");copy.HorizontalAlignment=HorizontalAlignment.Left;
         var card=Card(WithCloseIcon(new StackPanel{Spacing=14,Children=
@@ -527,13 +563,14 @@ sealed partial class MainWindow : Window
             new StackPanel{Spacing=4,Children={new TextBlock{Text="EndpointId（供对方核对）",Foreground=Muted,FontSize=12},endpoint}},
             copy
         }},CloseInvite));
-        card.Background=Look.CardSolid;card.BorderBrush=Look.Line;card.Padding=new Thickness(24);card.Width=460;card.HorizontalAlignment=HorizontalAlignment.Center;card.VerticalAlignment=VerticalAlignment.Center;
-        inviteOverlay.Child=card;return card;
+        // The card follows the window width (down to the minimum) and scrolls when the window is short.
+        card.Background=Look.CardSolid;card.BorderBrush=Look.Line;card.Padding=new Thickness(20);card.MaxWidth=460;card.Margin=new Thickness(14);card.HorizontalAlignment=HorizontalAlignment.Stretch;card.VerticalAlignment=VerticalAlignment.Center;
+        inviteOverlay.Child=new ScrollViewer{VerticalAlignment=VerticalAlignment.Center,VerticalScrollBarVisibility=Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,Content=card};return card;
     }
     void OpenInvite()
     {
         if(!previewMode&&(directory==null||!directory.Enabled||directory.Code.Length==0))throw new InvalidOperationException("请先允许被控。");
-        inviteMinute=DateTimeOffset.UtcNow.ToUnixTimeSeconds()/60;inviteControllers=directory?.Controllers.Length??0;
+        inviteMinute=DateTimeOffset.UtcNow.ToUnixTimeSeconds()/60;inviteControllers=directory?.Controllers.Length??0;inviteIncoming=engine?.Incoming.Count??0;
         inviteCode.Text=directory?.Code??machine.Text;inviteOverlay.IsVisible=true;UpdatePassword();
     }
     // Every overlay closes the same way: a quiet cross in its top-right corner.
@@ -593,6 +630,7 @@ sealed partial class MainWindow : Window
         {
             _=FrdRuntime.Resolve(engine!.Settings.FrdPath);
             await directory!.Connect(peer.Code,"",enrolling:false);
+            if(!engine.Outgoing[peer.Id].Perms.HasFlag(Perm.Frd))throw new IOException("被控端未允许 FRD。");
             await engine.Outgoing[peer.Id].OpenFrd(CancellationToken.None);
             Say("FRD 已启动，正在通过加密连接建立桌面。");
         }));
@@ -600,6 +638,7 @@ sealed partial class MainWindow : Window
         launchers.Add(Add("文件",()=>Connecting(peer,async () =>
         {
             await directory!.Connect(peer.Code,"",enrolling:false);
+            if(!engine!.Outgoing[peer.Id].Perms.HasFlag(Perm.Files))throw new IOException("被控端未允许文件共享。");
             var share=await ShareDetails();
             var path=await WindowsShares.Map(engine!.Outgoing[peer.Id],share,CancellationToken.None);
             await Launch("explorer.exe",path);
@@ -611,7 +650,9 @@ sealed partial class MainWindow : Window
         More("远程桌面（RDP）",()=>Connecting(peer,async () =>
         {
             await directory!.Connect(peer.Code,"",enrolling:false);
-            var session=engine!.Outgoing[peer.Id];var bridge=session.Forward(3389);
+            var session=engine!.Outgoing[peer.Id];
+            if(!session.Perms.HasFlag(Perm.Rdp))throw new IOException("被控端未允许 RDP。");
+            var bridge=session.Forward(3389);
             await Launch("mstsc.exe","/v:127.0.0.1:"+bridge.Port);
         }));
         More("EndpointId",async()=>{await Clipboard!.SetTextAsync(peer.Id);Toast("已复制 EndpointId");});
@@ -653,25 +694,36 @@ sealed partial class MainWindow : Window
         if(seconds<=0){undoPeer=null;undoTimer.Stop();undoBar.IsVisible=false;return;}
         undoText.Text=$"已移除 {undoPeer.Code} · {seconds} 秒内可撤销";
     }
+    // The approval card for a device that asks for control of this machine: only this once (the main choice), accept and
+    // trust, or refuse - with the permissions to give (FRD by default).
+    async Task<Decision> ConfirmIncoming(Pairing pair,CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var result=new TaskCompletionSource<Decision>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if(!previewMode)ShowFromTray();   // the approval prompt lives in this window, which may be hidden in the tray
+        var picker=new PermissionPicker(Permissions.Default,true);
+        var once=new Button{Content="仅接受这一次"};once.Classes.Add("primary");
+        var trust=new Button{Content="接受并信任"};
+        var no=new Button{Content="拒绝"};
+        once.Click+=(_,_)=>result.TrySetResult(new Decision(true,true,picker.Value));
+        trust.Click+=(_,_)=>result.TrySetResult(new Decision(true,false,picker.Value));
+        no.Click+=(_,_)=>result.TrySetResult(Decision.Rejected);
+        var row=new StackPanel{Spacing=10};
+        row.Children.Add(new TextBlock{Text=$"{pair.Code} 请求获得本机控制权",FontSize=17,FontWeight=FontWeight.SemiBold,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,24,0)});
+        row.Children.Add(new TextBlock{Text="请通过电话或当面，与对方 ArdUi 中显示的完整 EndpointId 逐字核对。",Foreground=Muted,TextWrapping=TextWrapping.Wrap});
+        row.Children.Add(new TextBox{Text=pair.Endpoint,IsReadOnly=true,TextWrapping=TextWrapping.Wrap,FontFamily=new FontFamily("Consolas"),FontSize=11});
+        row.Children.Add(new TextBlock{Text="允许对方使用",Foreground=Muted,FontSize=12,FontWeight=FontWeight.SemiBold});
+        row.Children.Add(picker);
+        row.Children.Add(new TextBlock{Text="默认只允许 FRD。“仅接受这一次”不保存授权，断开后对方需要重新申请；“接受并信任”会保存，之后可在 设置 → 被控与授权 中修改。",Foreground=Muted,FontSize=11,TextWrapping=TextWrapping.Wrap});
+        row.Children.Add(new StackPanel{Orientation=Orientation.Horizontal,Spacing=8,Children={once,trust,no}});
+        var pendingCard=Card(WithCloseIcon(row,()=>result.TrySetResult(Decision.Rejected)));
+        pendingCard.Background=Look.CardSolid;pendingCard.BorderBrush=Look.Line;pendingCard.Padding=new Thickness(20);pendingIncoming.Children.Add(pendingCard);UpdateApproval();
+        using var pendingCancel=ct.Register(()=>result.TrySetCanceled(ct));
+        try{return await result.Task;}finally{pendingIncoming.Children.Remove(pendingCard);UpdateApproval();}
+    }
     async Task<bool> ConfirmPair(Pairing pair,CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        if(pair.Incoming)
-        {
-            var result=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            if(!previewMode)ShowFromTray();   // the approval prompt lives in this window, which may be hidden in the tray
-            var row=new StackPanel{Spacing=6};
-            row.Children.Add(new TextBlock{Text=$"{pair.Code} 请求获得本机控制权",FontSize=17,FontWeight=FontWeight.SemiBold});
-            row.Children.Add(new TextBlock{Text="请通过电话或当面，与对方 ArdUi 中显示的完整 EndpointId 逐字核对。",Foreground=Muted,TextWrapping=TextWrapping.Wrap});
-            row.Children.Add(new TextBox{Text=pair.Endpoint,IsReadOnly=true,TextWrapping=TextWrapping.Wrap,FontFamily=new FontFamily("Consolas"),FontSize=11});
-            var pendingButtons=new StackPanel{Orientation=Orientation.Horizontal,Spacing=8};
-            var yes=new Button{Content="是，已核对 EndpointId"};var no=new Button{Content="否"};yes.Classes.Add("primary");
-            yes.Click+=(_,_)=>result.TrySetResult(true);no.Click+=(_,_)=>result.TrySetResult(false);
-            pendingButtons.Children.Add(yes);pendingButtons.Children.Add(no);row.Children.Add(pendingButtons);
-            var pendingCard=Card(WithCloseIcon(row,()=>result.TrySetResult(false)));pendingCard.Background=Look.CardSolid;pendingCard.BorderBrush=Look.Line;pendingCard.Padding=new Thickness(22);row.Spacing=10;pendingIncoming.Children.Add(pendingCard);UpdateApproval();
-            using var pendingCancel=ct.Register(()=>result.TrySetCanceled(ct));
-            try{return await result.Task;}finally{pendingIncoming.Children.Remove(pendingCard);UpdateApproval();}
-        }
         var dialog=new Window { Title="首次连接：核对 EndpointId",Width=620,Height=420,CanResize=false,WindowStartupLocation=WindowStartupLocation.CenterOwner };
         var content=new StackPanel { Margin=new Thickness(24),Spacing=14 };
         content.Children.Add(Label((pair.Incoming ? "设备请求访问本机：" : "即将连接设备：")+pair.Code,18));

@@ -90,7 +90,7 @@ sealed class DirectoryClient : IAsyncDisposable
     {
         lock(sync)
         {
-            if(!access.Enabled||!access.Controllers.ContainsKey(controller))throw new IOException("当前已无被控授权。");
+            if(!access.Enabled||!(access.Controllers.ContainsKey(controller)||temporary.ContainsKey(controller)&&engine.Incoming.ContainsKey(controller)))throw new IOException("当前已无被控授权。");
             return Sign("/transit-approval/v2",new{route,a=controller,b=engine.Id,c=candidate,aSession,bSession,expires=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+90});
         }
     }
@@ -293,14 +293,18 @@ sealed class DirectoryClient : IAsyncDisposable
             try { await Call<JsonElement>($"/api/v1/tickets/{ticket.Id}/reject", new { }, stop.Token); } catch { }
         }
     }
-    async Task<SignedEnvelope?> AuthorizePassword(ServerTicket ticket, PasswordRequest request, CancellationToken ct)
+    // The person at this machine decides: accept at all, only this once, and which permissions the controller gets.
+    public Func<Pairing, CancellationToken, Task<Decision>>? ConfirmIncoming;
+    // Controllers accepted only this once: valid while their session lives, never saved.
+    readonly Dictionary<string, ControllerGrant> temporary = new();
+    async Task<Authorization?> AuthorizePassword(ServerTicket ticket, PasswordRequest request, CancellationToken ct)
     {
         long revision;
         lock(sync)
         {
             revision=revocations.GetValueOrDefault(ticket.ControllerEndpoint);
             if(!access.Enabled) return null;
-            if(!request.Enroll) return access.Controllers.TryGetValue(ticket.ControllerEndpoint,out var saved) ? saved.Receipt : null;
+            if(!request.Enroll) return access.Controllers.TryGetValue(ticket.ControllerEndpoint,out var saved) ? new Authorization(saved.Receipt,Permissions.Parse(saved.Perms),false) : null;
         }
         lock (sync)
         {
@@ -325,15 +329,19 @@ sealed class DirectoryClient : IAsyncDisposable
         try
         {
             ct.ThrowIfCancellationRequested();
-            lock (sync) if (access.Enabled && access.Controllers.TryGetValue(ticket.ControllerEndpoint,out var known)) return known.Receipt;
-            if (Confirm == null || !await Confirm(new Pairing(ticket.ControllerCode, ticket.ControllerEndpoint, true), ct)) return null;
+            lock (sync) if (access.Enabled && access.Controllers.TryGetValue(ticket.ControllerEndpoint,out var known)) return new Authorization(known.Receipt,Permissions.Parse(known.Perms),false);
+            var decision = ConfirmIncoming == null ? Decision.Rejected : await ConfirmIncoming(new Pairing(ticket.ControllerCode, ticket.ControllerEndpoint, true), ct);
+            if (!decision.Accepted) return null;
             ct.ThrowIfCancellationRequested();
             lock (sync)
             {
                 if (!access.Enabled||revocations.GetValueOrDefault(ticket.ControllerEndpoint)!=revision) return null;
                 var receipt = Sign("/grant/v1",new GrantReceipt(ticket.ControllerEndpoint,engine.Id,Guid.NewGuid().ToString("N")));
-                access.Controllers[ticket.ControllerEndpoint] = new ControllerGrant(ticket.ControllerCode,receipt); Save(); Changed?.Invoke();
-                return receipt;
+                var grant = new ControllerGrant(ticket.ControllerCode, receipt, (int)decision.Perms);
+                foreach (var gone in temporary.Keys.Where(k => !engine.Incoming.ContainsKey(k)).ToArray()) temporary.Remove(gone);
+                if (decision.Once) temporary[ticket.ControllerEndpoint] = grant;
+                else { access.Controllers[ticket.ControllerEndpoint] = grant; Save(); Changed?.Invoke(); }
+                return new Authorization(receipt, decision.Perms, decision.Once);
             }
         }
         finally { confirmations.Release(); }
@@ -382,7 +390,7 @@ sealed class DirectoryClient : IAsyncDisposable
             {
                 var peer=engine.State.Peers.Single(p=>p.Code==machine);
                 peer.LastConnectedAt=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                if(!background)peer.AutoConnect=true;   // only a connection the user asked for is kept alive afterwards
+                if(!background&&!peer.Temporary)peer.AutoConnect=true;   // only a connection the user asked for is kept alive afterwards (never a one-time device)
                 engine.State.Save();
             }
         });
@@ -440,9 +448,21 @@ sealed class DirectoryClient : IAsyncDisposable
         finally { if (!transferred) try { Directory.Delete(dir, true); } catch (IOException) { } }
     }
     public KeyValuePair<string,ControllerGrant>[] Controllers { get { lock(sync) return access.Controllers.ToArray(); } }
+    // Changing what a saved controller may use ends its running session; it reconnects with the new permissions.
+    public async Task SetControllerPerms(string endpoint, Perm perms)
+    {
+        lock(sync)
+        {
+            if(!access.Controllers.TryGetValue(endpoint,out var grant))throw new IOException("该设备已没有授权。");
+            access.Controllers[endpoint]=grant with{Perms=(int)perms};Save();
+        }
+        var live=engine.Incoming.ContainsKey(endpoint);
+        if(live){await engine.DropIncoming(endpoint);engine.SetStatus(endpoint,"权限已更改，对方需要重新连接");}
+        Changed?.Invoke();
+    }
     public async Task Revoke(string endpoint)
     {
-        lock(sync){revocations[endpoint]=revocations.GetValueOrDefault(endpoint)+1;access.Controllers.Remove(endpoint);Save();}
+        lock(sync){revocations[endpoint]=revocations.GetValueOrDefault(endpoint)+1;access.Controllers.Remove(endpoint);temporary.Remove(endpoint);Save();}
         await engine.DropIncoming(endpoint);
         Changed?.Invoke();
     }

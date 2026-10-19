@@ -3,6 +3,7 @@ using Avalonia.Controls.Presenters;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Layout;
+using Avalonia.Media.Transformation;
 using Avalonia.Styling;
 
 namespace ArdUi;
@@ -16,7 +17,7 @@ static class Look
         Ghost = Brush.Parse("#EFEDE4"), GhostHover = Brush.Parse("#E7E4D8"), GhostPressed = Brush.Parse("#DDD9CA"),
         OnlineDeep = Brush.Parse("#2F7D4F"), OnlineHalo = Brush.Parse("#CFE8D6"), Online = Brush.Parse("#5E9E6E"), Relay = Brush.Parse("#D79A3B"), Idle = Brush.Parse("#BDBAAE");
     public static readonly BoxShadows CardShadow = BoxShadows.Parse("0 6 18 0 #14301E14, 0 1 2 0 #0A000000");
-    static readonly TimeSpan Fast = TimeSpan.FromMilliseconds(130);
+    static readonly TimeSpan Fast = Motion.Ms(130);
 
     static Transitions Fade(AvaloniaProperty brush) => new() { new BrushTransition { Property = brush, Duration = Fast } };
 
@@ -79,9 +80,20 @@ static class Look
                 new Setter(TemplatedControl.FontSizeProperty, 12.0), new Setter(Layoutable.MinHeightProperty, 30.0),
                 new Setter(InputElement.CursorProperty, new Cursor(StandardCursorType.Hand)),
                 new Setter(Visual.OpacityProperty, 1.0),
-                new Setter(Animatable.TransitionsProperty, new Transitions { new DoubleTransition { Property = Visual.OpacityProperty, Duration = Fast } }),
+                new Setter(Visual.RenderTransformOriginProperty, RelativePoint.Center),
+                new Setter(Animatable.TransitionsProperty, new Transitions
+                {
+                    new DoubleTransition { Property = Visual.OpacityProperty, Duration = Fast },
+                    new TransformOperationsTransition { Property = Visual.RenderTransformProperty, Duration = Motion.Ms(120), Easing = new Avalonia.Animation.Easings.CubicEaseOut() },
+                }),
             }
         });
+        // Pressing a button gives a little: it sinks slightly and springs back on release.
+        styles.Add(new Style(x => x.OfType<Button>().Class(":pressed"))
+        { Setters = { new Setter(Visual.RenderTransformProperty, TransformOperations.Parse("scale(0.95)")) } });
+        // Keyboard focus shows an accent ring; mouse clicks do not.
+        Presenter(styles, x => x.OfType<Button>().Class(":focus-visible").Template().OfType<ContentPresenter>().Name("PART_ContentPresenter"),
+            new Setter(ContentPresenter.BorderBrushProperty, Accent), new Setter(ContentPresenter.BorderThicknessProperty, new Thickness(2)));
         Presenter(styles, x => x.OfType<Button>().Template().OfType<ContentPresenter>().Name("PART_ContentPresenter"),
             new Setter(Animatable.TransitionsProperty, Fade(ContentPresenter.BackgroundProperty)));
         Presenter(styles, x => x.OfType<Button>().Class(":pointerover").Template().OfType<ContentPresenter>().Name("PART_ContentPresenter"),
@@ -110,6 +122,8 @@ static class Look
             new Setter(ContentPresenter.BackgroundProperty, Brush.Parse("#ADAA9E")));
         Presenter(styles, x => x.OfType<Button>().Class("circlex").Class(":pressed").Template().OfType<ContentPresenter>().Name("PART_ContentPresenter"),
             new Setter(ContentPresenter.BackgroundProperty, Brush.Parse("#9A978B")));
+        styles.Add(new Style(x => x.OfType<Button>().Class("circlex").Class(":pressed"))
+        { Setters = { new Setter(Visual.RenderTransformProperty, TransformOperations.Parse("scale(0.86)")) } });
 
         // Inputs: soft border, rounded, accent ring while focused.
         styles.Add(new Style(x => x.OfType<TextBox>())
@@ -144,4 +158,6 @@ static class Look
     }
 
     public static Transitions BrushFade(AvaloniaProperty property) => Fade(property);
+    // A short transform transition (lift on hover, nudge, turn): used with RenderTransform = TransformOperations.Parse("...").
+    public static Transitions Move(int milliseconds = 180) => new() { new TransformOperationsTransition { Property = Visual.RenderTransformProperty, Duration = Motion.Ms(milliseconds), Easing = new Avalonia.Animation.Easings.CubicEaseOut() } };
 }

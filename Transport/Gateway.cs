@@ -29,10 +29,21 @@ sealed class Gateway : IAsyncDisposable
     IPEndPoint? overlayRemote;
     public async Task SendOverlayUdp(byte[] data,CancellationToken ct)
     {if(overlayRemote is{} remote)await udp.SendAsync(Wire.Packet(token,65535,data),remote,ct);}
-    readonly Func<PasswordRequest, CancellationToken, Task<SignedEnvelope?>>? authenticate;
-    public Gateway(Settings settings, byte[] token, Func<PasswordRequest, CancellationToken, Task<SignedEnvelope?>>? authenticate = null)
+    readonly Func<PasswordRequest, CancellationToken, Task<Authorization?>>? authenticate;
+    // What the controller of this gateway may reach: set when it is authorised (everything configured until then, as before).
+    int[] tcpAllowed, udpAllowed;
+    Perm perms = Perm.All;
+    public Perm Perms => perms;
+    public bool Once { get; private set; }
+    public bool FrdAllowed => perms.HasFlag(Perm.Frd);
+    void Apply(Perm value)
+    {
+        perms = value; tcpAllowed = Permissions.TcpPorts(settings, value); udpAllowed = Permissions.UdpPorts(settings, value);
+    }
+    public Gateway(Settings settings, byte[] token, Func<PasswordRequest, CancellationToken, Task<Authorization?>>? authenticate = null)
     {
         this.settings = settings; this.token = token; this.authenticate = authenticate;
+        tcpAllowed = settings.TcpPorts; udpAllowed = settings.UdpPorts;
         listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
         Port = ((IPEndPoint)listener.LocalEndpoint).Port;
         try { udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, Port)); }
@@ -73,12 +84,14 @@ sealed class Gateway : IAsyncDisposable
                 {
                     handshake.CancelAfter(TimeSpan.FromMinutes(5));
                     var request = await Wire.ReadJson<PasswordRequest>(stream, handshake.Token);
-                    var grant = await authenticate(request, handshake.Token);
-                    var accepted = grant != null;
+                    var authorization = await authenticate(request, handshake.Token);
+                    var accepted = authorization != null;
+                    if (authorization != null) { Apply(authorization.Perms); Once = authorization.Once; }
                     await Wire.WriteJson(stream, new AdmissionReply(accepted,
                         accepted ? null : ConnectFlow.RejectedText,
                         accepted ? Convert.ToHexString(token) : null,
-                        accepted ? settings.TcpPorts : [], accepted ? settings.UdpPorts : [], grant), handshake.Token);
+                        accepted ? tcpAllowed : [], accepted ? udpAllowed : [], authorization?.Grant,
+                        accepted ? (int)perms : 0, accepted && Once), handshake.Token);
                     if (accepted) Attached?.Invoke();
                     return;
                 }
@@ -93,7 +106,7 @@ sealed class Gateway : IAsyncDisposable
                     var block=new byte[8192];for(var sent=0;sent<Wire.BandwidthProbeSize;sent+=block.Length)await stream.WriteAsync(block,handshake.Token);
                     return;
                 }
-                if (command != 1 || !settings.TcpPorts.Contains((int)port)&&!frdTcp.ContainsKey(port))
+                if (command != 1 || !tcpAllowed.Contains((int)port)&&!frdTcp.ContainsKey(port))
                 { await stream.WriteAsync(new byte[] { 2 }, handshake.Token); return; }
                 using var target = new TcpClient { NoDelay = true };
                 try { await target.ConnectAsync(IPAddress.Loopback, port, handshake.Token); }
@@ -125,7 +138,7 @@ sealed class Gateway : IAsyncDisposable
                     Attached?.Invoke();
                     continue;
                 }
-                if (!settings.UdpPorts.Contains(port)&&!frdUdp.ContainsKey(port)) continue;
+                if (!udpAllowed.Contains(port)&&!frdUdp.ContainsKey(port)) continue;
                 var key = $"{packet.RemoteEndPoint}/{port}";
                 if (!udpFlows.TryGetValue(key, out var flow))
                 {

@@ -96,19 +96,26 @@ sealed class Engine : IAsyncDisposable
         }
         var sessions=host ? Incoming : Outgoing;
         if(sessions.TryRemove(new KeyValuePair<string,Session>(session.PeerId,session)))
-        { await session.DisposeAsync(); Update(session.PeerId,"连接已断开"); }
+        { await session.DisposeAsync(); if(!host)ForgetTemporary(session.PeerId); Update(session.PeerId,"连接已断开"); }
+    }
+    // A device accepted only once disappears with its session.
+    void ForgetTemporary(string id)
+    {
+        bool temporary;lock(State.Peers)temporary=State.Peers.Find(p=>p.Id==id)?.Temporary==true;
+        if(temporary)State.Remove(id);
     }
     public async Task Disconnect(string id)
     {
         operations.Cancel("out:"+id);operations.Cancel("in:"+id);
         if(Outgoing.TryRemove(id,out var outgoing))await outgoing.DisposeAsync();
         if(Incoming.TryRemove(id,out var incoming))await incoming.DisposeAsync();
-        Update(id,"未连接");
+        ForgetTemporary(id);Update(id,"未连接");
     }
     public async Task DropOutgoing(string id)
     {
         operations.Cancel("out:"+id);
-        if(Outgoing.TryRemove(id,out var session))await session.DisposeAsync();Update(id,"未连接");
+        if(Outgoing.TryRemove(id,out var session))await session.DisposeAsync();
+        ForgetTemporary(id);Update(id,"未连接");
     }
     public async Task RemoveOutgoing(string id)
     {
@@ -162,7 +169,7 @@ sealed class Engine : IAsyncDisposable
         }
         throw new IOException("ARD 网络预检连续失败。",last);
     }
-    public async Task<string> AcceptServerSession(ServerTicket ticket, Func<PasswordRequest, CancellationToken, Task<SignedEnvelope?>> verifyPassword, CancellationToken ct)
+    public async Task<string> AcceptServerSession(ServerTicket ticket, Func<PasswordRequest, CancellationToken, Task<Authorization?>> verifyPassword, CancellationToken ct)
     {
         using var operation=await operations.Enter("in:"+ticket.ControllerEndpoint,ct);ct=operation.Token;
         string? dir = null; Gateway? gateway = null; Child? child = null; Session? session = null;
@@ -232,9 +239,10 @@ sealed class Engine : IAsyncDisposable
             if (admission.Grant == null) throw new IOException("缺少被控端签名的授权。");
             var grant = DirectoryClient.Verify<GrantReceipt>(admission.Grant, "/grant/v1", target.Endpoint, false);
             if (grant.ControllerEndpoint != Id || grant.TargetEndpoint != target.Endpoint) throw new IOException("授权未绑定当前设备。");
-            operation.Commit(()=>peer=State.GetOrAdd(target.Endpoint,target.Code,admission.Grant));
+            operation.Commit(()=>peer=State.GetOrAdd(target.Endpoint,target.Code,admission.Grant,admission.Once));
             var hub=hubs.GetOrAdd(peer.Id,_=>new ForwardHub());
             session = new Session(peer.Id, peer.Address, port, Convert.FromHexString(admission.Token), admission.TcpPorts, admission.UdpPorts, child, dir, hub:hub);
+            session.Perms=Permissions.Parse(admission.Perms);session.Once=admission.Once;
             await session.EnableOverlay(ct);ConfigureOverlay(session);
             using (await session.OpenTcp(0, ct)) { }
             operation.Commit(()=>

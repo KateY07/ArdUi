@@ -24,7 +24,7 @@ sealed class State : IDisposable
         }
         catch { processLock.Dispose(); throw; }
     }
-    public Peer GetOrAdd(string id, string code, SignedEnvelope grant)
+    public Peer GetOrAdd(string id, string code, SignedEnvelope grant, bool temporary = false)
     {
         id = Wire.Endpoint(id);
         lock (Peers)
@@ -34,7 +34,8 @@ sealed class State : IDisposable
                 .FirstOrDefault(ip => Peers.All(p => p.Address != ip))
                 ?? throw new InvalidOperationException("已保存设备数量达到上限。");
             var peer = new Peer { Id = id, Address = address, Code = code, Grant = grant, AutoConnect=false };
-            var next = Peers.Append(peer).ToArray();
+            if (temporary) { peer.Temporary = true; Peers.Add(peer); return peer; }   // kept in memory only
+            var next = Peers.Where(p => !p.Temporary).Append(peer).ToArray();
             var path = Path.Combine(Root, "peers.json");
             File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(next, Wire.Json));
             File.Move(path + ".tmp", path, true);
@@ -47,7 +48,7 @@ sealed class State : IDisposable
         lock (Peers)
         {
             var path = Path.Combine(Root, "peers.json");
-            File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(Peers, Wire.Json));
+            File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(Peers.Where(p => !p.Temporary).ToList(), Wire.Json));
             File.Move(path + ".tmp", path, true);
         }
     }
