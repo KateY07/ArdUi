@@ -21,7 +21,8 @@ if(-not (Test-Path -LiteralPath $data -PathType Container)){
 
 $launcher=Join-Path $root 'ArdUi.cmd'
 [IO.File]::WriteAllLines($launcher,@('@echo off','set "ARDUI_DATA_ROOT=%~dp0data"',('start "" "%~dp0versions\{0}\ArdUi.exe"' -f $version)),[Text.Encoding]::ASCII)
-if($env:ARDUI_INSTALL_NO_SHORTCUT -ne '1'){
+# Autostart is a setting inside ArdUi (Settings > General); the installer only creates the shortcut when asked to.
+if($env:ARDUI_INSTALL_AUTOSTART -eq '1' -and $env:ARDUI_INSTALL_NO_SHORTCUT -ne '1'){
     $startup=[Environment]::GetFolderPath([Environment+SpecialFolder]::Startup)
     $shortcut=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $startup 'ArdUi.lnk'))
     $shortcut.TargetPath=$env:ComSpec

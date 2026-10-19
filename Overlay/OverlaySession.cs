@@ -399,6 +399,7 @@ sealed class OverlaySession : IAsyncDisposable
             controlSlots.Release();
         }
     }
+    public const int MaxControlBody=60000;
     public async Task<JsonElement> Request(string method,object value,CancellationToken ct)
     {
         if(controls.Count>=16)throw new IOException("协调请求过多。");
@@ -408,7 +409,10 @@ sealed class OverlaySession : IAsyncDisposable
         if(trace)Diagnostics.Log("control-request-start",$"{method} id={id}");
         try
         {
-            await SendReliable(5,0,JsonSerializer.SerializeToUtf8Bytes(new OverlayControl(id,method,JsonSerializer.SerializeToElement(value,Wire.Json)),Wire.Json),ct);
+            var body=JsonSerializer.SerializeToUtf8Bytes(new OverlayControl(id,method,JsonSerializer.SerializeToElement(value,Wire.Json)),Wire.Json);
+            // one request is one link frame, and a frame over 64 KB makes the other side drop the link: refuse it here instead
+            if(body.Length>MaxControlBody)throw new IOException("控制消息过大。");
+            await SendReliable(5,0,body,ct);
             if(trace)Diagnostics.Log("control-request-sent",$"{method} id={id} elapsed_ms={watch.Elapsed.TotalMilliseconds:F2}");
             var result=await waiter.Task.WaitAsync(TimeSpan.FromSeconds(75),ct);completed=true;return result;
         }

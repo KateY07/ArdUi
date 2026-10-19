@@ -15,7 +15,9 @@ sealed class Settings
     public string MasterUrl => $"https://{new Uri(Relay).Host}:{MasterQadPort}/";
     public string MasterKey => RelayKey["spki:".Length..];
     public string FrdPath { get; set; } = "";
-    public bool DetailedArdDiagnostics { get; set; } = true;   // verbose by default; the log file is the place to look
+    // -v (debug) by default: the log file is the place to look. -vv is per-packet trace output (thousands of lines a second during a
+    // session); it is opt-in because it floods the log file and the UI.
+    public bool DetailedArdDiagnostics { get; set; }
     public int[] TcpPorts { get; set; } = [3389, 445];
     public int[] UdpPorts { get; set; } = [3389];
     public void Validate()

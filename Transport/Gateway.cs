@@ -11,7 +11,17 @@ sealed class Gateway : IAsyncDisposable
     readonly ConcurrentDictionary<int,TcpClient> clients=new();
     readonly ConcurrentDictionary<string, TargetUdp> udpFlows = new();
     readonly ConcurrentDictionary<int,byte> frdTcp=new(),frdUdp=new();
-    public void PermitFrdTcp(int port,bool enabled){if(enabled)frdTcp[port]=0;else frdTcp.TryRemove(port,out _);}
+    // Is the screen being used right now: FRD running on this machine, or an RDP connection open.
+    int rdpBridges; bool lastScreenActive; readonly object activityGate = new();
+    public bool ScreenActive => !frdTcp.IsEmpty || Volatile.Read(ref rdpBridges) > 0;
+    public event Action<bool>? ScreenActivity;
+    void UpdateActivity()
+    {
+        bool now, changed;
+        lock (activityGate) { now = ScreenActive; changed = now != lastScreenActive; lastScreenActive = now; }
+        if (changed) ScreenActivity?.Invoke(now);
+    }
+    public void PermitFrdTcp(int port,bool enabled){if(enabled)frdTcp[port]=0;else frdTcp.TryRemove(port,out _);UpdateActivity();}
     public void PermitFrdUdp(int port,bool enabled)
     {
         if(enabled){frdUdp[port]=0;return;}
@@ -114,7 +124,10 @@ sealed class Gateway : IAsyncDisposable
                 client.NoDelay = true;
                 await stream.WriteAsync(new byte[] { 0 }, handshake.Token);
                 handshake.CancelAfter(Timeout.InfiniteTimeSpan);
-                await Wire.Bridge(client, target, stop.Token);
+                var rdp = port != Permissions.FilesPort && !frdTcp.ContainsKey(port);   // anything that is neither files nor FRD is a desktop
+                if (rdp) { Interlocked.Increment(ref rdpBridges); UpdateActivity(); }
+                try { await Wire.Bridge(client, target, stop.Token); }
+                finally { if (rdp) { Interlocked.Decrement(ref rdpBridges); UpdateActivity(); } }
             }
             catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { Diagnostics.Log("gateway-tcp",ex.Message); }
         }

@@ -34,6 +34,12 @@ static class Program
             { Console.WriteLine(IdentityStore.Prepare(args[1])); return 0; }
             if (args.Length == 4 && args[0] == "--verify-release")
             { Release.Verify(args[1],args[2],args[3]); return 0; }
+            if (args.Length == 2 && args[0] == "--audit-test")
+                return AuditTests.Run(args[1]).GetAwaiter().GetResult();
+            if (args.Contains("--chat-ui-test"))
+                return ChatUiTests.Run();
+            if (args.Contains("--chat-test"))
+                return ChatTests.Run().GetAwaiter().GetResult();
             if (args.Contains("--perm-test"))
                 return PermissionTests.Run().GetAwaiter().GetResult();
             if (args.Contains("--connect-flow-test"))

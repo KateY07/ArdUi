@@ -53,6 +53,15 @@ sealed class Session : IAsyncDisposable
         if(Host||port!=Volatile.Read(ref frdPort)||port==0)throw new IOException("FRD 连接未获授权。");
         return OpenTcpCore(port,true,ct);
     }
+    public ChatChannel? Chat { get; private set; }
+    // The conversation rides on the same control channel as FRD: requests named chat-* go to the channel.
+    public void ConfigureChat(ChatChannel chat)
+    {
+        Chat = chat;
+        var other = Overlay!.Control;
+        Overlay.Control = (method, data, ct) => method.StartsWith("chat-", StringComparison.Ordinal) ? chat.Handle(method, data, ct) :
+            other != null ? other(method, data, ct) : throw new IOException("未知控制请求。");
+    }
     public void ConfigureFrd(string path)
     {
         frdPath=path;

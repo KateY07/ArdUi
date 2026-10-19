@@ -54,6 +54,7 @@ sealed class App : Application
             var exit = new NativeMenuItem("退出 ArdUi"); exit.Click += (_, _) => window.ExitApplication();
             var tray = new TrayIcon { Icon = AppIcon.Create(), ToolTipText = "ArdUi " + Program.Version, Menu = new NativeMenu { Items = { show, exit } } };
             tray.Clicked += (_, _) => window.ShowFromTray();
+            window.ActivityChanged += text => Avalonia.Threading.Dispatcher.UIThread.Post(() => tray.ToolTipText = text);
             TrayIcon.SetIcons(this, new TrayIcons { tray });
             SingleInstance.Activated += () => Avalonia.Threading.Dispatcher.UIThread.Post(window.ShowFromTray);
             StartupTrace.Mark("tray icon created");

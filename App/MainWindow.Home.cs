@@ -103,6 +103,7 @@ sealed partial class MainWindow
 
         status.HorizontalAlignment = HorizontalAlignment.Center; status.TextAlignment = TextAlignment.Center; status.MaxWidth = 460;
         var sessionsHeading = new TextBlock { Text = "已连接", FontSize = 12, FontWeight = FontWeight.SemiBold, Foreground = Muted, Margin = new Thickness(4, 6, 0, 0) };
+        hostPanel.Children.Add(new TextBlock { Text = "正在访问本机", FontSize = 12, FontWeight = FontWeight.SemiBold, Foreground = Muted, Margin = new Thickness(4, 6, 0, 0) }); hostPanel.Children.Add(hostList);
         sessions.Children.Add(sessionsHeading); sessions.Children.Add(pendingPanel); sessions.Children.Add(livePanel);
         // The connect card sits exactly in the middle of the page (equal space above and below) and never moves;
         // the status line and the connected devices live in the space below it and scroll there when there are many.
@@ -110,7 +111,7 @@ sealed partial class MainWindow
         var lower = new ScrollViewer
         {
             VerticalAlignment = VerticalAlignment.Top,
-            Content = new StackPanel { Spacing = 8, MaxWidth = 430, HorizontalAlignment = HorizontalAlignment.Stretch, Margin = new Thickness(14, 8, 14, 8), Children = { status, sessions } },
+            Content = new StackPanel { Spacing = 8, MaxWidth = 430, HorizontalAlignment = HorizontalAlignment.Stretch, Margin = new Thickness(14, 8, 14, 8), Children = { status, auditWarning, hostPanel, sessions } },
         };
         Grid.SetRow(lower, 2);
         var scroll = new Grid { RowDefinitions = new RowDefinitions("*,Auto,*"), Children = { card, lower } };
@@ -215,6 +216,91 @@ sealed partial class MainWindow
         hasRecents = items.Count != 0; recentsBlock.IsVisible = hasRecents && !compactHome;
     }
 
+    // ---- this machine is being used ---------------------------------------------------------------------------------
+    // Devices that are connecting to, or using, this machine: a breathing logo while they connect, a green dot once they are in.
+    readonly StackPanel hostPanel = new() { Spacing = 6, IsVisible = false }, hostList = new() { Spacing = 6 };
+    string hostSignature = "";
+    readonly TextBlock auditWarning = new() { Text = "审计录屏组件（ffmpeg）缺失：有设备连接时会被断开。请重新安装 ArdUi。", FontSize = 12, Foreground = Brush.Parse("#B3432B"), TextWrapping = TextWrapping.Wrap, IsVisible = false };
+    public event Action<string>? ActivityChanged;
+    string lastActivity = "";
+
+    Control HostCard(string code, string detail, bool connecting, bool once, string? disconnectId, bool recording = false, bool unread = false)
+    {
+        Control icon;
+        if (connecting) icon = new Logo(28) { Animate = Motion.Enabled && !previewMode, VerticalAlignment = VerticalAlignment.Center };
+        else
+        {
+            var halo = new Ellipse { Width = 26, Height = 26, Fill = Look.OnlineHalo };
+            var dot = new Ellipse { Width = 12, Height = 12, Fill = Look.OnlineDeep, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+            icon = new Grid { Width = 28, Height = 28, Children = { halo, dot } };
+            Pulse(halo, true);   // a slow breath: someone is here
+        }
+        var title = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center, Children = { new TextBlock { Text = code, FontSize = 14, FontWeight = FontWeight.SemiBold, FontFamily = new FontFamily("Consolas") } } };
+        if (once) title.Children.Add(new Border { Padding = new Thickness(8, 1), CornerRadius = new CornerRadius(9), Background = new SolidColorBrush(Color.FromArgb(255, 252, 236, 228)), BorderBrush = Look.Accent, BorderThickness = new Thickness(1), Child = new TextBlock { Text = "仅此一次", FontSize = 11, Foreground = Look.Accent, FontWeight = FontWeight.SemiBold } });
+        var text = new StackPanel { Spacing = 1, VerticalAlignment = VerticalAlignment.Center, Children = { title, DetailText(detail, connecting, recording) } };
+        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto") };
+        icon.Margin = new Thickness(0, 0, 12, 0); icon.VerticalAlignment = VerticalAlignment.Center;
+        grid.Children.Add(icon); Grid.SetColumn(text, 1); grid.Children.Add(text);
+        if (disconnectId != null)
+        {
+            var drop = new Button { Content = Look.Icon(Look.CrossPath, 10, Brushes.White, 2.4), Width = 26, Height = 26, VerticalAlignment = VerticalAlignment.Center };
+            drop.Classes.Add("circlex"); ToolTip.SetTip(drop, "断开对方");
+            drop.Click += async (_, _) => await Guard(async () => await engine!.Disconnect(disconnectId));
+            Grid.SetColumn(drop, 3); grid.Children.Add(drop);
+            if (!connecting)
+            {
+                var chat = new Button { Content = ChatBadge(unread), Width = 36, Height = 30, MinHeight = 30, Padding = new Thickness(0), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
+                ToolTip.SetTip(chat, "对话：文字、图片、文件"); chat.Click += (_, _) => OpenChat(disconnectId, code);
+                Grid.SetColumn(chat, 2); grid.Children.Add(chat);
+            }
+        }
+        var card = Card(grid); card.Padding = new Thickness(14, 10);
+        card.BorderBrush = connecting ? Look.Relay : Look.OnlineDeep;
+        return card;
+    }
+
+    static TextBlock DetailText(string detail, bool connecting, bool recording)
+    {
+        var text = new TextBlock { FontSize = 12, Foreground = connecting ? Look.Relay : Look.Muted, TextTrimming = TextTrimming.CharacterEllipsis };
+        text.Inlines!.Add(new Avalonia.Controls.Documents.Run(detail));
+        if (recording) text.Inlines.Add(new Avalonia.Controls.Documents.Run("  ● 录屏中") { Foreground = Brush.Parse("#D64545"), FontWeight = FontWeight.SemiBold });
+        return text;
+    }
+
+    // Rebuilt only when something shown changed.
+    void RefreshHost()
+    {
+        if (engine == null || directory == null) return;
+        var items = new List<(string Key, string Code, string Detail, bool Connecting, bool Once, string? Id, bool Recording, bool Unread)>();
+        foreach (var session in engine.Incoming.Values)
+        {
+            var status = engine.Status.GetValueOrDefault(session.PeerId, "");
+            var connecting = status.Contains("等待", StringComparison.Ordinal) || !session.Live && status.Length == 0;
+            var detail = connecting ? "等待密码与身份确认…" : Permissions.Describe(session.Perms) + " · " + status.Replace("正在访问本机 · ", "").Replace("已连接 · ", "");
+            var code = directory.CodeOf(session.PeerId); var recording = !connecting && engine.Audit.IsRecording(session.PeerId); var unread = engine.ChatFor(session.PeerId).Unread > 0;
+            if (!connecting) WatchChat(session.PeerId, code);
+            items.Add((session.PeerId + detail + recording + unread, code, detail, connecting, session.OnceGranted, session.PeerId, recording, unread));
+        }
+        foreach (var (endpoint, code) in directory.Arriving.Where(a => !engine.Incoming.ContainsKey(a.Endpoint)))
+            items.Add(("arriving" + endpoint, code, "对方正在连接…", true, false, null, false, false));
+        var signature = string.Join("|", items.Select(i => i.Key + i.Once));
+        if (signature != hostSignature)
+        {
+            hostSignature = signature;
+            hostList.Children.Clear();
+            foreach (var i in items) hostList.Children.Add(HostCard(i.Code, i.Detail, i.Connecting, i.Once, i.Id, i.Recording, i.Unread));
+            hostPanel.IsVisible = items.Count != 0;
+            UpdateSessionsVisible();
+        }
+        // without the encoder nothing can be recorded, and sessions would be ended: say so while control is allowed
+        auditWarning.IsVisible = directory.Enabled && !engine.Audit.EncoderAvailable;
+        // the title bar and the tray say it too, so a hidden window is not silent
+        var inUse = items.Count(i => !i.Connecting); var connectingCount = items.Count(i => i.Connecting);
+        var activity = inUse != 0 ? $"ArdUi — {inUse} 台设备正在访问本机" : connectingCount != 0 ? "ArdUi — 有设备正在连接本机" : "ArdUi " + Program.Version;
+        if (activity != lastActivity) { lastActivity = activity; ActivityChanged?.Invoke(activity); }
+        if (directory.Online) { netText.Text = inUse != 0 ? $"被控中 · {inUse}" : connectingCount != 0 ? "有设备正在连接" : "在线"; netDot.Fill = inUse != 0 ? Look.Accent : connectingCount != 0 ? Look.Relay : Online; }
+    }
+
     // ---- connect flow ------------------------------------------------------------------------------------------------
     // Connecting happens in the "connected" area: a placeholder card flies in, shows progress, asks for the password or
     // reports a failure in place, and on success draws a check and makes way for the real session card.
@@ -224,7 +310,7 @@ sealed partial class MainWindow
     void UpdateSessionsVisible()
     {
         sessions.IsVisible = pendingPanel.Children.Count != 0 || livePanel.Children.Count != 0;
-        SetCompact(sessions.IsVisible);
+        SetCompact(sessions.IsVisible || hostList.Children.Count != 0);
         UpdateAttention();
     }
 
@@ -374,7 +460,7 @@ sealed partial class MainWindow
             return panel;
         }
         var devicesTab = new StackPanel { Spacing = 8, Children = { undoBar, devices } };
-        var accessTab = new StackPanel { Spacing = 8, Children = { incomingArea, Section("可访问本机的设备", controllers) } };
+        var accessTab = new StackPanel { Spacing = 8, Children = { incomingArea, Section("可访问本机的设备", controllers), Section("审计记录", BuildAuditCard()) } };
         var logButton = Button("打开日志", OpenLogFile); var exportButton = Button("导出诊断包", () => { var path = Diagnostics.Export(Program.DataRoot, engine); Say("诊断包已导出：" + path); return Task.CompletedTask; });
         var copyEndpoint = Button("复制 EndpointId", async () => { await Clipboard!.SetTextAsync(engine?.Id ?? ""); Toast("已复制本机 EndpointId"); });
         logButton.Content = Look.IconText(Look.DocumentPath, "打开日志"); exportButton.Content = Look.IconText(Look.DownloadPath, "导出诊断包"); copyEndpoint.Content = Look.IconText(Look.CopyPath, "复制 EndpointId");
@@ -385,7 +471,7 @@ sealed partial class MainWindow
             Children =
             {
                 Section("ArdUi " + Program.Version, Card(new StackPanel { Spacing = 10, Children = { new TextBlock { Text = "本机 EndpointId（对方首次连接时用来核对身份）", Foreground = Muted, FontSize = 12 }, aboutEndpoint, copyEndpoint } })),
-                Section("日志", Card(new StackPanel { Spacing = 10, Children = { new TextBlock { Text = "日志默认记录详细信息，保存在本机，并用默认文本编辑器打开。", Foreground = Muted, TextWrapping = TextWrapping.Wrap }, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { logButton, exportButton } } } })),
+                Section("日志", Card(new StackPanel { Spacing = 10, Children = { new TextBlock { Text = "日志记录调试级信息，保存在本机，并用默认文本编辑器打开。", Foreground = Muted, TextWrapping = TextWrapping.Wrap }, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { logButton, exportButton } } } })),
             }
         };
         startupBox = new ToggleSwitch { OnContent = "随 Windows 启动（在托盘中静默运行）", OffContent = "随 Windows 启动（在托盘中静默运行）", IsChecked = Autostart.Enabled };
@@ -407,7 +493,7 @@ sealed partial class MainWindow
         var tabButtons = new List<Button>();
         void Select(int index)
         {
-            settingsBody.Content = pages[index].Body;
+            settingsBody.Content = pages[index].Body; if (index == 2) RefreshAudit();
             for (var i = 0; i < tabButtons.Count; i++) { if (i == index) tabButtons[i].Classes.Add("primary"); else tabButtons[i].Classes.Remove("primary"); }
         }
         for (var i = 0; i < pages.Length; i++)
@@ -432,7 +518,7 @@ sealed partial class MainWindow
     void ShowSettings(bool show)
     {
         settingsOpen = show; settingsPage.IsVisible = show; homePage.IsVisible = !show; UpdateAttention();
-        if (show) aboutEndpoint.Text = engine?.Id ?? aboutEndpoint.Text;
+        if (show) { aboutEndpoint.Text = engine?.Id ?? aboutEndpoint.Text; RefreshAudit(); }
         if (show && startupBox != null) { syncingStartup = true; startupBox.IsChecked = Autostart.Enabled; syncingStartup = false; }
     }
 }

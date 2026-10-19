@@ -42,6 +42,15 @@ sealed partial class MainWindow
         // hover lifts the connect panel (with a short dwell so passing over it does not flicker)
         homeCard.PointerEntered += (_, _) => { var ticket = ++hoverTicket; DispatcherTimer.RunOnce(() => { if (ticket == hoverTicket) { cardHover = true; UpdateAttention(); } }, TimeSpan.FromMilliseconds(120)); };
         homeCard.PointerExited += (_, _) => { var ticket = ++hoverTicket; DispatcherTimer.RunOnce(() => { if (ticket == hoverTicket) { cardHover = false; UpdateAttention(); } }, TimeSpan.FromMilliseconds(300)); };
+        // Clicking anywhere else (an empty part of the window included) leaves the field and ends the focused mode.
+        AddHandler(PointerPressedEvent, (_, e) =>
+        {
+            if (!remote.IsFocused) return;
+            for (var v = e.Source as Avalonia.Visual; v != null; v = Avalonia.VisualTree.VisualExtensions.GetVisualParent(v))
+                if (ReferenceEquals(v, fieldBorder)) return;
+            TopLevel.GetTopLevel(this)?.FocusManager?.ClearFocus();
+            Dispatcher.UIThread.Post(UpdateAttention);
+        }, Avalonia.Interactivity.RoutingStrategies.Tunnel, handledEventsToo: true);
         remote.GotFocus += (_, _) => Dispatcher.UIThread.Post(UpdateAttention);
         remote.LostFocus += (_, _) => Dispatcher.UIThread.Post(UpdateAttention);
     }

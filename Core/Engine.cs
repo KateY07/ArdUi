@@ -15,7 +15,28 @@ sealed class Engine : IAsyncDisposable
     public DirectoryClient? DirectoryApi { get; set; }
     readonly OperationGate operations=new();
     readonly ConcurrentDictionary<string,ForwardHub> hubs = new();
-    Engine(State state, Settings settings, string id) { State=state; Settings=settings; Id=id; }
+    // The audit of controllers (screen + conversation). It cannot be switched off: if it cannot record, the session is ended.
+    public AuditService Audit { get; }
+    Engine(State state, Settings settings, string id)
+    {
+        State=state; Settings=settings; Id=id;
+        Audit=new AuditService(Path.Combine(state.Root,"audit"),FfmpegPath(settings));
+        Audit.Failure+=(endpoint,reason)=>
+        {
+            Events.Add("ERROR","审计","审计录屏失败，已结束该会话："+reason);
+            Notice?.Invoke("审计录屏失败，已断开对方：" + reason);
+            _=DropIncoming(endpoint);
+        };
+        Audit.Changed+=()=>Changed?.Invoke();
+    }
+    // The encoder ships with FRD (frd\ffmpeg\ffmpeg.exe).
+    static string FfmpegPath(Settings settings)
+    {
+        string? frd=null;
+        try{frd=FrdRuntime.Resolve(settings.FrdPath);}catch(Exception ex)when(ex is IOException or InvalidOperationException or FileNotFoundException){}
+        var folder=frd!=null?Path.GetDirectoryName(frd)!:Path.Combine(AppContext.BaseDirectory,"frd");
+        return Path.Combine(folder,"ffmpeg","ffmpeg.exe");
+    }
     public static async Task<Engine> Create(string root, Settings settings)
     {
         settings.Validate();
@@ -25,7 +46,8 @@ sealed class Engine : IAsyncDisposable
         try { return new Engine(state,settings,await Ard.Identity(state.IdentityDirectory,CancellationToken.None)); }
         catch { state.Dispose(); throw; }
     }
-    void Update(string id,string message) { Status[id]=message; Changed?.Invoke(); }
+    // A status that did not change must not wake the UI: ard prints thousands of lines per second at trace level.
+    void Update(string id,string message) { if(Status.TryGetValue(id,out var old)&&old==message)return; Status[id]=message; Changed?.Invoke(); }
     public void SetStatus(string id,string message)=>Update(id,message);
     static string Speed(double mbps)=>mbps>=10?$"{mbps:F0} Mbps":$"{mbps:F1} Mbps";
     // "P2P 直连 / IPV6" → "IPv6", "ArdRelay 中继" → "Relay"; other texts (recovering, connecting) stay as they are.
@@ -69,12 +91,46 @@ sealed class Engine : IAsyncDisposable
         if (!host) session.StartMetrics(() => Update(session.PeerId, Describe(session, false)));
         Update(session.PeerId, Describe(session, host));
     }
+    // The audit of this session opens when the controller is in; the screen is recorded whenever it is being used (FRD or RDP).
+    async Task BeginAudit(Peer peer, string code, Gateway gateway, Session session)
+    {
+        void Screen(bool active)
+        {
+            try { Audit.ScreenActivity(peer.Id, active); }
+            catch (Exception ex)
+            {
+                Diagnostics.Log("audit-start", ex.ToString());
+                Events.Add("ERROR", "审计", $"无法录屏，已断开 {code}：{ex.Message}");
+                Notice?.Invoke("审计录屏无法启动，已断开对方：" + ex.Message);
+                _ = DropIncoming(peer.Id);
+            }
+        }
+        Audit.Open(peer.Id, code, gateway.Once, gateway.Perms, ChatFor(peer.Id));
+        gateway.ScreenActivity += Screen;
+        if (!session.Live) { await Audit.End(peer.Id); return; }
+        _ = session.Completion.ContinueWith(_ => Audit.End(peer.Id), TaskScheduler.Default);
+        if (gateway.ScreenActive) Screen(true);   // the desktop was already in use
+    }
+    // One conversation per device, kept for as long as ArdUi runs; files received are stored under data\chat\<device>.
+    readonly ConcurrentDictionary<string,ChatChannel> chats=new();
+    public ChatChannel ChatFor(string peerId)=>chats.GetOrAdd(peerId,id=>
+    {
+        var chat=new ChatChannel(Path.Combine(State.Root,"chat",id[..16]),()=>
+        {
+            var overlay=(Outgoing.TryGetValue(id,out var outgoing)&&outgoing.Live?outgoing:Incoming.TryGetValue(id,out var incoming)&&incoming.Live?incoming:null)?.Overlay;
+            return overlay!=null&&!overlay.Token.IsCancellationRequested?overlay.Request:null;
+        });
+        chat.Changed+=()=>Changed?.Invoke();
+        return chat;
+    });
     void ConfigureOverlay(Session session)
     {
         if(session.Overlay==null||DirectoryApi==null||session.Transit!=null)return;
         session.Transit=new TransitCoordinator(this,DirectoryApi,session);
         session.Notice+=message=>{Update(session.PeerId,message);Notice?.Invoke(message);};
         session.ConfigureFrd(Settings.FrdPath);
+        session.ConfigureChat(ChatFor(session.PeerId));
+        var conversation = ChatFor(session.PeerId); _ = session.Completion.ContinueWith(_ => conversation.Close(), TaskScheduler.Default);
         session.Overlay.Changed+=()=>Update(session.PeerId,Describe(session,session.Host));
     }
     async Task Monitor(Session session,bool host)
@@ -189,7 +245,13 @@ sealed class Engine : IAsyncDisposable
             session = new Session(peer.Id, peer.Address, gateway.Port, capability, Settings.TcpPorts, Settings.UdpPorts, child, dir, gateway);
             session.OverlayReady+=()=>ConfigureOverlay(session);
             var attached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            gateway.Attached += () => { attached.TrySetResult(); Update(peer.Id, "已连接 · 对方正在访问本机"); };
+            var auditStarted = 0;
+            gateway.Attached += () =>
+            {
+                attached.TrySetResult(); Update(peer.Id, "已连接 · 对方正在访问本机");
+                // from the moment someone is in, the screen is recorded
+                if (Interlocked.Exchange(ref auditStarted, 1) == 0) _ = Task.Run(() => BeginAudit(peer, ticket.ControllerCode, gateway!, session!));
+            };
             operation.Commit(()=>{if(!Incoming.TryAdd(peer.Id,session))throw new IOException("已有同设备会话。");});
             Observe(session, true);
             var owned = session;
@@ -263,6 +325,7 @@ sealed class Engine : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await operations.Close();
+        await Audit.DisposeAsync();
             foreach(var session in Outgoing.Values.Concat(Incoming.Values)) await session.DisposeAsync();
             Outgoing.Clear(); Incoming.Clear(); State.Dispose();
             foreach(var hub in hubs.Values)await hub.DisposeAsync();hubs.Clear();

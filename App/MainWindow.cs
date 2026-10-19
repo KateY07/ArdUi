@@ -29,7 +29,7 @@ sealed partial class MainWindow : Window
     bool closing,closed,ready;
     DateTimeOffset undoUntil;
     Peer? undoPeer;
-    sealed record DeviceDisplay(Border Card,Ellipse Indicator,TextBlock Title,TextBlock Status,Button Connect,Button[] Launchers,Button Pause,StackPanel Actions);
+    sealed record DeviceDisplay(Border Card,Ellipse Indicator,TextBlock Title,TextBlock Status,Button Connect,Button[] Launchers,Button Pause,StackPanel Actions,Button Chat);
     readonly Dictionary<Ellipse,CancellationTokenSource> pulses=new();
     // A slow breathing dot while something is being established; static otherwise.
     void Pulse(Ellipse dot,bool on)
@@ -143,7 +143,7 @@ sealed partial class MainWindow : Window
             Children={new Logo(72){Animate=true,HorizontalAlignment=HorizontalAlignment.Center},T_("正在连接网络…")}};
         connectingOverlay.IsVisible=!previewMode;
         titleBar=bar;SetupAttention(!previewMode&&Motion.Enabled);
-        Content=new Grid{Children={Chrome.Backdrop(!previewMode),scrim,pageArea,connectingOverlay,bar,inviteOverlay,approvalOverlay,toastHost}};
+        Content=new Grid{Children={Chrome.Backdrop(!previewMode),scrim,pageArea,connectingOverlay,bar,inviteOverlay,BuildChat(),approvalOverlay,toastHost}};
         ToolTip.SetTip(endpoint,"本机永久 EndpointId，用于首次连接时核对身份。");
         Opened += async (_,_) =>
         {
@@ -158,13 +158,13 @@ sealed partial class MainWindow : Window
                 StartupTrace.Mark("config read; creating engine");
                 engine=await Task.Run(()=>Engine.Create(Program.DataRoot,settings));endpoint.Text=engine.Id;
                 StartupTrace.Mark("engine ready");
-                engine.Changed+=()=>Dispatcher.UIThread.Post(Refresh);
+                engine.Changed+=RequestRefresh;
                 engine.Notice+=message=>Dispatcher.UIThread.Post(()=>Say(message));
                 directory=await Task.Run(()=>new DirectoryClient(engine!));
                 StartupTrace.Mark("directory client constructed");
                 directory.Confirm=async(pair,ct)=>await Dispatcher.UIThread.InvokeAsync(()=>ConfirmPair(pair,ct));
                 directory.ConfirmIncoming=async(pair,ct)=>await Dispatcher.UIThread.InvokeAsync(()=>ConfirmIncoming(pair,ct));
-                directory.Changed+=()=>Dispatcher.UIThread.Post(Refresh);
+                directory.Changed+=RequestRefresh;
                 directory.Notice+=message=>Dispatcher.UIThread.Post(()=>Say(message));
                 allow.IsChecked=directory.Enabled;identityCard.IsVisible=directory.Enabled;allow.OnContent=allow.OffContent="允许被控";allow.IsEnabled=true;ready=true;directory.Start();passwordTimer.Start();UpdatePassword();Say("正在连接网络…");
             });
@@ -193,7 +193,7 @@ sealed partial class MainWindow : Window
                 if(live)
                 {
                     var card=Device(sample);SetStatus(card.Status,text);Dot(card.Indicator,text);card.Connect.IsVisible=false;card.Pause.IsVisible=true;
-                    foreach(var launcher in card.Launchers)launcher.IsVisible=true;
+                    foreach(var launcher in card.Launchers)launcher.IsVisible=true;card.Chat.IsVisible=true;
                     livePanel.Children.Add(card.Card);UpdateSessionsVisible();
                     if(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_MORE")=="1")card.Actions.Children.OfType<Button>().Last().RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
                 }
@@ -218,6 +218,30 @@ sealed partial class MainWindow : Window
             }
             controllers.Children.Add(new TextBlock{Text="尚无授权",Foreground=Muted});
             FillRecents(recents);
+            if(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_CHAT")=="1")
+            {
+                // render-only: a conversation with text, a picture and a file in both directions
+                var folder=Path.Combine(Path.GetTempPath(),"ardui-chat-preview");Directory.CreateDirectory(folder);
+                var picture=Path.Combine(folder,"截图.png");
+                using(var bitmap=new SkiaSharp.SKBitmap(240,140)){using var canvas=new SkiaSharp.SKCanvas(bitmap);
+                    using var paint=new SkiaSharp.SKPaint{Shader=SkiaSharp.SKShader.CreateLinearGradient(new SkiaSharp.SKPoint(0,0),new SkiaSharp.SKPoint(240,140),[new SkiaSharp.SKColor(0xE0,0x7A,0x52),new SkiaSharp.SKColor(0x8D,0xB6,0xE8)],SkiaSharp.SKShaderTileMode.Clamp)};
+                    canvas.DrawRect(0,0,240,140,paint);using var image=SkiaSharp.SKImage.FromBitmap(bitmap);using var data=image.Encode(SkiaSharp.SKEncodedImageFormat.Png,100);File.WriteAllBytes(picture,data.ToArray());}
+                var sample=new ChatChannel(folder,()=>null);
+                var now=DateTimeOffset.Now;
+                sample.Messages.Add(new ChatMessage("1",false,ChatKind.Text,"你好，我这边看到远程桌面卡了一下，能帮我看看吗？",null,0,null,now.AddMinutes(-6)));
+                sample.Messages.Add(new ChatMessage("2",true,ChatKind.Text,"好的，我先看一下网络状况。",null,0,null,now.AddMinutes(-5)));
+                sample.Messages.Add(new ChatMessage("3",false,ChatKind.Image,"","截图.png",1,picture,now.AddMinutes(-4)));
+                sample.Messages.Add(new ChatMessage("4",true,ChatKind.File,"","诊断结果.zip",3_400_000,null,now.AddMinutes(-2)));
+                openChat=sample;chatTitle.Text="与 K4DD0B 对话";
+                foreach(var message in sample.Messages)chatList.Children.Add(Bubble(message));
+                chatOverlay.IsVisible=true;
+            }
+            if(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_USE")=="1")
+            {
+                hostList.Children.Add(HostCard("Q8X2ND","对方正在连接…",true,false,null));
+                hostList.Children.Add(HostCard("7TLM4P","FRD · IPv6 · 18 Mbps · 9 ms",false,true,"x",true,true));
+                hostPanel.IsVisible=true;UpdateSessionsVisible();netText.Text="被控中 · 1";netDot.Fill=Look.Accent;
+            }
             switch(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_FOCUS"))
             {
                 case "typing":remote.Text="K4";OnCodeChanged();ApplyAttention(Attention.Typing);break;
@@ -327,6 +351,14 @@ sealed partial class MainWindow : Window
         if(hasNote&&peer.ComputerName.Length!=0&&peer.ComputerName!=peer.Name)Quiet(peer.ComputerName);
         if(primary!=peer.Code)Quiet(peer.Code);
     }
+    void UpdateChatButton(DeviceDisplay view,Peer peer,bool live)
+    {
+        view.Chat.IsVisible=live;
+        if(!live||engine==null)return;
+        var unread=engine.ChatFor(peer.Id).Unread>0;
+        if((bool)(view.Chat.Tag??false)!=unread){view.Chat.Tag=unread;view.Chat.Content=ChatBadge(unread);}
+        WatchChat(peer.Id,PeerLabel(peer).Split(" · ")[0]);
+    }
     // FRD and file sharing appear only when the controlled machine allowed them.
     static void ShowLaunchers(DeviceDisplay view,bool live,Perm perms)
     {
@@ -427,6 +459,13 @@ sealed partial class MainWindow : Window
         if(Engine.IsLiveText(text))return Online;
         return Idle;
     }
+    // Many events in a row cost one refresh: the UI thread is never flooded.
+    int refreshPending;
+    void RequestRefresh()
+    {
+        if(Interlocked.Exchange(ref refreshPending,1)!=0)return;
+        Dispatcher.UIThread.Post(()=>{Volatile.Write(ref refreshPending,0);Refresh();},DispatcherPriority.Background);
+    }
     void Refresh()
     {
         if(engine==null)return;
@@ -461,7 +500,7 @@ sealed partial class MainWindow : Window
             var parked=IsParked(peer);ApplyDensity(view,parked);
             view.Connect.IsVisible=!live&&!parked;view.Connect.Content=busy?"连接中…":"连接";
             view.Connect.Opacity=reachable?1:.4;view.Connect.IsHitTestVisible=reachable&&!busy;
-            ShowLaunchers(view,live,engine.Outgoing.TryGetValue(peer.Id,out var allowedSession)?allowedSession.Perms:Perm.All);
+            ShowLaunchers(view,live,engine.Outgoing.TryGetValue(peer.Id,out var allowedSession)?allowedSession.Perms:Perm.All);UpdateChatButton(view,peer,live);
             view.Pause.IsVisible=live||directory?.IsReconnecting(peer.Id)==true;
             Pulse(view.Indicator,stateText.StartsWith("正在",StringComparison.Ordinal));
             ToolTip.SetTip(view.Title,title+"\n"+peer.Id);ToolTip.SetTip(view.Status,reachable?stateText:stateText+" · 对方在线后才能连接");
@@ -475,7 +514,7 @@ sealed partial class MainWindow : Window
             if(live&&!pendingCards.ContainsKey(peer.Code))liveIds.Add(peer.Id);   // its placeholder is still on screen
             FillTitle(hv.Title,peer);SetStatus(hv.Status,StatusOf(dv.Status));Dot(hv.Indicator,StatusOf(dv.Status));
             hv.Connect.IsVisible=false;
-            ShowLaunchers(hv,live,liveSession?.Perms??Perm.All);
+            ShowLaunchers(hv,live,liveSession?.Perms??Perm.All);UpdateChatButton(hv,peer,live);
             hv.Pause.IsVisible=dv.Pause.IsVisible;
         }
         var sessionKey=string.Join("|",liveIds);
@@ -526,6 +565,7 @@ sealed partial class MainWindow : Window
             // The invitation worked: a new device was authorised while the overlay was open.
             if(inviteOverlay.IsVisible&&(directory.Controllers.Length>inviteControllers||engine.Incoming.Count>inviteIncoming)){CloseInvite();Say("邀请成功：新设备已获得授权。");}
             netDot.Fill=directory.Online?Online:Relay;netText.Text=directory.Online?"在线":"正在连接网络…";
+            RefreshHost();
             UpdatePassword();UpdateConnecting();
             Title="ArdUi "+Program.Version+(directory.Enabled&&directory.Code.Length!=0?" · "+directory.Code:"");
         }
@@ -643,6 +683,9 @@ sealed partial class MainWindow : Window
             var path=await WindowsShares.Map(engine!.Outgoing[peer.Id],share,CancellationToken.None);
             await Launch("explorer.exe",path);
         })));
+        // the conversation with this device (only while connected); a red dot marks unread messages
+        var chat=new Button{Width=36,Height=30,MinHeight=30,Padding=new Thickness(0),IsVisible=false,Tag=false};chat.Content=ChatBadge(false);ToolTip.SetTip(chat,"对话：文字、图片、文件");
+        chat.Click+=(_,_)=>OpenChat(peer.Id,PeerLabel(peer).Split(" · ")[0]);actions.Children.Add(chat);
         var pause=Add("断开",async()=>await directory!.Pause(peer));pause.IsVisible=false;ToolTip.SetTip(pause,"断开连接（停止自动恢复；点击“连接”可重新连接）");
         pause.Classes.Add("circlex");pause.Content=Look.Icon(Look.CrossPath,10,Brushes.White,2.4);pause.Width=26;pause.Height=26;pause.HorizontalAlignment=HorizontalAlignment.Center;pause.VerticalAlignment=VerticalAlignment.Center;
         var moreActions=new WrapPanel{Orientation=Orientation.Horizontal};
@@ -674,7 +717,7 @@ sealed partial class MainWindow : Window
         card.PointerEntered+=(_,_)=>card.Background=Look.CardHover;card.PointerExited+=(_,_)=>card.Background=Look.Card;
         Look.IconOnly(launchers[0],Look.MonitorPath,"远程桌面（FRD）；两端需安装支持 FRD 的新版 ArdUi");Look.IconOnly(launchers[1],Look.FolderPath,"打开文件共享");
         foreach(var launcher in launchers)launcher.IsVisible=false;
-        return new DeviceDisplay(card,indicator,title,state,connect,launchers.ToArray(),pause,actions);
+        return new DeviceDisplay(card,indicator,title,state,connect,launchers.ToArray(),pause,actions,chat);
     }
     async Task RemoveWithUndo(Peer peer)
     {

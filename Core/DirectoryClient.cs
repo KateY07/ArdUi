@@ -274,8 +274,13 @@ sealed class DirectoryClient : IAsyncDisposable
         }
         finally { edits.Release(); }
     }
+    // Controllers that asked to connect and whose session is still being set up (shown as "connecting" before a session exists).
+    readonly Dictionary<string, string> arriving = new();
+    public (string Endpoint, string Code)[] Arriving { get { lock (sync) return arriving.Select(p => (p.Key, p.Value)).ToArray(); } }
     async Task Handle(ServerTicket ticket, CancellationToken ct)
     {
+        lock (sync) { arriving[ticket.ControllerEndpoint] = ticket.ControllerCode; seenCodes[ticket.ControllerEndpoint] = ticket.ControllerCode; }
+        Changed?.Invoke();
         try
         {
             if (!Enabled || ticket.Expires <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return;
@@ -291,6 +296,22 @@ sealed class DirectoryClient : IAsyncDisposable
         {
             Notice?.Invoke(ex.Message);
             try { await Call<JsonElement>($"/api/v1/tickets/{ticket.Id}/reject", new { }, stop.Token); } catch { }
+        }
+        finally
+        {
+            lock (sync) arriving.Remove(ticket.ControllerEndpoint);
+            Changed?.Invoke();
+        }
+    }
+    // The code a controller connected with, for sessions that are not saved (accepted only once).
+    readonly Dictionary<string, string> seenCodes = new();
+    public string CodeOf(string endpoint)
+    {
+        lock (sync)
+        {
+            if (access.Controllers.TryGetValue(endpoint, out var saved)) return saved.Code;
+            if (temporary.TryGetValue(endpoint, out var once)) return once.Code;
+            return seenCodes.GetValueOrDefault(endpoint) ?? endpoint[..8];
         }
     }
     // The person at this machine decides: accept at all, only this once, and which permissions the controller gets.
