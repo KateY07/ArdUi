@@ -27,13 +27,30 @@ sealed class Engine : IAsyncDisposable
     }
     void Update(string id,string message) { Status[id]=message; Changed?.Invoke(); }
     public void SetStatus(string id,string message)=>Update(id,message);
+    static string Speed(double mbps)=>mbps>=10?$"{mbps:F0} Mbps":$"{mbps:F1} Mbps";
+    // "P2P 直连 / IPV6" → "IPv6", "ArdRelay 中继" → "Relay"; other texts (recovering, connecting) stay as they are.
+    internal static string PathLabel(string network)
+    {
+        if(network.Contains("IPV6",StringComparison.OrdinalIgnoreCase))return "IPv6";
+        if(network.Contains("IPV4",StringComparison.OrdinalIgnoreCase))return "IPv4";
+        if(network.Contains("中继",StringComparison.Ordinal))return "Relay";
+        if(network.Contains("直连",StringComparison.Ordinal))return "直连";
+        return network;
+    }
+    // True for the status text of an established session (it starts with the path kind).
+    internal static bool IsLiveText(string text)=>text.StartsWith("IPv4",StringComparison.Ordinal)||text.StartsWith("IPv6",StringComparison.Ordinal)||text.StartsWith("Relay",StringComparison.Ordinal)||text.StartsWith("直连",StringComparison.Ordinal)||text.StartsWith("已连接",StringComparison.Ordinal);
     string Describe(Session session, bool host)
     {
-        var metric=session.UdpRtt is{} udp?$" · RTT {udp:F1} ms":" · RTT -- ms";
-        metric+=session.BandwidthMbps is{} bandwidth?$" · 吞吐 ~{bandwidth:F1} Mbps":session.BandwidthLowerBoundMbps is{} minimum?$" · 吞吐 ≥{minimum:F1} Mbps":" · 吞吐 --";
-        if(host)metric="";
         var recovering=session.Overlay is{} overlay&&overlay.Link(overlay.Selected)?.Live!=true;
-        return (recovering?"正在恢复连接":host ? "正在访问本机" : "已连接") + " · " + session.Network + metric;
+        var path=PathLabel(session.Network);
+        if(host)return (recovering?"正在恢复连接":"正在访问本机")+" · "+path;
+        if(recovering)return "正在恢复连接 · "+path;
+        // Connected: the path kind, then the measured speed and latency (whatever is known so far).
+        var parts=new List<string>{path};
+        if(session.BandwidthMbps is{} bandwidth)parts.Add(Speed(bandwidth));
+        else if(session.BandwidthLowerBoundMbps is{} minimum)parts.Add("≥"+Speed(minimum));
+        if(session.UdpRtt is{} udp)parts.Add($"{udp:F0} ms");
+        return string.Join(" · ",parts);
     }
     void Observe(Session session, bool host)
     {

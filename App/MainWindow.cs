@@ -30,13 +30,6 @@ sealed partial class MainWindow : Window
     DateTimeOffset undoUntil;
     Peer? undoPeer;
     sealed record DeviceDisplay(Border Card,Ellipse Indicator,TextBlock Title,TextBlock Status,Button Connect,Button[] Launchers,Button Pause,StackPanel Actions);
-    // The action buttons sit at the right of the row; a connected device has too many for a narrow window, so they drop below the text.
-    static void PlaceActions(DeviceDisplay view,bool below)
-    {
-        var a=view.Actions;
-        if(below){Grid.SetRow(a,1);Grid.SetColumn(a,1);Grid.SetColumnSpan(a,2);a.HorizontalAlignment=HorizontalAlignment.Left;a.Margin=new Thickness(0,6,0,2);}
-        else{Grid.SetRow(a,0);Grid.SetColumn(a,2);Grid.SetColumnSpan(a,1);a.HorizontalAlignment=HorizontalAlignment.Right;a.Margin=new Thickness();}
-    }
     readonly Dictionary<Ellipse,CancellationTokenSource> pulses=new();
     // A slow breathing dot while something is being established; static otherwise.
     void Pulse(Ellipse dot,bool on)
@@ -129,7 +122,7 @@ sealed partial class MainWindow : Window
         allow.PropertyChanged+=async(_,e)=>{if(e.Property==Avalonia.Controls.Primitives.ToggleButton.IsCheckedProperty && ready)await Guard(SaveAccess);};
         controllers.Margin=new Thickness(2,2,2,2);
         devices.Children.Add(noDevices);
-        var undoButton=Button("撤销",UndoRemove);
+        var undoButton=Button("撤销",UndoRemove);undoButton.Content=Look.IconText(Look.UndoPath,"撤销");
         undoBar=Card(new StackPanel{Orientation=Orientation.Horizontal,Spacing=6,Children={undoText,undoButton}});
         undoBar.IsVisible=false;undoBar.Padding=new Thickness(6,3);undoBar.Background=Brush.Parse("#FFF8E8");
         incomingArea.Children.Add(Label("正在访问本机",12,true));incomingArea.Children.Add(activeIncoming);
@@ -141,7 +134,7 @@ sealed partial class MainWindow : Window
         connectingOverlay.Child=new StackPanel{Spacing=14,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center,
             Children={new Logo(72){Animate=true,HorizontalAlignment=HorizontalAlignment.Center},T_("正在连接网络…")}};
         connectingOverlay.IsVisible=!previewMode;
-        Content=new Grid{Children={Chrome.Backdrop(!previewMode),pageArea,bar,connectingOverlay,flowOverlay,inviteOverlay,approvalOverlay}};
+        Content=new Grid{Children={Chrome.Backdrop(!previewMode),pageArea,bar,connectingOverlay,inviteOverlay,approvalOverlay}};
         ToolTip.SetTip(endpoint,"本机永久 EndpointId，用于首次连接时核对身份。");
         Opened += async (_,_) =>
         {
@@ -188,18 +181,18 @@ sealed partial class MainWindow : Window
                 if(recents.Count<5)recents.Add((sample,reachable));
                 if(live)
                 {
-                    var card=Device(sample);card.Status.Text=text;Dot(card.Indicator,text);card.Connect.IsVisible=false;card.Pause.IsVisible=true;
-                    foreach(var launcher in card.Launchers)launcher.IsVisible=true;PlaceActions(card,true);
-                    sessions.Children.Add(card.Card);sessions.IsVisible=true;
+                    var card=Device(sample);SetStatus(card.Status,text);Dot(card.Indicator,text);card.Connect.IsVisible=false;card.Pause.IsVisible=true;
+                    foreach(var launcher in card.Launchers)launcher.IsVisible=true;
+                    livePanel.Children.Add(card.Card);UpdateSessionsVisible();
                 }
                 var row=Device(sample);
-                row.Status.Text=text;Dot(row.Indicator,text);row.Pause.IsVisible=live;
+                SetStatus(row.Status,text);Dot(row.Indicator,text);row.Pause.IsVisible=live;
                 ApplyDensity(row,!reachable&&!live);row.Connect.IsVisible=!live&&reachable;row.Connect.Opacity=reachable?1:.4;
                 if(text.StartsWith("正在",StringComparison.Ordinal))row.Connect.Content="连接中…";
-                foreach(var launcher in row.Launchers)launcher.IsVisible=live;PlaceActions(row,live);
+                foreach(var launcher in row.Launchers)launcher.IsVisible=live;
                 devices.Children.Add(row.Card);
             }
-            Sample("a","C8M3P6","办公电脑","DESKTOP-OFFICE","已连接 · P2P 直连 / IPv6 · RTT 6.2 ms · 吞吐 ≥166.5 Mbps",true,true);
+            Sample("a","C8M3P6","办公电脑","DESKTOP-OFFICE","IPv6 · ≥167 Mbps · 6 ms",true,true);
             Sample("b","K4DD0B","","SY0812A","在线 · 最近连接 3 小时前",false,true);
             Sample("c","T7Q2LM","家里 NAS","HOME-NAS","正在连接…",false,true);
             devices.Children.Add(GroupHeader("展厅"));
@@ -215,12 +208,21 @@ sealed partial class MainWindow : Window
             FillRecents(recents);
             switch(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_FLOW"))
             {
-                case "progress":ShowProgress("K4DD0B");flowStage.Text=ConnectFlow.Text(ConnectStage.Signal);break;
-                case "password":_=AskFirstPassword("K4DD0B",null);break;
-                case "nopermission":_=AskFirstPassword("K4DD0B",ConnectFlow.Classify(new IOException(ConnectFlow.RejectedText)).Hint);break;
-                case "failure":_=ShowFailure(ConnectFlow.Classify(new IOException("对端离线或未开放远程访问。")));break;
-                case "security":_=ShowFailure(ConnectFlow.Classify(new InvalidDataException("该机器的 EndpointId 已改变！已阻止连接")));break;
                 case "startup":connectingOverlay.IsVisible=true;break;
+                case var flow when flow!=null:
+                {
+                    var card=new ConnectCard("办公电脑 · C8M3P6",false);pendingPanel.Children.Add(card);UpdateSessionsVisible();
+                    switch(flow)
+                    {
+                        case "progress":card.SetProgress(ConnectFlow.Text(ConnectStage.Signal));break;
+                        case "password":_=card.AskPassword(null);break;
+                        case "nopermission":_=card.AskPassword(ConnectFlow.Classify(new IOException(ConnectFlow.RejectedText)).Title+"："+ConnectFlow.Classify(new IOException(ConnectFlow.RejectedText)).Hint);break;
+                        case "failure":_=card.ShowFailure(ConnectFlow.Classify(new IOException("对端离线或未开放远程访问。")),true);break;
+                        case "security":_=card.ShowFailure(ConnectFlow.Classify(new InvalidDataException("该机器的 EndpointId 已改变！已阻止连接")),false);break;
+                        case "success":_=card.Succeed();break;
+                    }
+                    break;
+                }
             }
             var settingsTab=Environment.GetEnvironmentVariable("ARDUI_PREVIEW_PAGE");
             if(settingsTab!=null&&int.TryParse(settingsTab,out var tabIndex)){ShowSettings(true);selectSettingsTab?.Invoke(tabIndex);}
@@ -261,7 +263,7 @@ sealed partial class MainWindow : Window
         Foreground=section?Muted:Ink,Margin=section?new Thickness(2,8,0,0):new Thickness()};
     // Layered white cards on a pale background: a soft shadow instead of a hard outline.
     static Border Card(Control content)=>new(){Child=content,Padding=new Thickness(12),Background=Look.Card,CornerRadius=new CornerRadius(12),
-        BoxShadow=Look.CardShadow,BorderThickness=new Thickness(1),BorderBrush=Look.Line,
+        BoxShadow=Look.CardShadow,BorderThickness=new Thickness(1),BorderBrush=Look.CardEdge,
         Transitions=Look.BrushFade(Border.BackgroundProperty)};
     Button Button(string text,Func<Task> action)
     {
@@ -298,6 +300,21 @@ sealed partial class MainWindow : Window
         void Quiet(string text)=>title.Inlines.Add(new Avalonia.Controls.Documents.Run("  "+text){FontWeight=FontWeight.Normal,FontSize=12,Foreground=Muted});
         if(hasNote&&peer.ComputerName.Length!=0&&peer.ComputerName!=peer.Name)Quiet(peer.ComputerName);
         if(primary!=peer.Code)Quiet(peer.Code);
+    }
+    // Status text of a device row. For a live session the path kind (IPv6 / IPv4 / Relay) is highlighted, then speed and latency.
+    static string StatusOf(TextBlock t)=>t.Tag as string??t.Text??"";
+    static void SetStatus(TextBlock t,string text)
+    {
+        if(t.Tag as string==text)return;
+        t.Tag=text;t.Text=null;   // setting Text clears any runs from the previous state
+        var split=text.IndexOf(" · ",StringComparison.Ordinal);
+        if(Engine.IsLiveText(text)&&split>0&&!text.StartsWith("已连接",StringComparison.Ordinal))
+        {
+            var kind=text[..split];
+            t.Inlines.Add(new Avalonia.Controls.Documents.Run(kind){FontWeight=FontWeight.SemiBold,Foreground=kind=="Relay"?Brush.Parse("#B87A1F"):Look.OnlineDeep});
+            t.Inlines.Add(new Avalonia.Controls.Documents.Run(text[split..]));
+        }
+        else t.Text=text;
     }
     sealed record Slot(string? Header,Peer? Peer,bool Toggle=false);
     bool offlineExpanded;
@@ -365,7 +382,7 @@ sealed partial class MainWindow : Window
     // Four distinct states by colour, size and shape, not just a hue.
     static void Dot(Ellipse dot,string text)
     {
-        if(text.Contains("已连接")||text.Contains("直连")){dot.Width=dot.Height=12;dot.Fill=Look.OnlineDeep;dot.Stroke=Look.OnlineHalo;dot.StrokeThickness=3;}
+        if(Engine.IsLiveText(text)){dot.Width=dot.Height=12;dot.Fill=Look.OnlineDeep;dot.Stroke=Look.OnlineHalo;dot.StrokeThickness=3;}
         else if(text.StartsWith("在线",StringComparison.Ordinal)){dot.Width=dot.Height=11;dot.Fill=Brushes.Transparent;dot.Stroke=Online;dot.StrokeThickness=2;}
         else if(text.StartsWith("正在",StringComparison.Ordinal)||text.Contains("重连")||text.Contains("等待")||text.Contains("中继")){dot.Width=dot.Height=10;dot.Fill=Relay;dot.Stroke=Brushes.Transparent;dot.StrokeThickness=0;}
         else{dot.Width=dot.Height=8;dot.Fill=Idle;dot.Stroke=Brushes.Transparent;dot.StrokeThickness=0;}
@@ -375,7 +392,7 @@ sealed partial class MainWindow : Window
         if(text.StartsWith("在线",StringComparison.Ordinal))return Online;
         if(text.Contains("中继",StringComparison.OrdinalIgnoreCase)||text.Contains("relay",StringComparison.OrdinalIgnoreCase)||
            text.Contains("正在",StringComparison.Ordinal)||text.Contains("重连",StringComparison.Ordinal)||text.Contains("等待",StringComparison.Ordinal))return Relay;
-        if(text.Contains("已连接",StringComparison.Ordinal)||text.Contains("直连",StringComparison.Ordinal))return Online;
+        if(Engine.IsLiveText(text))return Online;
         return Idle;
     }
     void Refresh()
@@ -406,13 +423,13 @@ sealed partial class MainWindow : Window
             var stateText=connecting.Contains(peer.Id)?"正在连接…"
                 :live||directory?.IsReconnecting(peer.Id)==true?engine.Status.GetValueOrDefault(peer.Id,"已连接")
                 :PresenceText(peer,online);
-            FillTitle(view.Title,peer);view.Status.Text=stateText;Dot(view.Indicator,stateText);
+            FillTitle(view.Title,peer);SetStatus(view.Status,stateText);Dot(view.Indicator,stateText);
             var reachable=online!=false||live;
             var busy=connecting.Contains(peer.Id);
             var parked=IsParked(peer);ApplyDensity(view,parked);
             view.Connect.IsVisible=!live&&!parked;view.Connect.Content=busy?"连接中…":"连接";
             view.Connect.Opacity=reachable?1:.4;view.Connect.IsHitTestVisible=reachable&&!busy;
-            foreach(var launcher in view.Launchers)launcher.IsVisible=live;PlaceActions(view,live);
+            foreach(var launcher in view.Launchers)launcher.IsVisible=live;
             view.Pause.IsVisible=live||directory?.IsReconnecting(peer.Id)==true;
             Pulse(view.Indicator,stateText.StartsWith("正在",StringComparison.Ordinal));
             ToolTip.SetTip(view.Title,title+"\n"+peer.Id);ToolTip.SetTip(view.Status,reachable?stateText:stateText+" · 对方在线后才能连接");
@@ -424,18 +441,18 @@ sealed partial class MainWindow : Window
             var dv=deviceViews[peer.Id];var hv=homeViews[peer.Id];
             var live=engine.Outgoing.TryGetValue(peer.Id,out var liveSession)&&liveSession.Live;
             if(live)liveIds.Add(peer.Id);
-            FillTitle(hv.Title,peer);hv.Status.Text=dv.Status.Text;Dot(hv.Indicator,dv.Status.Text??"");
+            FillTitle(hv.Title,peer);SetStatus(hv.Status,StatusOf(dv.Status));Dot(hv.Indicator,StatusOf(dv.Status));
             hv.Connect.IsVisible=false;
-            foreach(var launcher in hv.Launchers)launcher.IsVisible=live;PlaceActions(hv,true);
+            foreach(var launcher in hv.Launchers)launcher.IsVisible=live;
             hv.Pause.IsVisible=dv.Pause.IsVisible;
         }
         var sessionKey=string.Join("|",liveIds);
         if(sessionKey!=sessionSignature)
         {
             sessionSignature=sessionKey;
-            while(sessions.Children.Count>1)sessions.Children.RemoveAt(1);
-            foreach(var id in liveIds)sessions.Children.Add(homeViews[id].Card);
-            sessions.IsVisible=liveIds.Count!=0;
+            livePanel.Children.Clear();
+            foreach(var id in liveIds)livePanel.Children.Add(homeViews[id].Card);
+            UpdateSessionsVisible();
         }
         var recent=peers.OrderByDescending(p=>p.LastConnectedAt).Take(5).Select(p=>(Peer:p,Online:directory?.IsOnline(p.Id))).ToList();
         var recentKey=string.Join("|",recent.Select(r=>r.Peer.Id+r.Online+PeerLabel(r.Peer)));
@@ -492,7 +509,7 @@ sealed partial class MainWindow : Window
         var passwordBlock=new StackPanel{Spacing=4,VerticalAlignment=VerticalAlignment.Center,Children={new TextBlock{Text="连接密码",Foreground=Muted,FontSize=12},invitePassword,inviteRefresh}};
         var passwordRow=new StackPanel{Orientation=Orientation.Horizontal,Spacing=20,Children={ring,passwordBlock}};
         endpoint.Width=double.NaN;endpoint.Height=double.NaN;endpoint.FontSize=12;endpoint.TextWrapping=TextWrapping.Wrap;endpoint.MinHeight=0;
-        var copy=Button("一键复制",async()=>{await Clipboard!.SetTextAsync(InviteText());Say("已复制邀请信息。");});copy.HorizontalAlignment=HorizontalAlignment.Left;
+        var copy=Button("一键复制",async()=>{await Clipboard!.SetTextAsync(InviteText());Say("已复制邀请信息。");});copy.Content=Look.IconText(Look.CopyPath,"一键复制");copy.HorizontalAlignment=HorizontalAlignment.Left;
         var card=Card(WithCloseIcon(new StackPanel{Spacing=14,Children=
         {
             new TextBlock{Text="邀请设备",FontSize=17,FontWeight=FontWeight.SemiBold},
@@ -502,7 +519,7 @@ sealed partial class MainWindow : Window
             new StackPanel{Spacing=4,Children={new TextBlock{Text="EndpointId（供对方核对）",Foreground=Muted,FontSize=12},endpoint}},
             copy
         }},CloseInvite));
-        card.Padding=new Thickness(24);card.Width=460;card.HorizontalAlignment=HorizontalAlignment.Center;card.VerticalAlignment=VerticalAlignment.Center;
+        card.Background=Look.CardSolid;card.BorderBrush=Look.Line;card.Padding=new Thickness(24);card.Width=460;card.HorizontalAlignment=HorizontalAlignment.Center;card.VerticalAlignment=VerticalAlignment.Center;
         inviteOverlay.Child=card;return card;
     }
     void OpenInvite()
@@ -553,10 +570,10 @@ sealed partial class MainWindow : Window
     {
         var displayName=PeerLabel(peer);
         var title=new TextBlock{HorizontalAlignment=HorizontalAlignment.Left,FontSize=14,FontWeight=FontWeight.SemiBold,VerticalAlignment=VerticalAlignment.Center,TextTrimming=TextTrimming.CharacterEllipsis,MaxWidth=420};
-        var state=new TextBlock{Text=engine?.Status.GetValueOrDefault(peer.Id,"正在连接")??"已连接 · P2P 直连 / IPv4 · RTT 18.2 ms · ~86.4 Mbps",Foreground=Muted,FontSize=12,HorizontalAlignment=HorizontalAlignment.Left,VerticalAlignment=VerticalAlignment.Center,TextTrimming=TextTrimming.CharacterEllipsis,Margin=new Thickness(0)};
+        var state=new TextBlock{Text=engine?.Status.GetValueOrDefault(peer.Id,"正在连接")??"IPv4 · 86 Mbps · 18 ms",Foreground=Muted,FontSize=12,HorizontalAlignment=HorizontalAlignment.Left,VerticalAlignment=VerticalAlignment.Center,TextTrimming=TextTrimming.CharacterEllipsis,Margin=new Thickness(0)};
         var indicator=new Ellipse{HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center,Transitions=Look.BrushFade(Ellipse.FillProperty)};Dot(indicator,state.Text??"");
         FillTitle(title,peer);ToolTip.SetTip(title,displayName);ToolTip.SetTip(state,state.Text);
-        var row=new Grid{ColumnDefinitions=new ColumnDefinitions("Auto,*,Auto"),RowDefinitions=new RowDefinitions("Auto,Auto"),MinHeight=52};
+        var row=new Grid{ColumnDefinitions=new ColumnDefinitions("Auto,*,Auto"),RowDefinitions=new RowDefinitions("*,Auto"),MinHeight=52};
         row.Children.Add(new Grid{Width=18,Height=18,Margin=new Thickness(0,0,8,0),VerticalAlignment=VerticalAlignment.Center,Children={indicator}});var text=new StackPanel{Spacing=1,VerticalAlignment=VerticalAlignment.Center,Children={title,state}};Grid.SetColumn(text,1);row.Children.Add(text);
         var actions=new StackPanel{Orientation=Orientation.Horizontal,Spacing=6,VerticalAlignment=VerticalAlignment.Center};
         Button Add(string caption,Func<Task> action)
@@ -564,14 +581,7 @@ sealed partial class MainWindow : Window
         var connect=Add("连接",()=>StartConnect(peer.Code));
         connect.Classes.Add("primary");
         var launchers=new List<Button>();
-        var desktop=Add("桌面",()=>Connecting(peer,async () =>
-        {
-            await directory!.Connect(peer.Code,"",enrolling:false);
-            var session=engine!.Outgoing[peer.Id];var bridge=session.Forward(3389);
-            await Launch("mstsc.exe","/v:127.0.0.1:"+bridge.Port);
-        }));
-        launchers.Add(desktop);
-        var frd=Add("FRD",()=>Connecting(peer,async()=>
+        var frd=Add("远程桌面",()=>Connecting(peer,async()=>
         {
             _=FrdRuntime.Resolve(engine!.Settings.FrdPath);
             await directory!.Connect(peer.Code,"",enrolling:false);
@@ -579,7 +589,6 @@ sealed partial class MainWindow : Window
             Say("FRD 已启动，正在通过加密连接建立桌面。");
         }));
         launchers.Add(frd);
-        ToolTip.SetTip(frd,"打开 FRD 远程桌面；两端需安装支持 FRD 的新版 ArdUi。");
         launchers.Add(Add("文件",()=>Connecting(peer,async () =>
         {
             await directory!.Connect(peer.Code,"",enrolling:false);
@@ -587,20 +596,34 @@ sealed partial class MainWindow : Window
             var path=await WindowsShares.Map(engine!.Outgoing[peer.Id],share,CancellationToken.None);
             await Launch("explorer.exe",path);
         })));
-        var pause=Add("断开",async()=>await directory!.Pause(peer));pause.IsVisible=false;ToolTip.SetTip(pause,"断开当前会话并停止自动恢复；点击“连接”可重新连接。");
-        var moreActions=new StackPanel{Orientation=Orientation.Horizontal,Spacing=6};
-        void More(string caption,Func<Task> action){var button=Button(caption,action);moreActions.Children.Add(button);}
+        var pause=Add("断开",async()=>await directory!.Pause(peer));pause.IsVisible=false;ToolTip.SetTip(pause,"断开连接（停止自动恢复；点击“连接”可重新连接）");
+        pause.Classes.Add("circlex");pause.Content=Look.Icon(Look.CrossPath,10,Brushes.White,2.4);pause.Width=26;pause.Height=26;pause.HorizontalAlignment=HorizontalAlignment.Center;pause.VerticalAlignment=VerticalAlignment.Center;
+        var moreActions=new WrapPanel{Orientation=Orientation.Horizontal};
+        void More(string caption,Func<Task> action){var button=Button(caption,action);button.Margin=new Thickness(0,0,6,6);moreActions.Children.Add(button);}
+        More("远程桌面（RDP）",()=>Connecting(peer,async () =>
+        {
+            await directory!.Connect(peer.Code,"",enrolling:false);
+            var session=engine!.Outgoing[peer.Id];var bridge=session.Forward(3389);
+            await Launch("mstsc.exe","/v:127.0.0.1:"+bridge.Port);
+        }));
         More("EndpointId",async()=>{await Clipboard!.SetTextAsync(peer.Id);Say("完整 EndpointId 已复制："+peer.Id);});
         More("备注",async()=>{peer.Name=await AskText("设备备注",peer.Name);engine!.State.Save();});
         More("分组",async()=>{peer.Group=(await AskText("分组（留空为未分组）",peer.Group)).Trim();engine!.State.Save();});
         More("移除",async()=>await RemoveWithUndo(peer));
         var moreRow=new Border{Child=moreActions,IsVisible=false,Padding=new Thickness(22,8,0,2)};
         var more=new Button{Content="⋯",FontSize=16,Padding=new Thickness(10,0)};more.Classes.Add("quiet");
-        ToolTip.SetTip(more,"备注、分组、复制 EndpointId、移除");
-        more.Click+=(_,_)=>{moreRow.IsVisible=!moreRow.IsVisible;more.Content=moreRow.IsVisible?"收起":"⋯";more.FontSize=moreRow.IsVisible?12:16;};
+        ToolTip.SetTip(more,"更多：RDP、备注、分组、复制 EndpointId、移除");
+        more.Click+=(_,_)=>
+        {
+            moreRow.IsVisible=!moreRow.IsVisible;
+            // expanded: an up arrow collapses the extra actions again
+            if(moreRow.IsVisible){more.Content=Look.Icon(Look.ChevronUpPath,14);ToolTip.SetTip(more,"收起");}
+            else{more.Content="⋯";more.FontSize=16;ToolTip.SetTip(more,"更多：RDP、备注、分组、复制 EndpointId、移除");}
+        };
         actions.Children.Add(more);Grid.SetColumn(actions,2);row.Children.Add(actions);
         var stack=new StackPanel{Spacing=0,Children={row,moreRow}};var card=Card(stack);card.Padding=new Thickness(14,6);
         card.PointerEntered+=(_,_)=>card.Background=Look.CardHover;card.PointerExited+=(_,_)=>card.Background=Look.Card;
+        Look.IconOnly(launchers[0],Look.MonitorPath,"远程桌面（FRD）；两端需安装支持 FRD 的新版 ArdUi");Look.IconOnly(launchers[1],Look.FolderPath,"打开文件共享");
         foreach(var launcher in launchers)launcher.IsVisible=false;
         return new DeviceDisplay(card,indicator,title,state,connect,launchers.ToArray(),pause,actions);
     }
@@ -637,7 +660,7 @@ sealed partial class MainWindow : Window
             var yes=new Button{Content="是，已核对 EndpointId"};var no=new Button{Content="否"};yes.Classes.Add("primary");
             yes.Click+=(_,_)=>result.TrySetResult(true);no.Click+=(_,_)=>result.TrySetResult(false);
             pendingButtons.Children.Add(yes);pendingButtons.Children.Add(no);row.Children.Add(pendingButtons);
-            var pendingCard=Card(WithCloseIcon(row,()=>result.TrySetResult(false)));pendingCard.Padding=new Thickness(22);row.Spacing=10;pendingIncoming.Children.Add(pendingCard);UpdateApproval();
+            var pendingCard=Card(WithCloseIcon(row,()=>result.TrySetResult(false)));pendingCard.Background=Look.CardSolid;pendingCard.BorderBrush=Look.Line;pendingCard.Padding=new Thickness(22);row.Spacing=10;pendingIncoming.Children.Add(pendingCard);UpdateApproval();
             using var pendingCancel=ct.Register(()=>result.TrySetCanceled(ct));
             try{return await result.Task;}finally{pendingIncoming.Children.Remove(pendingCard);UpdateApproval();}
         }

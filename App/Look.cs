@@ -10,12 +10,12 @@ namespace ArdUi;
 // One place for the look: colour tokens, flat rounded buttons, soft inputs and short transitions.
 static class Look
 {
-    public static readonly IBrush Bg = Brush.Parse("#F5F4EE"), Card = Brush.Parse("#FFFFFF"), CardHover = Brush.Parse("#FDFCF9"),
+    public static readonly IBrush Bg = Brush.Parse("#F5F4EE"), Card = Brush.Parse("#D9FFFFFF"), CardHover = Brush.Parse("#EBFFFFFF"), CardSolid = Brush.Parse("#FFFFFF"), CardEdge = Brush.Parse("#C4FFFFFF"),
         Line = Brush.Parse("#E6E3D8"), Ink = Brush.Parse("#1F1E1D"), Muted = Brush.Parse("#7A786F"),
         Accent = Brush.Parse("#C6613F"), AccentHover = Brush.Parse("#B3532F"), AccentPressed = Brush.Parse("#9E4727"),
         Ghost = Brush.Parse("#EFEDE4"), GhostHover = Brush.Parse("#E7E4D8"), GhostPressed = Brush.Parse("#DDD9CA"),
         OnlineDeep = Brush.Parse("#2F7D4F"), OnlineHalo = Brush.Parse("#CFE8D6"), Online = Brush.Parse("#5E9E6E"), Relay = Brush.Parse("#D79A3B"), Idle = Brush.Parse("#BDBAAE");
-    public static readonly BoxShadows CardShadow = BoxShadows.Parse("0 1 1 0 #0A000000");
+    public static readonly BoxShadows CardShadow = BoxShadows.Parse("0 6 18 0 #14301E14, 0 1 2 0 #0A000000");
     static readonly TimeSpan Fast = TimeSpan.FromMilliseconds(130);
 
     static Transitions Fade(AvaloniaProperty brush) => new() { new BrushTransition { Property = brush, Duration = Fast } };
@@ -23,6 +23,25 @@ static class Look
     // Line icons share one stroke style so the cross, minus and share marks look like one family (24-unit grid).
     public const string CrossPath = "M5,5 L19,19 M19,5 L5,19", MinusPath = "M5,12 L19,12",
         SharePath = "M21,5 a3,3 0 1 1 -6,0 a3,3 0 1 1 6,0 z M9,12 a3,3 0 1 1 -6,0 a3,3 0 1 1 6,0 z M21,19 a3,3 0 1 1 -6,0 a3,3 0 1 1 6,0 z M8.59,13.51 l6.83,3.98 M15.41,6.51 l-6.82,3.98";
+    public const string MonitorPath = "M3,5 L21,5 L21,16 L3,16 Z M8,20 L16,20 M12,16 L12,20",
+        FolderPath = "M3,7 L3,18 L21,18 L21,9 L12,9 L10,6 L3,6 Z",
+        CopyPath = "M9,9 L19,9 L19,19 L9,19 Z M5,15 L5,5 L15,5",
+        DocumentPath = "M6,3 L14,3 L18,7 L18,21 L6,21 Z M14,3 L14,7 L18,7 M9,12 L15,12 M9,16 L15,16",
+        DownloadPath = "M12,4 L12,15 M7,11 L12,16 L17,11 M5,20 L19,20",
+        UndoPath = "M9,5 L4,10 L9,15 M4,10 L14,10 A6,6 0 0 1 14,22 L10,22",
+        ChevronUpPath = "M6,15 L12,9 L18,15",
+        RefreshPath = "M20,12 A8,8 0 1 1 17.5,6.2 M20,4 L20,9 L15,9";
+    // Icon followed by a short label, for buttons whose action has a familiar icon but should still be spelled out.
+    public static StackPanel IconText(string path, string text, IBrush? tint = null) => new()
+    {
+        Orientation = Orientation.Horizontal, Spacing = 6, IsHitTestVisible = false,
+        Children = { Icon(path, 14, tint ?? Ink, 1.8), new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center, Foreground = tint ?? Ink } },
+    };
+    // A square-ish icon-only button; the meaning lives in the tooltip.
+    public static void IconOnly(Button button, string path, string tip)
+    {
+        button.Content = Icon(path, 16, Ink, 1.8); button.MinWidth = 0; button.Width = 36; button.Padding = new Thickness(0); ToolTip.SetTip(button, tip);
+    }
     public static Avalonia.Controls.Shapes.Path Icon(string data, double size = 14, IBrush? stroke = null, double thickness = 1.8) => new()
     {
         Data = Geometry.Parse(data), Stroke = stroke ?? Muted, StrokeThickness = thickness, StrokeLineCap = PenLineCap.Round, StrokeJoin = PenLineJoin.Round,
@@ -70,6 +89,14 @@ static class Look
         { Setters = { new Setter(TemplatedControl.BackgroundProperty, Brushes.Transparent), new Setter(TemplatedControl.ForegroundProperty, Muted) } });
         Presenter(styles, x => x.OfType<Button>().Class("quiet").Class(":pointerover").Template().OfType<ContentPresenter>().Name("PART_ContentPresenter"),
             new Setter(ContentPresenter.BackgroundProperty, Ghost));
+
+        // The round grey cross (like the clear button on iOS) used to cancel or dismiss.
+        styles.Add(new Style(x => x.OfType<Button>().Class("circlex"))
+        { Setters = { new Setter(TemplatedControl.BackgroundProperty, Brush.Parse("#C9C6BA")), new Setter(Layoutable.MinHeightProperty, 0.0), new Setter(Layoutable.MinWidthProperty, 0.0), new Setter(TemplatedControl.PaddingProperty, new Thickness(0)), new Setter(TemplatedControl.CornerRadiusProperty, new CornerRadius(13)) } });
+        Presenter(styles, x => x.OfType<Button>().Class("circlex").Class(":pointerover").Template().OfType<ContentPresenter>().Name("PART_ContentPresenter"),
+            new Setter(ContentPresenter.BackgroundProperty, Brush.Parse("#ADAA9E")));
+        Presenter(styles, x => x.OfType<Button>().Class("circlex").Class(":pressed").Template().OfType<ContentPresenter>().Name("PART_ContentPresenter"),
+            new Setter(ContentPresenter.BackgroundProperty, Brush.Parse("#9A978B")));
 
         // Inputs: soft border, rounded, accent ring while focused.
         styles.Add(new Style(x => x.OfType<TextBox>())

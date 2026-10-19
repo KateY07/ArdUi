@@ -10,7 +10,6 @@ sealed partial class MainWindow
     readonly StackPanel recentsBlock = new() { Spacing = 8, IsVisible = false };
     readonly StackPanel sessions = new() { Spacing = 6, IsVisible = false };
     readonly Dictionary<string, DeviceDisplay> homeViews = new();
-    readonly Border flowOverlay = new() { Background = Brush.Parse("#8C1F1E1D"), IsVisible = false };
     readonly Logo titleLogo = new(24);
     readonly Ellipse netDot = new() { Width = 9, Height = 9, Fill = Look.Idle, VerticalAlignment = VerticalAlignment.Center };
     readonly TextBlock netText = new() { Text = "正在启动…", FontSize = 12, Foreground = Look.Muted, VerticalAlignment = VerticalAlignment.Center };
@@ -75,7 +74,7 @@ sealed partial class MainWindow
 
         status.HorizontalAlignment = HorizontalAlignment.Center; status.TextAlignment = TextAlignment.Center; status.MaxWidth = 460;
         var sessionsHeading = new TextBlock { Text = "已连接", FontSize = 12, FontWeight = FontWeight.SemiBold, Foreground = Muted, Margin = new Thickness(4, 6, 0, 0) };
-        sessions.Children.Add(sessionsHeading);
+        sessions.Children.Add(sessionsHeading); sessions.Children.Add(pendingPanel); sessions.Children.Add(livePanel);
         var scroll = new ScrollViewer
         {
             VerticalAlignment = VerticalAlignment.Center,
@@ -135,122 +134,70 @@ sealed partial class MainWindow
     }
 
     // ---- connect flow ------------------------------------------------------------------------------------------------
-    CancellationTokenSource? flowCancel;
-    string flowText = "";
+    // Connecting happens in the "connected" area: a placeholder card flies in, shows progress, asks for the password or
+    // reports a failure in place, and on success draws a check and makes way for the real session card.
+    readonly Dictionary<string, ConnectCard> pendingCards = new();
+    readonly StackPanel pendingPanel = new() { Spacing = 6 }, livePanel = new() { Spacing = 6 };
 
-    void ShowFlow(Control content)
-    {
-        var card = Card(content); card.Padding = new Thickness(26); card.Width = 320; card.CornerRadius = new CornerRadius(22);
-        card.HorizontalAlignment = HorizontalAlignment.Center; card.VerticalAlignment = VerticalAlignment.Center;
-        flowOverlay.Child = card; flowOverlay.IsVisible = true;
-    }
-    void HideFlow() { flowOverlay.IsVisible = false; flowOverlay.Child = null; }
+    void UpdateSessionsVisible() => sessions.IsVisible = pendingPanel.Children.Count != 0 || livePanel.Children.Count != 0;
 
-    TextBlock flowStage = new();
-    void ShowProgress(string code)
-    {
-        // a fresh text block each time: the previous card may still hold the old one
-        flowStage = new TextBlock { Text = ConnectFlow.Text(ConnectStage.Lookup), FontSize = 15, FontWeight = FontWeight.SemiBold, Foreground = Look.Ink, HorizontalAlignment = HorizontalAlignment.Center };
-        var cancel = Button("取消", () => { flowCancel?.Cancel(); return Task.CompletedTask; }); cancel.HorizontalAlignment = HorizontalAlignment.Center; cancel.Width = 96;
-        ShowFlow(new StackPanel
-        {
-            Spacing = 14,
-            Children =
-            {
-                new Logo(52) { Animate = true, HorizontalAlignment = HorizontalAlignment.Center },
-                new TextBlock { Text = "连接 " + code, FontSize = 13, Foreground = Muted, HorizontalAlignment = HorizontalAlignment.Center, FontFamily = new FontFamily("Consolas"), LetterSpacing = 2 },
-                flowStage, cancel,
-            }
-        });
-    }
-
-    Task<string?> AskFirstPassword(string code, string? problem)
-    {
-        var result = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var box = new TextBox { MaxLength = 6, Watermark = "6 位连接密码", FontFamily = new FontFamily("Consolas"), FontSize = 20, LetterSpacing = 5, HorizontalContentAlignment = HorizontalAlignment.Center, MinHeight = 42 };
-        box.PropertyChanged += (_, e) =>
-        {
-            if (e.Property != TextBox.TextProperty) return;
-            var clean = new string((box.Text ?? "").Where(char.IsDigit).ToArray());
-            if (clean != box.Text) box.Text = clean;
-        };
-        var ok = new Button { Content = "连接", Width = 110 }; ok.Classes.Add("primary");
-        var no = new Button { Content = "取消", Width = 90 };
-        void Submit() { if ((box.Text ?? "").Length == 6) result.TrySetResult(box.Text); }
-        ok.Click += (_, _) => Submit(); no.Click += (_, _) => result.TrySetResult(null);
-        box.KeyDown += (_, e) => { if (e.Key == Avalonia.Input.Key.Enter) { e.Handled = true; Submit(); } };
-        var body = new StackPanel { Spacing = 12 };
-        body.Children.Add(new TextBlock { Text = problem == null ? "首次连接 " + code : "没有权限", FontSize = 18, FontWeight = FontWeight.SemiBold, Foreground = problem == null ? Ink : Brush.Parse("#B3432B") });
-        body.Children.Add(new TextBlock { Text = problem ?? "请输入对方提供的 6 位连接密码。通过后，以后连接这台设备不再需要密码。", Foreground = Muted, TextWrapping = TextWrapping.Wrap });
-        body.Children.Add(box);
-        body.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Children = { no, ok } });
-        ShowFlow(body);
-        box.Focus();
-        return result.Task;
-    }
-
-    Task<bool> ShowFailure(ConnectProblem problem)
-    {
-        var result = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var close = new Button { Content = "关闭", Width = 90 }; close.Click += (_, _) => result.TrySetResult(false);
-        var retry = new Button { Content = "重试", Width = 90 }; retry.Classes.Add("primary"); retry.Click += (_, _) => result.TrySetResult(true);
-        var warn = problem.Kind == ConnectFailure.SecurityWarning;
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Children = { close } };
-        if (!warn && problem.Kind != ConnectFailure.Yourself && problem.Kind != ConnectFailure.NotFound) buttons.Children.Add(retry);
-        ShowFlow(new StackPanel
-        {
-            Spacing = 12,
-            Children =
-            {
-                new TextBlock { Text = problem.Title, FontSize = 18, FontWeight = FontWeight.SemiBold, Foreground = warn ? Brush.Parse("#B3432B") : Ink },
-                new TextBlock { Text = problem.Hint, Foreground = Muted, TextWrapping = TextWrapping.Wrap },
-                buttons,
-            }
-        });
-        return result.Task;
-    }
-
-    // Enter a device code: ask for the first-time password when the device is new, show progress, and explain failures.
+    // Enter a device code: ask for the connection password when the device is new, show progress, and explain failures.
     async Task StartConnect(string raw)
     {
         var code = ConnectFlow.NormaliseCode(raw);
         if (code == null) { homeError.Text = "请输入完整的 6 位设备 ID。"; homeError.IsVisible = true; remote.Focus(); return; }
         if (directory == null || engine == null) throw new InvalidOperationException("设备尚未就绪。");
-        bool known; lock (engine.State.Peers) known = engine.State.Peers.Any(p => p.Code == code);
-        string? password = null;
-        if (!known)
-        {
-            password = await AskFirstPassword(code, null);
-            if (password == null) { HideFlow(); return; }
-        }
-        void OnStage(string machine, ConnectStage stage) { if (machine == code) Dispatcher.UIThread.Post(() => flowStage.Text = ConnectFlow.Text(stage)); }
+        if (pendingCards.ContainsKey(code)) return;
+        Peer? existing; lock (engine.State.Peers) existing = engine.State.Peers.FirstOrDefault(p => p.Code == code);
+        var card = new ConnectCard(existing == null ? code : PeerLabel(existing).Split(" · ")[0] + " · " + code, !previewMode);
+        pendingCards[code] = card; pendingPanel.Children.Insert(0, card); UpdateSessionsVisible();
+        card.SetProgress(ConnectFlow.Text(ConnectStage.Lookup));
+        card.BringIntoView();
+        var cancel = new CancellationTokenSource();
+        card.CancelRequested += () => cancel.Cancel();
+        void OnStage(string machine, ConnectStage stage) { if (machine == code) Dispatcher.UIThread.Post(() => card.SetProgress(ConnectFlow.Text(stage))); }
         directory.Stage += OnStage;
         try
         {
+            await card.Enter();
+            string? password = null;
+            if (existing == null)
+            {
+                password = await card.AskPassword(null);
+                if (password == null) return;
+            }
             while (true)
             {
-                flowCancel = new CancellationTokenSource(); ShowProgress(code);
+                card.SetProgress(ConnectFlow.Text(ConnectStage.Lookup));
                 try
                 {
-                    await directory.Connect(code, password ?? "", flowCancel.Token, enrolling: password != null);
-                    HideFlow(); remote.Text = ""; Say("已连接 " + code + "。"); return;
+                    await directory.Connect(code, password ?? "", cancel.Token, enrolling: password != null);
+                    remote.Text = ""; Say("已连接 " + code + "。");
+                    await card.Succeed();
+                    return;
                 }
                 catch (Exception ex)
                 {
-                    if (flowCancel.IsCancellationRequested) { HideFlow(); Say("已取消。"); return; }
+                    if (cancel.IsCancellationRequested) { Say("已取消。"); return; }
                     var problem = ConnectFlow.Classify(ex);
                     engine.Events.Add("ERROR", "连接", $"{code} 失败（{problem.Kind}）：{ex.Message}");
                     if (problem.AskPassword)
                     {
-                        password = await AskFirstPassword(code, problem.Hint);
-                        if (password == null) { HideFlow(); return; }
+                        password = await card.AskPassword(problem.Title + "：" + problem.Hint);
+                        if (password == null) return;
                         continue;
                     }
-                    if (!await ShowFailure(problem)) { HideFlow(); return; }
+                    var canRetry = problem.Kind is ConnectFailure.Offline or ConnectFailure.Network or ConnectFailure.Other;
+                    if (!await card.ShowFailure(problem, canRetry)) return;
                 }
             }
         }
-        finally { directory.Stage -= OnStage; flowCancel = null; }
+        finally
+        {
+            directory.Stage -= OnStage;
+            await card.Leave();
+            pendingPanel.Children.Remove(card); pendingCards.Remove(code); UpdateSessionsVisible();
+        }
     }
 
     // ---- settings ---------------------------------------------------------------------------------------------------
@@ -270,6 +217,7 @@ sealed partial class MainWindow
         var accessTab = new StackPanel { Spacing = 8, Children = { incomingArea, Section("可访问本机的设备", Card(controllers)) } };
         var logButton = Button("打开日志", OpenLogFile); var exportButton = Button("导出诊断包", () => { var path = Diagnostics.Export(Program.DataRoot, engine); Say("诊断包已导出：" + path); return Task.CompletedTask; });
         var copyEndpoint = Button("复制 EndpointId", async () => { await Clipboard!.SetTextAsync(engine?.Id ?? ""); Say("已复制本机 EndpointId。"); });
+        logButton.Content = Look.IconText(Look.DocumentPath, "打开日志"); exportButton.Content = Look.IconText(Look.DownloadPath, "导出诊断包"); copyEndpoint.Content = Look.IconText(Look.CopyPath, "复制 EndpointId");
         foreach (var b in new[] { logButton, exportButton, copyEndpoint }) { b.HorizontalAlignment = HorizontalAlignment.Left; b.MinWidth = 140; }
         var aboutTab = new StackPanel
         {
@@ -280,7 +228,7 @@ sealed partial class MainWindow
                 Section("日志", Card(new StackPanel { Spacing = 10, Children = { new TextBlock { Text = "日志默认记录详细信息，保存在本机，并用默认文本编辑器打开。", Foreground = Muted, TextWrapping = TextWrapping.Wrap }, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { logButton, exportButton } } } })),
             }
         };
-        startupBox = new CheckBox { Content = "随 Windows 启动（在托盘中静默运行）", IsChecked = Autostart.Enabled };
+        startupBox = new ToggleSwitch { OnContent = "随 Windows 启动（在托盘中静默运行）", OffContent = "随 Windows 启动（在托盘中静默运行）", IsChecked = Autostart.Enabled };
         startupBox.IsCheckedChanged += (_, _) =>
         {
             if (syncingStartup) return;
@@ -312,7 +260,7 @@ sealed partial class MainWindow
         return settingsPage;
     }
     Action<int>? selectSettingsTab;
-    CheckBox? startupBox;
+    ToggleSwitch? startupBox;
     bool syncingStartup;
 
     void ShowSettings(bool show)

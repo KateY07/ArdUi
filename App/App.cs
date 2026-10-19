@@ -35,6 +35,8 @@ sealed class App : Application
         // The Simple theme draws switches and selections from its own "ThemeAccent*" resources.
         foreach (var name in new[] { "ThemeAccentColor", "ThemeAccentColor2", "ThemeAccentColor3", "ThemeAccentColor4" })
             Resources[name] = Color.Parse("#C6613F");
+        foreach (var name in new[] { "SystemControlHighlightAccentBrush", "SystemControlBackgroundAccentBrush", "CheckBoxCheckBackgroundFillChecked", "CheckBoxCheckBackgroundFillCheckedPointerOver", "CheckBoxCheckBackgroundStrokeChecked", "CheckBoxCheckBackgroundStrokeCheckedPointerOver" })
+            Resources[name] = new SolidColorBrush(Color.Parse("#C6613F"));
         foreach (var name in new[] { "ThemeAccentBrush", "ThemeAccentBrush2", "ThemeAccentBrush3", "ThemeAccentBrush4" })
             Resources[name] = new SolidColorBrush(Color.Parse("#C6613F"));
     }
