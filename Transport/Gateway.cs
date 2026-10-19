@@ -76,7 +76,7 @@ sealed class Gateway : IAsyncDisposable
                     var grant = await authenticate(request, handshake.Token);
                     var accepted = grant != null;
                     await Wire.WriteJson(stream, new AdmissionReply(accepted,
-                        accepted ? null : "密码错误、对端拒绝了首次指纹确认，或远程访问已关闭。",
+                        accepted ? null : ConnectFlow.RejectedText,
                         accepted ? Convert.ToHexString(token) : null,
                         accepted ? settings.TcpPorts : [], accepted ? settings.UdpPorts : [], grant), handshake.Token);
                     if (accepted) Attached?.Invoke();

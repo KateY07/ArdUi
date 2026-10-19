@@ -18,6 +18,7 @@ static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        StartupTrace.Mark("Main entered");
         try
         {
             if(args.Contains("--child-readiness-fixture"))
@@ -31,6 +32,8 @@ static class Program
             { Console.WriteLine(IdentityStore.Prepare(args[1])); return 0; }
             if (args.Length == 4 && args[0] == "--verify-release")
             { Release.Verify(args[1],args[2],args[3]); return 0; }
+            if (args.Contains("--connect-flow-test"))
+                return ConnectFlowTests.Run();
             if (args.Contains("--self-test"))
                 return SelfTest.RunAsync().GetAwaiter().GetResult();
             if (args.Contains("--prototype-test"))
@@ -41,6 +44,19 @@ static class Program
                 return FrdTest.Run(args).GetAwaiter().GetResult();
             if (args.Length == 2 && args[0] == "--render-preview")
                 return Preview.Render(args[1]);
+            if (args.Length == 2 && args[0] == "--render-placement")
+                return PlacementPreview.Render(args[1]);
+            if (args.Length == 2 && args[0] == "--render-titlebars")
+                return TitleBarPreview.Render(args[1]);
+            if (args.Length == 2 && args[0] == "--render-concepts")
+                return ConceptPreview.Render(args[1]);
+            if (args.Length == 2 && args[0] == "--render-logo-preview")
+                return LogoPreview.Render(args[1]);
+            if (args.Length == 2 && args[0] == "--render-home-preview")
+                return HomePreview.Render(args[1]);
+            // A second launch (autostart, shortcut, installer) shows the running window instead of starting a clash.
+            if(!SingleInstance.TryAcquire(DataRoot))return 0;
+            StartupTrace.Mark("single instance acquired; building app");
             return AppBuilder.Configure<App>().UsePlatformDetect().LogToTrace()
                 .StartWithClassicDesktopLifetime(args);
         }

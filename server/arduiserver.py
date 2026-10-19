@@ -19,6 +19,7 @@ DB = os.environ.get('ARDUI_DATABASE', '/var/lib/arduiserver/devices.sqlite3')
 CODE = re.compile(r'[A-Z0-9]{6}\Z')
 ENDPOINT = re.compile(r'[0-9a-f]{64}\Z')
 TICKET = re.compile(r'[0-9a-f]{32}\Z')
+COMPUTER_NAME = re.compile(r'[^\x00-\x1f\x7f]{1,64}\Z')
 SIGNING_KEY = os.environ.get('ARDUI_TRANSIT_KEY', DB + '.transit-key')
 VERSION = 'v2.pre1'
 
@@ -111,6 +112,9 @@ def initialize():
           status TEXT NOT NULL, ticket TEXT NOT NULL, offer TEXT);
         CREATE INDEX IF NOT EXISTS transit_owner ON transit_routes(c,status);
         ''')
+        # Computer name shown to controllers that hold a signed grant; added after the first release.
+        if 'name' not in {row[1] for row in db.execute('PRAGMA table_info(devices)')}:
+            db.execute("ALTER TABLE devices ADD COLUMN name TEXT NOT NULL DEFAULT ''")
     os.chmod(DB, 0o600)
 
 def limit(name, count, seconds):
@@ -203,13 +207,17 @@ def dispatch(path, endpoint, data, ip, envelope):
         return {'offline':True}
     if path == '/api/v1/poll':
         enabled=data.get('enabled')
-        if type(enabled) is not bool or set(data)!={'enabled'}: raise ApiError(400,'无效访问开关；服务器不接收密码。')
+        if type(enabled) is not bool or 'enabled' not in data or not set(data)<={'enabled','name'}: raise ApiError(400,'无效访问开关；服务器不接收密码。')
+        computer=data.get('name')
+        if computer is not None and (not isinstance(computer,str) or not COMPUTER_NAME.fullmatch(computer)): raise ApiError(400,'计算机名无效。')
         with database() as db:
             db.execute('BEGIN IMMEDIATE')
             row=registered(db,endpoint)
             # Poll cannot re-enable server permission; /access is required.
             active=bool(enabled and row['enabled'])
             db.execute('UPDATE devices SET seen=? WHERE endpoint=?',(now,endpoint))
+            if computer is not None and computer!=row['name']:
+                db.execute('UPDATE devices SET name=? WHERE endpoint=?',(computer,endpoint))
             if not enabled:
                 db.execute('UPDATE devices SET enabled=0 WHERE endpoint=?',(endpoint,))
                 db.execute('DELETE FROM requests WHERE target=?',(endpoint,))
@@ -218,6 +226,22 @@ def dispatch(path, endpoint, data, ip, envelope):
               r.client_session AS clientSessionId,r.expires,r.proof FROM requests r JOIN devices d ON d.endpoint=r.caller
               WHERE r.target=? AND r.status='pending' AND r.epoch=? ORDER BY r.rowid LIMIT 16''', (endpoint,row['epoch'])).fetchall() if active else []
         return {'enabled':active,'tickets':[{**dict(r),'proof':json.loads(r['proof'])} for r in tickets]}
+    if path == '/api/v1/presence':
+        peers=data.get('peers')
+        if set(data)!={'peers'} or not isinstance(peers,list) or len(peers)>64: raise ApiError(400,'在线状态请求无效。')
+        limit('presence:'+endpoint,30,60)
+        answer={}
+        with database() as db:
+            registered(db,endpoint)
+            for item in peers:
+                if not isinstance(item,dict) or set(item)!={'endpoint','grant'}: raise ApiError(400,'在线状态请求无效。')
+                target=text(item,'endpoint',ENDPOINT)
+                try: check_grant(item['grant'],endpoint,target)
+                except ApiError: continue   # without the target's signed grant nothing is revealed about it
+                row=db.execute('SELECT enabled,seen,name FROM devices WHERE endpoint=?',(target,)).fetchone()
+                if row is None: continue
+                answer[target]={'online':bool(row['enabled'] and row['seen']>=now-20),'name':row['name']}
+        return {'peers':answer}
     if path == '/api/v1/connect':
         code=text(data,'code',CODE)
         session=text(data,'sessionId',ENDPOINT)

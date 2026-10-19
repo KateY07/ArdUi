@@ -26,6 +26,10 @@ sealed class DirectoryClient : IAsyncDisposable
     readonly Dictionary<string, long> seen = new();
     readonly Queue<DateTime> attempts = new();
     CancellationTokenSource incoming = new();
+    // Who is online, learned from the trusted server only; nothing here opens a connection to a device.
+    readonly ConcurrentDictionary<string,(PresenceEntry Entry,DateTimeOffset At)> presence=new();
+    DateTimeOffset presenceAt;
+    bool sendComputerName=true;
     Task loop = Task.CompletedTask;
     string code = "";
     bool online;
@@ -138,11 +142,29 @@ sealed class DirectoryClient : IAsyncDisposable
         File.WriteAllText(saved, JsonSerializer.Serialize(info, Wire.Json));
         code = info.Code; online = true; Changed?.Invoke();
     }
-    public void Start()=>loop=Run();
-    void StartReconnects()
+    // The loop (network calls, signing, file writes) runs on the thread pool; UI code only receives its events.
+    public void Start(){engine.Events.Add("INFO","服务器","正在连接可信服务器 "+engine.Settings.Server);loop=Task.Run(Run);}
+    // null = unknown (server unreachable, old server, or no fresh answer yet).
+    public bool? IsOnline(string endpoint)
     {
-        Peer[] peers;lock(engine.State.Peers)peers=engine.State.Peers.Where(p=>p.AutoConnect).ToArray();
-        foreach(var peer in peers)EnsureReconnect(peer);
+        if(!presence.TryGetValue(endpoint,out var seen)||DateTimeOffset.UtcNow-seen.At>TimeSpan.FromSeconds(60))return null;
+        return seen.Entry.Online;
+    }
+    public bool IsReconnecting(string endpoint)=>reconnects.ContainsKey(endpoint);
+    async Task RefreshPresence(CancellationToken ct)
+    {
+        Peer[] peers;lock(engine.State.Peers)peers=engine.State.Peers.Where(p=>p.Grant!=null).Take(64).ToArray();
+        if(peers.Length==0)return;
+        var reply=await Call<PresenceReply>("/api/v1/presence",new{peers=peers.Select(p=>new{endpoint=p.Id,grant=p.Grant}).ToArray()},ct);
+        var now=DateTimeOffset.UtcNow;var changed=false;
+        foreach(var peer in peers)
+        {
+            if(!reply.Peers.TryGetValue(peer.Id,out var entry))continue;
+            presence[peer.Id]=(entry,now);
+            if(entry.Name.Length!=0&&peer.ComputerName!=entry.Name){peer.ComputerName=entry.Name;changed=true;}
+        }
+        if(changed)engine.State.Save();
+        Changed?.Invoke();
     }
     void EnsureReconnect(Peer peer)
     {
@@ -164,6 +186,13 @@ sealed class DirectoryClient : IAsyncDisposable
             if(engine.Outgoing.TryGetValue(peer.Id,out var active)&&active.Live)
             {
                 try{await active.Completion.WaitAsync(ct);}catch(OperationCanceledException){break;}
+                continue;
+            }
+            // Never ask the server to wake a device that is known to be offline.
+            if(IsOnline(peer.Id)==false)
+            {
+                engine.SetStatus(peer.Id,"对方离线 · 上线后自动恢复");
+                try{await Task.Delay(TimeSpan.FromSeconds(5),ct);}catch(OperationCanceledException){break;}
                 continue;
             }
             engine.SetStatus(peer.Id,delay==1?"正在自动恢复连接…":$"自动重连等待 {delay} 秒…");
@@ -199,14 +228,21 @@ sealed class DirectoryClient : IAsyncDisposable
                     if (Enabled) await Call<JsonElement>("/api/v1/access", new { enabled = true }, stop.Token);
                 }
                 await Poll(stop.Token);
-                StartReconnects();
                 // The status line keeps the last notice, so recovery must replace the earlier failure text.
-                if (announced) Notice?.Invoke("可信服务器连接已恢复");
+                if (announced) { Notice?.Invoke("网络已恢复"); engine.Events.Add("INFO", "服务器", "可信服务器连接已恢复"); }
                 online = true; announced = false; Changed?.Invoke();
+                if (DateTimeOffset.UtcNow - presenceAt >= TimeSpan.FromSeconds(15))
+                {
+                    presenceAt = DateTimeOffset.UtcNow;
+                    // Presence is informational: a failure (or an older server) leaves devices "unknown", never offline.
+                    try { await RefreshPresence(stop.Token); }
+                    catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
+                    catch { }
+                }
             }
             catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
             catch (Exception ex)
-            { online = false; Changed?.Invoke(); if (!announced) Notice?.Invoke("无法连接可信服务器，每 3 秒自动重试：" + ex.Message); announced = true; }
+            { online = false; Changed?.Invoke(); if (!announced) { Notice?.Invoke("网络不稳定，正在重试…"); engine.Events.Add("ERROR", "服务器", "无法连接可信服务器，每 3 秒重试一次：" + ex.Message); } announced = true; }
             try { await Task.Delay(3000, stop.Token); } catch (OperationCanceledException) { break; }
         }
     }
@@ -216,7 +252,14 @@ sealed class DirectoryClient : IAsyncDisposable
         await edits.WaitAsync(ct);
         try
         {
-            var reply = await Call<PollReply>("/api/v1/poll", new { enabled = Enabled }, ct);
+            PollReply reply;
+            try { reply = await Call<PollReply>("/api/v1/poll", sendComputerName ? new { enabled = Enabled, name = Environment.MachineName } : new { enabled = Enabled }, ct); }
+            catch (IOException ex) when (sendComputerName && ex.Message.Contains("无效访问开关"))
+            {
+                // A server from before computer names rejects the extra field; keep working without it.
+                sendComputerName = false;
+                reply = await Call<PollReply>("/api/v1/poll", new { enabled = Enabled }, ct);
+            }
             if (!Enabled) return;
             var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             foreach (var old in seen.Where(p => p.Value < now).Select(p => p.Key).ToArray()) seen.Remove(old);
@@ -314,9 +357,17 @@ sealed class DirectoryClient : IAsyncDisposable
         }
         finally { edits.Release(); }
     }
-    public async Task Connect(string machine,string password,CancellationToken ct=default,bool enrolling=true)
+    // Spawning ard.exe and the session directory work are synchronous at the start of a connection, so keep them off the UI thread.
+    // Raised as a connection moves through its stages, for the progress display.
+    public event Action<string,ConnectStage>? Stage;
+    void Report(string machine,ConnectStage stage){engine.Events.Add("INFO","连接",machine+" · "+stage);Stage?.Invoke(machine,stage);}
+    public Task Connect(string machine,string password,CancellationToken ct=default,bool enrolling=true)=>Task.Run(()=>ConnectCore(machine,password,ct,enrolling),ct);
+    async Task ConnectCore(string machine,string password,CancellationToken ct,bool enrolling)
     {
-        await ConnectOnce(machine,password,enrolling,ct,false);
+        engine.Events.Add("INFO","连接","正在连接 "+machine+(enrolling?"（首次授权）":""));
+        try{await ConnectOnce(machine,password,enrolling,ct,false);}
+        catch(Exception ex)when(ex is not OperationCanceledException){engine.Events.Add("ERROR","连接","连接 "+machine+" 失败："+ex.Message);throw;}
+        engine.Events.Add("INFO","连接","已连接 "+machine);Stage?.Invoke(machine,ConnectStage.Done);
         machine=Wire.Machine(machine);Peer peer;lock(engine.State.Peers)peer=engine.State.Peers.Single(p=>p.Code==machine);
         EnsureReconnect(peer);Changed?.Invoke();
     }
@@ -327,9 +378,13 @@ sealed class DirectoryClient : IAsyncDisposable
         await ConnectOnceCore(machine,password,enrolling,operation.Token,background);
         operation.Commit(()=>
         {
-            if(background)return;
             lock(engine.State.Peers)
-            {var peer=engine.State.Peers.Single(p=>p.Code==machine);peer.AutoConnect=true;engine.State.Save();}
+            {
+                var peer=engine.State.Peers.Single(p=>p.Code==machine);
+                peer.LastConnectedAt=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                if(!background)peer.AutoConnect=true;   // only a connection the user asked for is kept alive afterwards
+                engine.State.Save();
+            }
         });
     }
     async Task ConnectOnceCore(string machine,string password,bool enrolling,CancellationToken ct,bool background)
@@ -338,12 +393,14 @@ sealed class DirectoryClient : IAsyncDisposable
         password=password.Trim();
         if (code.Length == 0) await Register(ct);
         if (machine == Code) throw new InvalidOperationException("不能连接本机。");
+        Report(machine,ConnectStage.Lookup);
         var target = await Call<MachineInfo>("/api/v1/lookup", new { code = machine }, ct);
         if (target.Code != machine) throw new InvalidDataException("机器编号不匹配。");
         Wire.Endpoint(target.Endpoint);
         string? pinned;
         lock (sync) access.Targets.TryGetValue(machine, out pinned);
         if (pinned != null && pinned != target.Endpoint) throw new InvalidDataException("该机器的 EndpointId 已改变！已阻止连接，请通过独立渠道核对，不能自动信任服务器的新映射。");
+        Report(machine,ConnectStage.Verify);
         if (pinned == null)
         {
             if (Confirm == null || !await Confirm(new Pairing(machine, target.Endpoint, false), ct)) throw new OperationCanceledException("尚未核对对端 EndpointId。");
@@ -362,6 +419,7 @@ sealed class DirectoryClient : IAsyncDisposable
         {
             var local = await Ard.Identity(dir, timeout.Token);
             var request = new ServerRequest(machine,target.Endpoint,local,Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow.AddSeconds(background?60:300).ToUnixTimeSeconds());
+            Report(machine,ConnectStage.Signal);
             await Call<JsonElement>("/api/v1/connect", request, timeout.Token);
             ServerOffer? offer = null;
             while (offer == null)
@@ -376,6 +434,7 @@ sealed class DirectoryClient : IAsyncDisposable
                 Wire.Endpoint(offer.SessionId);
             }
             transferred = true;
+            Report(machine,ConnectStage.Link);
             await engine.ConnectServerSession(target, dir, offer, enrolling, password, timeout.Token);
         }
         finally { if (!transferred) try { Directory.Delete(dir, true); } catch (IOException) { } }
@@ -398,9 +457,10 @@ sealed class DirectoryClient : IAsyncDisposable
     {
         if(snapshot.Grant==null)throw new InvalidDataException("设备授权记录不完整，无法撤销移除。");
         var peer=engine.State.GetOrAdd(snapshot.Id,snapshot.Code,snapshot.Grant);
-        peer.Name=snapshot.Name;peer.AutoConnect=snapshot.AutoConnect;engine.State.Save();
+        peer.Name=snapshot.Name;peer.Group=snapshot.Group;peer.ComputerName=snapshot.ComputerName;
+        peer.LastConnectedAt=snapshot.LastConnectedAt;peer.AutoConnect=false;engine.State.Save();
         lock(sync){access.Targets[peer.Code]=peer.Id;Save();}
-        if(peer.AutoConnect)EnsureReconnect(peer);Changed?.Invoke();
+        Changed?.Invoke();
     }
     public void SetSideWidth(double width)
     {

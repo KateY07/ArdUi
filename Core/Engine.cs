@@ -9,6 +9,7 @@ sealed class Engine : IAsyncDisposable
     public ConcurrentDictionary<string, Session> Incoming { get; } = new();
     public ConcurrentDictionary<string, string> Status { get; } = new();
     public ConcurrentQueue<string> Logs { get; } = new();
+    public EventLog Events { get; } = new();
     public event Action? Changed;
     public event Action<string>? Notice;
     public DirectoryClient? DirectoryApi { get; set; }
@@ -20,6 +21,7 @@ sealed class Engine : IAsyncDisposable
         settings.Validate();
         if (!File.Exists(Path.Combine(root,"device","identity"))) throw new IOException("本机身份尚未安装，请重新执行官方 install.ps1。运行客户端不会自动生成新身份。");
         var state=new State(root);
+        StartupTrace.Mark("state opened; asking ard for the identity");
         try { return new Engine(state,settings,await Ard.Identity(state.IdentityDirectory,CancellationToken.None)); }
         catch { state.Dispose(); throw; }
     }
@@ -37,8 +39,11 @@ sealed class Engine : IAsyncDisposable
     {
         session.Process.Output += line =>
         {
+            FileLog.Write("ard " + session.PeerId[..8], line);
+            if (line.Contains(" WARN ", StringComparison.Ordinal) || line.Contains(" ERROR ", StringComparison.Ordinal)) Events.AddFromArd(line);
             if (line.Contains("CONNECTED", StringComparison.Ordinal) || line.Contains("network path selected", StringComparison.Ordinal) || line.Contains("READY:", StringComparison.Ordinal))
             {
+                Events.AddFromArd(line);
                 Logs.Enqueue($"{DateTime.Now:HH:mm:ss} {line}");
                 while (Logs.Count > 4) Logs.TryDequeue(out _);
             }

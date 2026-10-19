@@ -31,5 +31,14 @@ if($env:ARDUI_INSTALL_NO_SHORTCUT -ne '1'){
     $shortcut.Description='ArdUi startup'
     $shortcut.Save()
 }
-if($env:ARDUI_INSTALL_NO_START -ne '1'){Start-Process -FilePath $launcher}
+if($env:ARDUI_INSTALL_NO_START -ne '1'){
+    # ArdUi keeps one instance per data directory: a still-running older version would only be activated by the
+    # new launch and keep running. Stop other versions (and their ard.exe) under this installation first.
+    $versions=Join-Path $root 'versions'
+    Get-CimInstance Win32_Process -Filter "Name='ArdUi.exe' OR Name='ard.exe'" | Where-Object {
+        $_.ExecutablePath -and $_.ExecutablePath.StartsWith($versions,[StringComparison]::OrdinalIgnoreCase) -and
+        -not $_.ExecutablePath.StartsWith($destination+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)
+    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Process -FilePath $launcher
+}
 Write-Host "ArdUi $version installed and started at $root"

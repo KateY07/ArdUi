@@ -15,7 +15,7 @@ sealed class Settings
     public string MasterUrl => $"https://{new Uri(Relay).Host}:{MasterQadPort}/";
     public string MasterKey => RelayKey["spki:".Length..];
     public string FrdPath { get; set; } = "";
-    public bool DetailedArdDiagnostics { get; set; }
+    public bool DetailedArdDiagnostics { get; set; } = true;   // verbose by default; the log file is the place to look
     public int[] TcpPorts { get; set; } = [3389, 445];
     public int[] UdpPorts { get; set; } = [3389];
     public void Validate()
@@ -40,6 +40,11 @@ sealed class Peer
     public string Name { get; set; } = "";
     public SignedEnvelope? Grant { get; set; }
     public bool AutoConnect { get; set; } = true;
+    // Unix seconds of the last established session (0 = never); devices are listed most recently used first.
+    public long LastConnectedAt { get; set; }
+    public string Group { get; set; } = "";
+    // Reported by the controlled machine itself; shown next to the user's own note.
+    public string ComputerName { get; set; } = "";
 }
 
 sealed record SignedEnvelope(string Endpoint, long IssuedAt, string Nonce, string Payload, string Signature);
@@ -48,6 +53,8 @@ sealed record ServerRequest(string Code, string TargetEndpoint, string SessionId
 sealed record ServerOffer(string SessionId, string RequestId, string ControllerEndpoint, string TargetEndpoint, string ClientSessionId, long Expires);
 sealed record ServerTicket(string Id, string ControllerEndpoint, string ControllerCode, string ClientSessionId, long Expires, SignedEnvelope Proof);
 sealed record PollReply(bool Enabled, ServerTicket[] Tickets);
+sealed record PresenceEntry(bool Online, string Name);
+sealed record PresenceReply(Dictionary<string, PresenceEntry> Peers);
 sealed record TicketReply(string Status, SignedEnvelope? Offer);
 sealed record PasswordRequest(bool Enroll, string Password);
 sealed record GrantReceipt(string ControllerEndpoint, string TargetEndpoint, string GrantId);
