@@ -50,7 +50,7 @@ sealed partial class MainWindow : Window
     }
     readonly bool previewMode;
     // Shown while the very first connection to the trusted server is being made (gives up after 12 s; the footer spinner continues).
-    readonly Border connectingOverlay=new(){Background=Brush.Parse("#F2F7EFE8"),IsVisible=false};
+    readonly Border connectingOverlay=new(){Background=Brush.Parse("#FCF7EFE8"),IsVisible=false,Transitions=new Avalonia.Animation.Transitions{new Avalonia.Animation.DoubleTransition{Property=OpacityProperty,Duration=TimeSpan.FromMilliseconds(500),Easing=new Avalonia.Animation.Easings.CubicEaseInOut()}}};
     readonly DateTime appStarted=DateTime.UtcNow;
     bool everOnline;
     void UpdateConnecting()
@@ -58,7 +58,14 @@ sealed partial class MainWindow : Window
         if(previewMode)return;
         if(directory?.Online==true)everOnline=true;
         titleLogo.Animate=directory==null||!directory.Online;
-        connectingOverlay.IsVisible=!everOnline&&DateTime.UtcNow-appStarted<TimeSpan.FromSeconds(12)&&!approvalOverlay.IsVisible;
+        var show=!everOnline&&DateTime.UtcNow-appStarted<TimeSpan.FromSeconds(12)&&!approvalOverlay.IsVisible;
+        // Leaving the start-up screen is a slow fade into the home page, not a cut.
+        if(show){connectingOverlay.IsVisible=true;connectingOverlay.Opacity=1;connectingOverlay.IsHitTestVisible=true;}
+        else if(connectingOverlay.IsVisible&&connectingOverlay.Opacity>0)
+        {
+            connectingOverlay.IsHitTestVisible=false;connectingOverlay.Opacity=0;
+            DispatcherTimer.RunOnce(()=>{if(connectingOverlay.Opacity==0)connectingOverlay.IsVisible=false;},TimeSpan.FromMilliseconds(600));
+        }
     }
     // Incoming approval requests sit in the middle of the whole window on a dimmed backdrop and block the page behind.
     readonly Border approvalOverlay=new(){Background=Brush.Parse("#8C1F1E1D"),IsVisible=false};
@@ -107,12 +114,11 @@ sealed partial class MainWindow : Window
         capsule.PointerPressed+=async(_,e)=>
         {
             e.Handled=true;if(machine.Text.Length!=6||!machine.Text.All(char.IsLetterOrDigit))return;
-            await Clipboard!.SetTextAsync(machine.Text);Say("已复制本机设备 ID。");
+            await Clipboard!.SetTextAsync(machine.Text);Toast("已复制本机设备 ID");
         };
         var settingsButton=Chrome.IconButton(Chrome.SettingsPath,15);ToolTip.SetTip(settingsButton,"设置");settingsButton.Click+=(_,_)=>ShowSettings(!settingsOpen);
-        var minimise=Chrome.IconButton(Look.MinusPath,15);minimise.Content=Look.MinusIcon();ToolTip.SetTip(minimise,"最小化到托盘");minimise.Click+=(_,_)=>WindowState=WindowState.Minimized;
-        var closeWindow=Chrome.IconButton(Look.CrossPath,12);ToolTip.SetTip(closeWindow,"关闭（隐藏到托盘）");closeWindow.Click+=(_,_)=>Close();
-        var windowButtons=new StackPanel{Orientation=Orientation.Horizontal,Spacing=8,Children={Chrome.Disc(settingsButton),Chrome.Disc(minimise),Chrome.Disc(closeWindow)}};
+        var closeWindow=Chrome.IconButton(Look.CrossPath,12);ToolTip.SetTip(closeWindow,"关闭到托盘（程序继续在托盘中运行）");closeWindow.Click+=(_,_)=>Close();
+        var windowButtons=new StackPanel{Orientation=Orientation.Horizontal,Spacing=8,Children={Chrome.Disc(settingsButton),Chrome.Disc(closeWindow)}};
         var bar=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto"),Margin=new Thickness(14,8,10,0),Height=40,VerticalAlignment=VerticalAlignment.Top,Background=Brushes.Transparent};
         bar.Children.Add(capsule);windowButtons.VerticalAlignment=VerticalAlignment.Center;Grid.SetColumn(windowButtons,1);bar.Children.Add(windowButtons);
         bar.PointerPressed+=(_,e)=>{if(!e.Handled&&e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)BeginMoveDrag(e);};
@@ -134,7 +140,7 @@ sealed partial class MainWindow : Window
         connectingOverlay.Child=new StackPanel{Spacing=14,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center,
             Children={new Logo(72){Animate=true,HorizontalAlignment=HorizontalAlignment.Center},T_("正在连接网络…")}};
         connectingOverlay.IsVisible=!previewMode;
-        Content=new Grid{Children={Chrome.Backdrop(!previewMode),pageArea,bar,connectingOverlay,inviteOverlay,approvalOverlay}};
+        Content=new Grid{Children={Chrome.Backdrop(!previewMode),pageArea,connectingOverlay,bar,inviteOverlay,approvalOverlay,toastHost}};
         ToolTip.SetTip(endpoint,"本机永久 EndpointId，用于首次连接时核对身份。");
         Opened += async (_,_) =>
         {
@@ -184,6 +190,7 @@ sealed partial class MainWindow : Window
                     var card=Device(sample);SetStatus(card.Status,text);Dot(card.Indicator,text);card.Connect.IsVisible=false;card.Pause.IsVisible=true;
                     foreach(var launcher in card.Launchers)launcher.IsVisible=true;
                     livePanel.Children.Add(card.Card);UpdateSessionsVisible();
+                    if(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_MORE")=="1")card.Actions.Children.OfType<Button>().Last().RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
                 }
                 var row=Device(sample);
                 SetStatus(row.Status,text);Dot(row.Indicator,text);row.Pause.IsVisible=live;
@@ -224,6 +231,7 @@ sealed partial class MainWindow : Window
                     break;
                 }
             }
+            if(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_TOAST")=="1")Toast("已复制本机设备 ID");
             var settingsTab=Environment.GetEnvironmentVariable("ARDUI_PREVIEW_PAGE");
             if(settingsTab!=null&&int.TryParse(settingsTab,out var tabIndex)){ShowSettings(true);selectSettingsTab?.Invoke(tabIndex);}
             if(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_HOST")=="1")
@@ -306,7 +314,7 @@ sealed partial class MainWindow : Window
     static void SetStatus(TextBlock t,string text)
     {
         if(t.Tag as string==text)return;
-        t.Tag=text;t.Text=null;   // setting Text clears any runs from the previous state
+        t.Tag=text;t.Text=null;t.Inlines!.Clear();   // drop the runs of the previous state
         var split=text.IndexOf(" · ",StringComparison.Ordinal);
         if(Engine.IsLiveText(text)&&split>0&&!text.StartsWith("已连接",StringComparison.Ordinal))
         {
@@ -440,7 +448,7 @@ sealed partial class MainWindow : Window
         {
             var dv=deviceViews[peer.Id];var hv=homeViews[peer.Id];
             var live=engine.Outgoing.TryGetValue(peer.Id,out var liveSession)&&liveSession.Live;
-            if(live)liveIds.Add(peer.Id);
+            if(live&&!pendingCards.ContainsKey(peer.Code))liveIds.Add(peer.Id);   // its placeholder is still on screen
             FillTitle(hv.Title,peer);SetStatus(hv.Status,StatusOf(dv.Status));Dot(hv.Indicator,StatusOf(dv.Status));
             hv.Connect.IsVisible=false;
             foreach(var launcher in hv.Launchers)launcher.IsVisible=live;
@@ -509,7 +517,7 @@ sealed partial class MainWindow : Window
         var passwordBlock=new StackPanel{Spacing=4,VerticalAlignment=VerticalAlignment.Center,Children={new TextBlock{Text="连接密码",Foreground=Muted,FontSize=12},invitePassword,inviteRefresh}};
         var passwordRow=new StackPanel{Orientation=Orientation.Horizontal,Spacing=20,Children={ring,passwordBlock}};
         endpoint.Width=double.NaN;endpoint.Height=double.NaN;endpoint.FontSize=12;endpoint.TextWrapping=TextWrapping.Wrap;endpoint.MinHeight=0;
-        var copy=Button("一键复制",async()=>{await Clipboard!.SetTextAsync(InviteText());Say("已复制邀请信息。");});copy.Content=Look.IconText(Look.CopyPath,"一键复制");copy.HorizontalAlignment=HorizontalAlignment.Left;
+        var copy=Button("一键复制",async()=>{await Clipboard!.SetTextAsync(InviteText());Toast("已复制邀请信息");});copy.Content=Look.IconText(Look.CopyPath,"一键复制");copy.HorizontalAlignment=HorizontalAlignment.Left;
         var card=Card(WithCloseIcon(new StackPanel{Spacing=14,Children=
         {
             new TextBlock{Text="邀请设备",FontSize=17,FontWeight=FontWeight.SemiBold},
@@ -606,7 +614,7 @@ sealed partial class MainWindow : Window
             var session=engine!.Outgoing[peer.Id];var bridge=session.Forward(3389);
             await Launch("mstsc.exe","/v:127.0.0.1:"+bridge.Port);
         }));
-        More("EndpointId",async()=>{await Clipboard!.SetTextAsync(peer.Id);Say("完整 EndpointId 已复制："+peer.Id);});
+        More("EndpointId",async()=>{await Clipboard!.SetTextAsync(peer.Id);Toast("已复制 EndpointId");});
         More("备注",async()=>{peer.Name=await AskText("设备备注",peer.Name);engine!.State.Save();});
         More("分组",async()=>{peer.Group=(await AskText("分组（留空为未分组）",peer.Group)).Trim();engine!.State.Save();});
         More("移除",async()=>await RemoveWithUndo(peer));

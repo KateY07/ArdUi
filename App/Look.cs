@@ -42,11 +42,24 @@ static class Look
     {
         button.Content = Icon(path, 16, Ink, 1.8); button.MinWidth = 0; button.Width = 36; button.Padding = new Thickness(0); ToolTip.SetTip(button, tip);
     }
-    public static Avalonia.Controls.Shapes.Path Icon(string data, double size = 14, IBrush? stroke = null, double thickness = 1.8) => new()
+    // The icon is sized to its own proportions (a wide, flat chevron is not stretched into a square) and centred in its slot,
+    // so it lines up with text and neighbouring buttons.
+    public static Avalonia.Controls.Shapes.Path Icon(string data, double size = 14, IBrush? stroke = null, double thickness = 1.8)
     {
-        Data = Geometry.Parse(data), Stroke = stroke ?? Muted, StrokeThickness = thickness, StrokeLineCap = PenLineCap.Round, StrokeJoin = PenLineJoin.Round,
-        Width = size, Height = size, Stretch = Stretch.Uniform, IsHitTestVisible = false,
-    };
+        var geometry = Geometry.Parse(data); var bounds = geometry.Bounds;
+        double width = size, height = size;
+        if (bounds.Width > 0.01 && bounds.Height > 0.01)
+        {
+            var scale = size / Math.Max(bounds.Width, bounds.Height);
+            width = bounds.Width * scale; height = bounds.Height * scale;
+        }
+        return new()
+        {
+            Data = geometry, Stroke = stroke ?? Muted, StrokeThickness = thickness, StrokeLineCap = PenLineCap.Round, StrokeJoin = PenLineJoin.Round,
+            Width = width, Height = height, Stretch = Stretch.Uniform, IsHitTestVisible = false,
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+        };
+    }
 
     // A zero-height line cannot be stretched into a box, so the minus mark is a small rounded bar.
     public static Border MinusIcon() => new() { Width = 12, Height = 2, CornerRadius = new CornerRadius(1), Background = Muted,

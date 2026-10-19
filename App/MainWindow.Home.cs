@@ -40,14 +40,14 @@ sealed partial class MainWindow
         remote.LostFocus += (_, _) => fieldBorder.BorderBrush = new SolidColorBrush(Color.FromArgb(120, 255, 255, 255));
         remote.KeyDown += (_, e) => { if (e.Key == Avalonia.Input.Key.Enter) { e.Handled = true; _ = Guard(() => StartConnect(remote.Text ?? "")); } };
 
-        var history = Chrome.IconButton(Chrome.ChevronPath, 14, 32); ToolTip.SetTip(history, "最近连接过的设备");
+        var history = Chrome.IconButton(Chrome.ChevronPath, 14, 32); history.VerticalAlignment = VerticalAlignment.Center; ToolTip.SetTip(history, "最近连接过的设备");
         var go = new Button { Content = Look.Icon(Chrome.ArrowPath, 17, Brushes.White, 2.2), Width = 36, Height = 36, MinHeight = 36, Padding = new Thickness(0), CornerRadius = new CornerRadius(18) };
         go.Classes.Add("primary"); ToolTip.SetTip(go, "连接");
         go.Click += async (_, _) => await Guard(() => StartConnect(remote.Text ?? ""));
         historyPopup = new Avalonia.Controls.Primitives.Popup { PlacementTarget = fieldBorder, Placement = PlacementMode.Bottom, IsLightDismissEnabled = true, Width = 380 };
         history.Click += (_, _) => { if (historyPopup.IsOpen) historyPopup.IsOpen = false; else { BuildHistory(); historyPopup.IsOpen = true; } };
         var field = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto") };
-        field.Children.Add(new Border { Width = 4 });
+        field.Children.Add(new Border { Width = 72 });   // as wide as the buttons on the right, so the code sits in the middle of the card
         Grid.SetColumn(remote, 1); field.Children.Add(remote);
         Grid.SetColumn(history, 2); field.Children.Add(history);
         go.Margin = new Thickness(4, 0, 0, 0); Grid.SetColumn(go, 3); field.Children.Add(go);
@@ -62,7 +62,7 @@ sealed partial class MainWindow
                 Spacing = 14,
                 Children =
                 {
-                    new TextBlock { Text = "连接到设备", FontSize = 17, FontWeight = FontWeight.SemiBold, Foreground = Ink, HorizontalAlignment = HorizontalAlignment.Center },
+                    (homeTitle = new TextBlock { Text = "连接到设备", FontSize = 17, FontWeight = FontWeight.SemiBold, Foreground = Ink, HorizontalAlignment = HorizontalAlignment.Center }),
                     fieldBorder, homeError,
                     recentsBlock,
                 }
@@ -75,11 +75,17 @@ sealed partial class MainWindow
         status.HorizontalAlignment = HorizontalAlignment.Center; status.TextAlignment = TextAlignment.Center; status.MaxWidth = 460;
         var sessionsHeading = new TextBlock { Text = "已连接", FontSize = 12, FontWeight = FontWeight.SemiBold, Foreground = Muted, Margin = new Thickness(4, 6, 0, 0) };
         sessions.Children.Add(sessionsHeading); sessions.Children.Add(pendingPanel); sessions.Children.Add(livePanel);
-        var scroll = new ScrollViewer
+        // The connect card sits exactly in the middle of the page (equal space above and below) and never moves;
+        // the status line and the connected devices live in the space below it and scroll there when there are many.
+        card.Margin = new Thickness(14, 0); Grid.SetRow(card, 1);
+        var lower = new ScrollViewer
         {
-            VerticalAlignment = VerticalAlignment.Center,
-            Content = new StackPanel { Spacing = 8, MaxWidth = 430, HorizontalAlignment = HorizontalAlignment.Stretch, Margin = new Thickness(14, 4, 14, 8), Children = { card, status, sessions } },
+            VerticalAlignment = VerticalAlignment.Top,
+            Content = new StackPanel { Spacing = 8, MaxWidth = 430, HorizontalAlignment = HorizontalAlignment.Stretch, Margin = new Thickness(14, 8, 14, 8), Children = { status, sessions } },
         };
+        Grid.SetRow(lower, 2);
+        var scroll = new Grid { RowDefinitions = new RowDefinitions("*,Auto,*"), Children = { card, lower } };
+        homeCard = card; homeGrid = scroll; homeLower = lower;
 
         // the machine's own role: a quiet glass strip at the bottom, away from the window controls
         var share = new Button { Content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Children = { Look.Icon(Look.SharePath, 15, Look.Accent), new TextBlock { Text = "邀请", FontSize = 13, FontWeight = FontWeight.SemiBold, Foreground = Look.Accent, VerticalAlignment = VerticalAlignment.Center } } }, Padding = new Thickness(8, 4) };
@@ -96,18 +102,31 @@ sealed partial class MainWindow
     void BuildHistory()
     {
         if (engine == null || historyPopup == null) return;
-        Peer[] peers; lock (engine.State.Peers) peers = engine.State.Peers.OrderByDescending(p => p.LastConnectedAt).Take(8).ToArray();
+        Peer[] peers; lock (engine.State.Peers) peers = engine.State.Peers.OrderByDescending(p => p.LastConnectedAt).Take(12).ToArray();
         var list = new StackPanel { Spacing = 0 };
         foreach (var peer in peers)
         {
-            var row = new Button { Content = PeerLabel(peer), HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left, Padding = new Thickness(14, 8), Foreground = Ink };
-            row.Classes.Add("quiet");
+            var online = directory?.IsOnline(peer.Id);
+            var dot = new Ellipse { Width = 9, Height = 9, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 10, 0) };
+            if (online == true) dot.Fill = Look.Online; else { dot.Fill = Brushes.Transparent; dot.Stroke = Look.Idle; dot.StrokeThickness = 1.5; }
+            var name = new TextBlock { VerticalAlignment = VerticalAlignment.Center, FontSize = 13, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis };
+            FillTitle(name, peer);
+            var state = new TextBlock { Text = online == true ? "在线" : online == false ? "离线" : "", FontSize = 12, Foreground = online == true ? Look.OnlineDeep : Muted, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0) };
+            var row = new Button { Padding = new Thickness(12, 9), Foreground = Ink, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch, Opacity = online == false ? .7 : 1 };
+            var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto") };
+            grid.Children.Add(dot); Grid.SetColumn(name, 1); grid.Children.Add(name); Grid.SetColumn(state, 2); grid.Children.Add(state);
+            row.Content = grid; row.Classes.Add("quiet");
             var code = peer.Code;
             row.Click += (_, _) => { historyPopup.IsOpen = false; remote.Text = code; remote.Focus(); remote.CaretIndex = 6; };
             list.Children.Add(row);
         }
         if (peers.Length == 0) list.Children.Add(new TextBlock { Text = "还没有连接过的设备。", Foreground = Muted, Margin = new Thickness(14, 10) });
-        historyPopup.Child = new Border { Child = list, Background = Chrome.GlassStrong, BorderBrush = Chrome.GlassEdge, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(16), Padding = new Thickness(6), Margin = new Thickness(0, 6, 0, 0), BoxShadow = BoxShadows.Parse("0 14 36 0 #33301E14") };
+        historyPopup.Width = Math.Max(240, fieldBorder.Bounds.Width);
+        historyPopup.Child = new Border
+        {
+            Child = new ScrollViewer { Content = list, MaxHeight = 280 }, Background = new SolidColorBrush(Color.FromArgb(248, 255, 255, 255)), BorderBrush = Chrome.GlassEdge, BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(16), Padding = new Thickness(6), Margin = new Thickness(0, 6, 0, 0), BoxShadow = BoxShadows.Parse("0 14 36 0 #33301E14"),
+        };
     }
 
     // The most recently used devices as round avatars; a green ring means the device is online now.
@@ -130,7 +149,7 @@ sealed partial class MainWindow
             item.PointerPressed += async (_, e) => { e.Handled = true; await Guard(() => StartConnect(code)); };
             recentsRow.Children.Add(item);
         }
-        recentsBlock.IsVisible = items.Count != 0;
+        hasRecents = items.Count != 0; recentsBlock.IsVisible = hasRecents && !compactHome;
     }
 
     // ---- connect flow ------------------------------------------------------------------------------------------------
@@ -139,7 +158,50 @@ sealed partial class MainWindow
     readonly Dictionary<string, ConnectCard> pendingCards = new();
     readonly StackPanel pendingPanel = new() { Spacing = 6 }, livePanel = new() { Spacing = 6 };
 
-    void UpdateSessionsVisible() => sessions.IsVisible = pendingPanel.Children.Count != 0 || livePanel.Children.Count != 0;
+    void UpdateSessionsVisible()
+    {
+        sessions.IsVisible = pendingPanel.Children.Count != 0 || livePanel.Children.Count != 0;
+        SetCompact(sessions.IsVisible);
+    }
+
+    // While devices are connected, the "connect to device" panel shrinks to one floating row at the top and the
+    // sessions use the rest of the page; with nothing connected it is the big centred card.
+    Border? homeCard; Grid? homeGrid; ScrollViewer? homeLower; TextBlock? homeTitle;
+    bool compactHome, hasRecents;
+    void SetCompact(bool compact)
+    {
+        compactHome = compact;
+        if (homeCard == null || homeGrid == null || homeLower == null || homeTitle == null) return;
+        homeTitle.IsVisible = !compact;
+        recentsBlock.IsVisible = hasRecents && !compact;
+        homeCard.Padding = compact ? new Thickness(10, 8) : new Thickness(18, 16);
+        homeCard.CornerRadius = new CornerRadius(compact ? 22 : 24);
+        homeCard.Margin = compact ? new Thickness(14, 4, 14, 0) : new Thickness(14, 0);
+        ((StackPanel)homeCard.Child!).Spacing = compact ? 4 : 14;
+        homeGrid.RowDefinitions = new RowDefinitions(compact ? "Auto,*" : "*,Auto,*");
+        Grid.SetRow(homeCard, compact ? 0 : 1); Grid.SetRow(homeLower, compact ? 1 : 2);
+        homeCard.VerticalAlignment = compact ? VerticalAlignment.Top : VerticalAlignment.Stretch;
+    }
+
+    // The real session card is held back while its placeholder is on screen, so there is only ever one row; it then fades in.
+    void RevealSession(string code)
+    {
+        if (engine == null) return;
+        string? id; lock (engine.State.Peers) id = engine.State.Peers.FirstOrDefault(p => p.Code == code)?.Id;
+        sessionSignature = ""; Refresh();
+        if (id == null || previewMode || !homeViews.TryGetValue(id, out var view) || view.Card.Parent == null) return;
+        var card = view.Card; card.Opacity = 0;
+        var fade = new Avalonia.Animation.Animation
+        {
+            Duration = TimeSpan.FromMilliseconds(260), FillMode = Avalonia.Animation.FillMode.Forward,
+            Children =
+            {
+                new Avalonia.Animation.KeyFrame { Cue = new Avalonia.Animation.Cue(0), Setters = { new Setter(OpacityProperty, 0.0) } },
+                new Avalonia.Animation.KeyFrame { Cue = new Avalonia.Animation.Cue(1), Setters = { new Setter(OpacityProperty, 1.0) } },
+            }
+        };
+        _ = fade.RunAsync(card).ContinueWith(_ => Dispatcher.UIThread.Post(() => card.Opacity = 1));
+    }
 
     // Enter a device code: ask for the connection password when the device is new, show progress, and explain failures.
     async Task StartConnect(string raw)
@@ -197,7 +259,40 @@ sealed partial class MainWindow
             directory.Stage -= OnStage;
             await card.Leave();
             pendingPanel.Children.Remove(card); pendingCards.Remove(code); UpdateSessionsVisible();
+            RevealSession(code);
         }
+    }
+
+    // ---- toast ---------------------------------------------------------------------------------------------------------
+    // A short frosted note in the middle of the window ("copied"); it fades in, stays a moment, then fades out.
+    readonly TextBlock toastText = new() { FontSize = 13, FontWeight = FontWeight.SemiBold, Foreground = Look.Ink, VerticalAlignment = VerticalAlignment.Center };
+    Border? toastBox;
+    int toastToken;
+    Control toastHost
+    {
+        get
+        {
+            if (toastBox != null) return toastBox;
+            var tick = new Border { Width = 22, Height = 22, CornerRadius = new CornerRadius(11), Background = Look.OnlineDeep, Child = Look.Icon("M5,12.5 L10,17 L19,7.5", 12, Brushes.White, 2.4), Margin = new Thickness(0, 0, 10, 0) };
+            ((Avalonia.Controls.Shapes.Path)tick.Child!).HorizontalAlignment = HorizontalAlignment.Center; ((Avalonia.Controls.Shapes.Path)tick.Child!).VerticalAlignment = VerticalAlignment.Center;
+            toastBox = new Border
+            {
+                Child = new StackPanel { Orientation = Orientation.Horizontal, Children = { tick, toastText } },
+                Padding = new Thickness(16, 11), CornerRadius = new CornerRadius(18), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+                Background = new SolidColorBrush(Color.FromArgb(232, 255, 255, 255)), BorderBrush = Chrome.GlassEdge, BorderThickness = new Thickness(1.2),
+                BoxShadow = BoxShadows.Parse("0 14 36 0 #33301E14"), Opacity = 0, IsHitTestVisible = false,
+                Transitions = new Avalonia.Animation.Transitions { new Avalonia.Animation.DoubleTransition { Property = OpacityProperty, Duration = TimeSpan.FromMilliseconds(180) } },
+            };
+            return toastBox;
+        }
+    }
+    async void Toast(string text)
+    {
+        var box = (Border)toastHost; var mine = ++toastToken;
+        toastText.Text = text; box.Opacity = 1;
+        if (previewMode) { box.Transitions = null; box.Opacity = 1; return; }
+        await Task.Delay(1500);
+        if (mine == toastToken) box.Opacity = 0;
     }
 
     // ---- settings ---------------------------------------------------------------------------------------------------
@@ -216,7 +311,7 @@ sealed partial class MainWindow
         var devicesTab = new StackPanel { Spacing = 8, Children = { undoBar, devices } };
         var accessTab = new StackPanel { Spacing = 8, Children = { incomingArea, Section("可访问本机的设备", Card(controllers)) } };
         var logButton = Button("打开日志", OpenLogFile); var exportButton = Button("导出诊断包", () => { var path = Diagnostics.Export(Program.DataRoot, engine); Say("诊断包已导出：" + path); return Task.CompletedTask; });
-        var copyEndpoint = Button("复制 EndpointId", async () => { await Clipboard!.SetTextAsync(engine?.Id ?? ""); Say("已复制本机 EndpointId。"); });
+        var copyEndpoint = Button("复制 EndpointId", async () => { await Clipboard!.SetTextAsync(engine?.Id ?? ""); Toast("已复制本机 EndpointId"); });
         logButton.Content = Look.IconText(Look.DocumentPath, "打开日志"); exportButton.Content = Look.IconText(Look.DownloadPath, "导出诊断包"); copyEndpoint.Content = Look.IconText(Look.CopyPath, "复制 EndpointId");
         foreach (var b in new[] { logButton, exportButton, copyEndpoint }) { b.HorizontalAlignment = HorizontalAlignment.Left; b.MinWidth = 140; }
         var aboutTab = new StackPanel
@@ -235,9 +330,9 @@ sealed partial class MainWindow
             try { Autostart.Set(startupBox.IsChecked == true); Say(startupBox.IsChecked == true ? "已设置随系统启动。" : "已取消随系统启动。"); }
             catch (Exception ex) { Say(ex.Message); }
         };
-        aboutTab.Children.Insert(0, Section("启动", Card(startupBox)));
+        var generalTab = new StackPanel { Spacing = 8, Children = { Section("启动", Card(startupBox)) } };
         var tabs = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-        var pages = new (string Name, Control Body)[] { ("设备管理", devicesTab), ("被控与授权", accessTab), ("日志与关于", aboutTab) };
+        var pages = new (string Name, Control Body)[] { ("通用", generalTab), ("设备管理", devicesTab), ("被控与授权", accessTab), ("日志与关于", aboutTab) };
         var tabButtons = new List<Button>();
         void Select(int index)
         {
@@ -246,7 +341,7 @@ sealed partial class MainWindow
         }
         for (var i = 0; i < pages.Length; i++)
         {
-            var index = i; var tab = new Button { Content = pages[i].Name, CornerRadius = new CornerRadius(16), Padding = new Thickness(16, 5) };
+            var index = i; var tab = new Button { Content = pages[i].Name, CornerRadius = new CornerRadius(16), Padding = new Thickness(12, 5) };
             tab.Click += (_, _) => Select(index); tabButtons.Add(tab); tabs.Children.Add(tab);
         }
         selectSettingsTab = Select;

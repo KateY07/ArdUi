@@ -12,8 +12,8 @@ sealed class ConnectCard : Border
     readonly bool animated;
     readonly TextBlock title = new() { FontSize = 14, FontWeight = FontWeight.SemiBold, Foreground = Look.Ink, TextTrimming = TextTrimming.CharacterEllipsis };
     readonly TextBlock subtitle = new() { FontSize = 12, Foreground = Look.Muted, TextWrapping = TextWrapping.Wrap };
-    readonly ContentControl icon = new() { Width = 30, Height = 30, VerticalAlignment = VerticalAlignment.Top };
-    readonly StackPanel buttons = new() { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Top };
+    readonly ContentControl icon = new() { Width = 30, Height = 30, VerticalAlignment = VerticalAlignment.Center };
+    readonly StackPanel buttons = new() { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
     readonly ContentControl extra = new();
     readonly TranslateTransform shift = new();
     public event Action? CancelRequested;
@@ -83,7 +83,7 @@ sealed class ConnectCard : Border
 
     void Reset()
     {
-        buttons.Children.Clear(); extra.Content = null;
+        buttons.Children.Clear(); extra.Content = null; extra.IsVisible = false;   // the extra row (password box) only takes space when used
         BorderBrush = Look.CardEdge; subtitle.Foreground = Look.Muted;
     }
 
@@ -115,7 +115,7 @@ sealed class ConnectCard : Border
         box.KeyDown += (_, e) => { if (e.Key == Avalonia.Input.Key.Enter) { e.Handled = true; Submit(); } };
         var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
         row.Children.Add(box); var ok = Make("连接", Submit, true); ok.Margin = new Thickness(8, 0, 0, 0); Grid.SetColumn(ok, 1); row.Children.Add(ok);
-        extra.Content = row;
+        extra.Content = row; extra.IsVisible = true;
         buttons.Children.Add(CircleX(() => result.TrySetResult(null), "取消"));
         box.Focus();
         return result.Task;

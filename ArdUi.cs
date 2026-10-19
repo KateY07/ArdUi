@@ -46,6 +46,8 @@ static class Program
                 return FrdTest.Run(args).GetAwaiter().GetResult();
             if (args.Length == 2 && args[0] == "--render-preview")
                 return Preview.Render(args[1]);
+            if (args.Length == 2 && args[0] == "--render-host-preview")
+                return HostPreview.Render(args[1]);
             if (args.Length == 2 && args[0] == "--render-placement")
                 return PlacementPreview.Render(args[1]);
             if (args.Length == 2 && args[0] == "--render-titlebars")
