@@ -29,7 +29,14 @@ sealed partial class MainWindow : Window
     bool closing,closed,ready;
     DateTimeOffset undoUntil;
     Peer? undoPeer;
-    sealed record DeviceDisplay(Border Card,Ellipse Indicator,TextBlock Title,TextBlock Status,Button Connect,Button[] Launchers,Button Pause);
+    sealed record DeviceDisplay(Border Card,Ellipse Indicator,TextBlock Title,TextBlock Status,Button Connect,Button[] Launchers,Button Pause,StackPanel Actions);
+    // The action buttons sit at the right of the row; a connected device has too many for a narrow window, so they drop below the text.
+    static void PlaceActions(DeviceDisplay view,bool below)
+    {
+        var a=view.Actions;
+        if(below){Grid.SetRow(a,1);Grid.SetColumn(a,1);Grid.SetColumnSpan(a,2);a.HorizontalAlignment=HorizontalAlignment.Left;a.Margin=new Thickness(0,6,0,2);}
+        else{Grid.SetRow(a,0);Grid.SetColumn(a,2);Grid.SetColumnSpan(a,1);a.HorizontalAlignment=HorizontalAlignment.Right;a.Margin=new Thickness();}
+    }
     readonly Dictionary<Ellipse,CancellationTokenSource> pulses=new();
     // A slow breathing dot while something is being established; static otherwise.
     void Pulse(Ellipse dot,bool on)
@@ -86,12 +93,12 @@ sealed partial class MainWindow : Window
         {
             if(e.Property==WindowStateProperty&&WindowState==WindowState.Minimized&&!previewMode&&!exiting)Dispatcher.UIThread.Post(HideToTray);
         };
-        Title = "ArdUi " + Program.Version; Width = 720; Height = 520; MinWidth = 600; MinHeight = 420;
+        Title = "ArdUi " + Program.Version; Width = 400; Height = 650; MinWidth = 360; MinHeight = 340;
         Icon=AppIcon.Create();
         // Borderless: the client area covers the title bar; the capsule bar below drags the window and carries settings / minimise / close.
         ExtendClientAreaToDecorationsHint=true;ExtendClientAreaChromeHints=Avalonia.Platform.ExtendClientAreaChromeHints.NoChrome;
         ExtendClientAreaTitleBarHeightHint=-1;
-        Background = Look.Bg; FontFamily = new FontFamily("Segoe UI Variable Text, Microsoft YaHei UI"); Foreground = Ink; FontSize = 13;
+        Background = Look.Bg; FontFamily = new FontFamily("Segoe UI Variable Text, Microsoft YaHei UI"); Foreground = Ink; FontSize = 12;
         // Real windows let the desktop show through (Mica, else acrylic); where that is unavailable the window stays solid.
         if(!previewMode)
         {
@@ -100,7 +107,7 @@ sealed partial class MainWindow : Window
             PropertyChanged+=(_,e)=>{if(e.Property==ActualTransparencyLevelProperty)Background=ActualTransparencyLevel==WindowTransparencyLevel.None?Look.Bg:Brushes.Transparent;};
         }
         // Title bar: one status capsule (logo, device code, connection state) on the left; window controls as glass discs on the right.
-        machine.FontFamily=new FontFamily("Consolas");machine.FontSize=16;machine.Foreground=Ink;machine.LetterSpacing=2;
+        machine.FontFamily=new FontFamily("Consolas");machine.FontSize=14;machine.Foreground=Ink;machine.LetterSpacing=2;
         var capsule=Chrome.Capsule(new StackPanel{Orientation=Orientation.Horizontal,Spacing=12,Margin=new Thickness(12,2),Children={titleLogo,machine,Chrome.Divider(),netDot,netText}});
         capsule.HorizontalAlignment=HorizontalAlignment.Left;capsule.Cursor=new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand);
         ToolTip.SetTip(capsule,"本机设备 ID；点击复制");
@@ -113,7 +120,7 @@ sealed partial class MainWindow : Window
         var minimise=Chrome.IconButton(Look.MinusPath,15);minimise.Content=Look.MinusIcon();ToolTip.SetTip(minimise,"最小化到托盘");minimise.Click+=(_,_)=>WindowState=WindowState.Minimized;
         var closeWindow=Chrome.IconButton(Look.CrossPath,12);ToolTip.SetTip(closeWindow,"关闭（隐藏到托盘）");closeWindow.Click+=(_,_)=>Close();
         var windowButtons=new StackPanel{Orientation=Orientation.Horizontal,Spacing=8,Children={Chrome.Disc(settingsButton),Chrome.Disc(minimise),Chrome.Disc(closeWindow)}};
-        var bar=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto"),Margin=new Thickness(18,12,12,0),Height=46,VerticalAlignment=VerticalAlignment.Top,Background=Brushes.Transparent};
+        var bar=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto"),Margin=new Thickness(14,8,10,0),Height=40,VerticalAlignment=VerticalAlignment.Top,Background=Brushes.Transparent};
         bar.Children.Add(capsule);windowButtons.VerticalAlignment=VerticalAlignment.Center;Grid.SetColumn(windowButtons,1);bar.Children.Add(windowButtons);
         bar.PointerPressed+=(_,e)=>{if(!e.Handled&&e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)BeginMoveDrag(e);};
         bar.DoubleTapped+=(_,e)=>{if(!e.Handled)WindowState=WindowState==WindowState.Maximized?WindowState.Normal:WindowState.Maximized;};
@@ -126,7 +133,7 @@ sealed partial class MainWindow : Window
         undoBar=Card(new StackPanel{Orientation=Orientation.Horizontal,Spacing=6,Children={undoText,undoButton}});
         undoBar.IsVisible=false;undoBar.Padding=new Thickness(6,3);undoBar.Background=Brush.Parse("#FFF8E8");
         incomingArea.Children.Add(Label("正在访问本机",12,true));incomingArea.Children.Add(activeIncoming);
-        var pageArea=new Grid{Margin=new Thickness(0,58,0,0),Children={BuildHome(),BuildSettings()}};
+        var pageArea=new Grid{Margin=new Thickness(0,48,0,0),Children={BuildHome(),BuildSettings()}};
         pendingIncoming.HorizontalAlignment=HorizontalAlignment.Center;pendingIncoming.VerticalAlignment=VerticalAlignment.Center;
         pendingIncoming.MaxWidth=500;pendingIncoming.Margin=new Thickness(28);approvalOverlay.Child=pendingIncoming;
         BuildInvite();
@@ -141,6 +148,7 @@ sealed partial class MainWindow : Window
             // Showing the window again after it was hidden in the tray raises Opened again; start the engine only once.
             StartupTrace.Mark("window opened");StartupTrace.Watch();
             if(preview||started)return;started=true;
+            if(Autostart.Enabled){try{Autostart.Set(true);}catch{}}   // keep the entry pointing at the running copy
             await Guard(async () =>
             {
                 var settings=JsonSerializer.Deserialize<Settings>(await File.ReadAllTextAsync(Path.Combine(Program.DataRoot,"config.json")),Wire.Json)!;
@@ -181,14 +189,14 @@ sealed partial class MainWindow : Window
                 if(live)
                 {
                     var card=Device(sample);card.Status.Text=text;Dot(card.Indicator,text);card.Connect.IsVisible=false;card.Pause.IsVisible=true;
-                    foreach(var launcher in card.Launchers)launcher.IsVisible=true;
+                    foreach(var launcher in card.Launchers)launcher.IsVisible=true;PlaceActions(card,true);
                     sessions.Children.Add(card.Card);sessions.IsVisible=true;
                 }
                 var row=Device(sample);
                 row.Status.Text=text;Dot(row.Indicator,text);row.Pause.IsVisible=live;
                 ApplyDensity(row,!reachable&&!live);row.Connect.IsVisible=!live&&reachable;row.Connect.Opacity=reachable?1:.4;
                 if(text.StartsWith("正在",StringComparison.Ordinal))row.Connect.Content="连接中…";
-                foreach(var launcher in row.Launchers)launcher.IsVisible=live;
+                foreach(var launcher in row.Launchers)launcher.IsVisible=live;PlaceActions(row,live);
                 devices.Children.Add(row.Card);
             }
             Sample("a","C8M3P6","办公电脑","DESKTOP-OFFICE","已连接 · P2P 直连 / IPv6 · RTT 6.2 ms · 吞吐 ≥166.5 Mbps",true,true);
@@ -404,7 +412,7 @@ sealed partial class MainWindow : Window
             var parked=IsParked(peer);ApplyDensity(view,parked);
             view.Connect.IsVisible=!live&&!parked;view.Connect.Content=busy?"连接中…":"连接";
             view.Connect.Opacity=reachable?1:.4;view.Connect.IsHitTestVisible=reachable&&!busy;
-            foreach(var launcher in view.Launchers)launcher.IsVisible=live;
+            foreach(var launcher in view.Launchers)launcher.IsVisible=live;PlaceActions(view,live);
             view.Pause.IsVisible=live||directory?.IsReconnecting(peer.Id)==true;
             Pulse(view.Indicator,stateText.StartsWith("正在",StringComparison.Ordinal));
             ToolTip.SetTip(view.Title,title+"\n"+peer.Id);ToolTip.SetTip(view.Status,reachable?stateText:stateText+" · 对方在线后才能连接");
@@ -418,7 +426,7 @@ sealed partial class MainWindow : Window
             if(live)liveIds.Add(peer.Id);
             FillTitle(hv.Title,peer);hv.Status.Text=dv.Status.Text;Dot(hv.Indicator,dv.Status.Text??"");
             hv.Connect.IsVisible=false;
-            foreach(var launcher in hv.Launchers)launcher.IsVisible=live;
+            foreach(var launcher in hv.Launchers)launcher.IsVisible=live;PlaceActions(hv,true);
             hv.Pause.IsVisible=dv.Pause.IsVisible;
         }
         var sessionKey=string.Join("|",liveIds);
@@ -548,7 +556,7 @@ sealed partial class MainWindow : Window
         var state=new TextBlock{Text=engine?.Status.GetValueOrDefault(peer.Id,"正在连接")??"已连接 · P2P 直连 / IPv4 · RTT 18.2 ms · ~86.4 Mbps",Foreground=Muted,FontSize=12,HorizontalAlignment=HorizontalAlignment.Left,VerticalAlignment=VerticalAlignment.Center,TextTrimming=TextTrimming.CharacterEllipsis,Margin=new Thickness(0)};
         var indicator=new Ellipse{HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center,Transitions=Look.BrushFade(Ellipse.FillProperty)};Dot(indicator,state.Text??"");
         FillTitle(title,peer);ToolTip.SetTip(title,displayName);ToolTip.SetTip(state,state.Text);
-        var row=new Grid{ColumnDefinitions=new ColumnDefinitions("Auto,*,Auto"),MinHeight=52};
+        var row=new Grid{ColumnDefinitions=new ColumnDefinitions("Auto,*,Auto"),RowDefinitions=new RowDefinitions("Auto,Auto"),MinHeight=52};
         row.Children.Add(new Grid{Width=18,Height=18,Margin=new Thickness(0,0,8,0),VerticalAlignment=VerticalAlignment.Center,Children={indicator}});var text=new StackPanel{Spacing=1,VerticalAlignment=VerticalAlignment.Center,Children={title,state}};Grid.SetColumn(text,1);row.Children.Add(text);
         var actions=new StackPanel{Orientation=Orientation.Horizontal,Spacing=6,VerticalAlignment=VerticalAlignment.Center};
         Button Add(string caption,Func<Task> action)
@@ -594,7 +602,7 @@ sealed partial class MainWindow : Window
         var stack=new StackPanel{Spacing=0,Children={row,moreRow}};var card=Card(stack);card.Padding=new Thickness(14,6);
         card.PointerEntered+=(_,_)=>card.Background=Look.CardHover;card.PointerExited+=(_,_)=>card.Background=Look.Card;
         foreach(var launcher in launchers)launcher.IsVisible=false;
-        return new DeviceDisplay(card,indicator,title,state,connect,launchers.ToArray(),pause);
+        return new DeviceDisplay(card,indicator,title,state,connect,launchers.ToArray(),pause,actions);
     }
     async Task RemoveWithUndo(Peer peer)
     {

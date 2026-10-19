@@ -6,8 +6,8 @@ sealed partial class MainWindow
     // ---- fields --------------------------------------------------------------------------------------------------------
     readonly Border fieldBorder = new() { CornerRadius = new CornerRadius(22), Padding = new Thickness(10, 7, 8, 7), BorderThickness = new Thickness(1.2), Background = new SolidColorBrush(Color.FromArgb(215, 255, 255, 255)), BorderBrush = new SolidColorBrush(Color.FromArgb(120, 255, 255, 255)) };
     readonly TextBlock homeError = new() { FontSize = 12, Foreground = Brush.Parse("#B3432B"), HorizontalAlignment = HorizontalAlignment.Center, TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap, IsVisible = false };
-    readonly StackPanel recentsRow = new() { Orientation = Orientation.Horizontal, Spacing = 14, HorizontalAlignment = HorizontalAlignment.Center };
-    readonly StackPanel recentsBlock = new() { Spacing = 10, IsVisible = false };
+    readonly StackPanel recentsRow = new() { Orientation = Orientation.Horizontal, Spacing = 4, HorizontalAlignment = HorizontalAlignment.Center };
+    readonly StackPanel recentsBlock = new() { Spacing = 8, IsVisible = false };
     readonly StackPanel sessions = new() { Spacing = 6, IsVisible = false };
     readonly Dictionary<string, DeviceDisplay> homeViews = new();
     readonly Border flowOverlay = new() { Background = Brush.Parse("#8C1F1E1D"), IsVisible = false };
@@ -24,9 +24,9 @@ sealed partial class MainWindow
     Control BuildHome()
     {
         remote.Watermark = "ABC123"; remote.MaxLength = 6; remote.Width = double.NaN;
-        remote.FontFamily = new FontFamily("Consolas"); remote.FontSize = 28; remote.FontWeight = FontWeight.SemiBold; remote.LetterSpacing = 8;
+        remote.FontFamily = new FontFamily("Consolas"); remote.FontSize = 22; remote.FontWeight = FontWeight.SemiBold; remote.LetterSpacing = 5;
         remote.Background = Brushes.Transparent; remote.BorderThickness = new Thickness(0); remote.HorizontalContentAlignment = HorizontalAlignment.Center;
-        remote.VerticalContentAlignment = VerticalAlignment.Center; remote.MinHeight = 46; remote.Padding = new Thickness(0);
+        remote.VerticalContentAlignment = VerticalAlignment.Center; remote.MinHeight = 36; remote.Padding = new Thickness(0);
         remote.Resources["TextControlBackgroundFocused"] = Brushes.Transparent; remote.Resources["TextControlBorderBrushFocused"] = Brushes.Transparent;
         remote.Resources["TextControlBackgroundPointerOver"] = Brushes.Transparent; remote.Resources["TextControlBorderBrushPointerOver"] = Brushes.Transparent;
         remote.PropertyChanged += (_, e) =>
@@ -42,7 +42,7 @@ sealed partial class MainWindow
         remote.KeyDown += (_, e) => { if (e.Key == Avalonia.Input.Key.Enter) { e.Handled = true; _ = Guard(() => StartConnect(remote.Text ?? "")); } };
 
         var history = Chrome.IconButton(Chrome.ChevronPath, 14, 32); ToolTip.SetTip(history, "最近连接过的设备");
-        var go = new Button { Content = Look.Icon(Chrome.ArrowPath, 20, Brushes.White, 2.2), Width = 46, Height = 46, MinHeight = 46, Padding = new Thickness(0), CornerRadius = new CornerRadius(23) };
+        var go = new Button { Content = Look.Icon(Chrome.ArrowPath, 17, Brushes.White, 2.2), Width = 36, Height = 36, MinHeight = 36, Padding = new Thickness(0), CornerRadius = new CornerRadius(18) };
         go.Classes.Add("primary"); ToolTip.SetTip(go, "连接");
         go.Click += async (_, _) => await Guard(() => StartConnect(remote.Text ?? ""));
         historyPopup = new Avalonia.Controls.Primitives.Popup { PlacementTarget = fieldBorder, Placement = PlacementMode.Bottom, IsLightDismissEnabled = true, Width = 380 };
@@ -56,14 +56,14 @@ sealed partial class MainWindow
 
         var card = new Border
         {
-            CornerRadius = new CornerRadius(30), Padding = new Thickness(30, 26), Width = 500, HorizontalAlignment = HorizontalAlignment.Center,
+            CornerRadius = new CornerRadius(24), Padding = new Thickness(18, 16), MaxWidth = 430, HorizontalAlignment = HorizontalAlignment.Stretch,
             Background = Chrome.GlassFill, BorderBrush = Chrome.GlassEdge, BorderThickness = new Thickness(1.2), BoxShadow = BoxShadows.Parse("0 20 50 0 #26301E14, 0 2 6 0 #14000000"),
             Child = new StackPanel
             {
-                Spacing = 18,
+                Spacing = 14,
                 Children =
                 {
-                    new TextBlock { Text = "连接到设备", FontSize = 22, FontWeight = FontWeight.SemiBold, Foreground = Ink, HorizontalAlignment = HorizontalAlignment.Center },
+                    new TextBlock { Text = "连接到设备", FontSize = 17, FontWeight = FontWeight.SemiBold, Foreground = Ink, HorizontalAlignment = HorizontalAlignment.Center },
                     fieldBorder, homeError,
                     recentsBlock,
                 }
@@ -79,7 +79,7 @@ sealed partial class MainWindow
         var scroll = new ScrollViewer
         {
             VerticalAlignment = VerticalAlignment.Center,
-            Content = new StackPanel { Spacing = 12, Width = 500, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 6, 0, 10), Children = { card, status, sessions } },
+            Content = new StackPanel { Spacing = 8, MaxWidth = 430, HorizontalAlignment = HorizontalAlignment.Stretch, Margin = new Thickness(14, 4, 14, 8), Children = { card, status, sessions } },
         };
 
         // the machine's own role: a quiet glass strip at the bottom, away from the window controls
@@ -121,11 +121,11 @@ sealed partial class MainWindow
             var ring = online == true ? Look.OnlineDeep : online == false ? Look.Line : Look.Idle;
             var avatar = new Border
             {
-                Width = 46, Height = 46, CornerRadius = new CornerRadius(23), BorderBrush = ring, BorderThickness = new Thickness(online == true ? 2 : 1.2),
+                Width = 36, Height = 36, CornerRadius = new CornerRadius(18), BorderBrush = ring, BorderThickness = new Thickness(online == true ? 2 : 1.2),
                 Background = new SolidColorBrush(Color.FromArgb(online == false ? (byte)90 : (byte)170, 255, 255, 255)),
-                Child = new TextBlock { Text = label.Length == 0 ? "?" : label[..1].ToUpperInvariant(), FontSize = 17, FontWeight = FontWeight.SemiBold, Foreground = online == false ? Muted : Ink, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center },
+                Child = new TextBlock { Text = label.Length == 0 ? "?" : label[..1].ToUpperInvariant(), FontSize = 14, FontWeight = FontWeight.SemiBold, Foreground = online == false ? Muted : Ink, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center },
             };
-            var item = new StackPanel { Spacing = 4, Width = 74, Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), Background = Brushes.Transparent, Children = { avatar, new TextBlock { Text = label, FontSize = 11, Foreground = Muted, TextTrimming = TextTrimming.CharacterEllipsis, HorizontalAlignment = HorizontalAlignment.Center, MaxWidth = 74 } } };
+            var item = new StackPanel { Spacing = 3, Width = 56, Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), Background = Brushes.Transparent, Children = { avatar, new TextBlock { Text = label, FontSize = 11, Foreground = Muted, TextTrimming = TextTrimming.CharacterEllipsis, HorizontalAlignment = HorizontalAlignment.Center, MaxWidth = 56 } } };
             ToolTip.SetTip(item, PeerLabel(peer) + (online == false ? "\n对方当前不在线" : "\n点击连接"));
             var code = peer.Code;
             item.PointerPressed += async (_, e) => { e.Handled = true; await Guard(() => StartConnect(code)); };
@@ -140,7 +140,7 @@ sealed partial class MainWindow
 
     void ShowFlow(Control content)
     {
-        var card = Card(content); card.Padding = new Thickness(26); card.Width = 400; card.CornerRadius = new CornerRadius(26);
+        var card = Card(content); card.Padding = new Thickness(26); card.Width = 320; card.CornerRadius = new CornerRadius(22);
         card.HorizontalAlignment = HorizontalAlignment.Center; card.VerticalAlignment = VerticalAlignment.Center;
         flowOverlay.Child = card; flowOverlay.IsVisible = true;
     }
@@ -157,7 +157,7 @@ sealed partial class MainWindow
             Spacing = 14,
             Children =
             {
-                new Logo(64) { Animate = true, HorizontalAlignment = HorizontalAlignment.Center },
+                new Logo(52) { Animate = true, HorizontalAlignment = HorizontalAlignment.Center },
                 new TextBlock { Text = "连接 " + code, FontSize = 13, Foreground = Muted, HorizontalAlignment = HorizontalAlignment.Center, FontFamily = new FontFamily("Consolas"), LetterSpacing = 2 },
                 flowStage, cancel,
             }
@@ -167,7 +167,7 @@ sealed partial class MainWindow
     Task<string?> AskFirstPassword(string code, string? problem)
     {
         var result = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var box = new TextBox { MaxLength = 6, Watermark = "6 位连接密码", FontFamily = new FontFamily("Consolas"), FontSize = 24, LetterSpacing = 6, HorizontalContentAlignment = HorizontalAlignment.Center, MinHeight = 50 };
+        var box = new TextBox { MaxLength = 6, Watermark = "6 位连接密码", FontFamily = new FontFamily("Consolas"), FontSize = 20, LetterSpacing = 5, HorizontalContentAlignment = HorizontalAlignment.Center, MinHeight = 42 };
         box.PropertyChanged += (_, e) =>
         {
             if (e.Property != TextBox.TextProperty) return;
@@ -280,13 +280,14 @@ sealed partial class MainWindow
                 Section("日志", Card(new StackPanel { Spacing = 10, Children = { new TextBlock { Text = "日志默认记录详细信息，保存在本机，并用默认文本编辑器打开。", Foreground = Muted, TextWrapping = TextWrapping.Wrap }, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { logButton, exportButton } } } })),
             }
         };
-        var startup = new CheckBox { Content = "随 Windows 启动（在托盘中静默运行）", IsChecked = Autostart.Enabled };
-        startup.IsCheckedChanged += (_, _) =>
+        startupBox = new CheckBox { Content = "随 Windows 启动（在托盘中静默运行）", IsChecked = Autostart.Enabled };
+        startupBox.IsCheckedChanged += (_, _) =>
         {
-            try { Autostart.Set(startup.IsChecked == true); Say(startup.IsChecked == true ? "已设置随系统启动。" : "已取消随系统启动。"); }
+            if (syncingStartup) return;
+            try { Autostart.Set(startupBox.IsChecked == true); Say(startupBox.IsChecked == true ? "已设置随系统启动。" : "已取消随系统启动。"); }
             catch (Exception ex) { Say(ex.Message); }
         };
-        aboutTab.Children.Insert(0, Section("启动", Card(startup)));
+        aboutTab.Children.Insert(0, Section("启动", Card(startupBox)));
         var tabs = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         var pages = new (string Name, Control Body)[] { ("设备管理", devicesTab), ("被控与授权", accessTab), ("日志与关于", aboutTab) };
         var tabButtons = new List<Button>();
@@ -303,7 +304,7 @@ sealed partial class MainWindow
         selectSettingsTab = Select;
         Select(0);
         var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { back, new TextBlock { Text = "设置", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center } } };
-        var layout = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*"), Margin = new Thickness(22, 0, 16, 14) };
+        var layout = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*"), Margin = new Thickness(14, 0, 10, 10) };
         layout.Children.Add(head);
         Grid.SetRow(tabs, 1); tabs.Margin = new Thickness(0, 10, 0, 8); layout.Children.Add(tabs);
         var scroll = new ScrollViewer { Content = settingsBody }; Grid.SetRow(scroll, 2); layout.Children.Add(scroll);
@@ -311,10 +312,13 @@ sealed partial class MainWindow
         return settingsPage;
     }
     Action<int>? selectSettingsTab;
+    CheckBox? startupBox;
+    bool syncingStartup;
 
     void ShowSettings(bool show)
     {
         settingsOpen = show; settingsPage.IsVisible = show; homePage.IsVisible = !show;
         if (show) aboutEndpoint.Text = engine?.Id ?? aboutEndpoint.Text;
+        if (show && startupBox != null) { syncingStartup = true; startupBox.IsChecked = Autostart.Enabled; syncingStartup = false; }
     }
 }

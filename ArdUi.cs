@@ -19,6 +19,8 @@ static class Program
     public static int Main(string[] args)
     {
         StartupTrace.Mark("Main entered");
+        var dataRootArg=Array.IndexOf(args,"--data-root");
+        if(dataRootArg>=0&&dataRootArg+1<args.Length)Environment.SetEnvironmentVariable("ARDUI_DATA_ROOT",args[dataRootArg+1]);
         try
         {
             if(args.Contains("--child-readiness-fixture"))

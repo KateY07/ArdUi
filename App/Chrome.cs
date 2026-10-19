@@ -38,11 +38,11 @@ static class Chrome
 
     public static Border Disc(Control child) => new()
     {
-        Child = child, Width = 36, Height = 36, CornerRadius = new CornerRadius(18), Background = GlassFill, BorderBrush = GlassEdge, BorderThickness = new Thickness(1),
+        Child = child, Width = 32, Height = 32, CornerRadius = new CornerRadius(16), Background = GlassFill, BorderBrush = GlassEdge, BorderThickness = new Thickness(1),
         BoxShadow = BoxShadows.Parse("0 4 12 0 #14301E14"), VerticalAlignment = VerticalAlignment.Center,
     };
 
-    public static Button IconButton(string path, double size = 16, double box = 34)
+    public static Button IconButton(string path, double size = 14, double box = 30)
     {
         var b = new Button { Content = Look.Icon(path, size, Look.Muted), Width = box, Height = box, MinHeight = box, Padding = new Thickness(0), CornerRadius = new CornerRadius(box / 2) };
         b.Classes.Add("quiet"); return b;

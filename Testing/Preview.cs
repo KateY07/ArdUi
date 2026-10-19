@@ -13,7 +13,7 @@ static class Preview
             if (window.Title?.Contains(Program.Version, StringComparison.Ordinal) != true || window.Content is not Grid)
                 throw new IOException("无头界面结构不完整。");
             using var bitmap = window.CaptureRenderedFrame() ?? throw new IOException("无法渲染界面。");
-            if (bitmap.PixelSize.Width < 600 || bitmap.PixelSize.Height < 360) throw new IOException("无头界面尺寸异常。");
+            if (bitmap.PixelSize.Width < 360 || bitmap.PixelSize.Height < 340) throw new IOException("无头界面尺寸异常。");
             bitmap.Save(path);VerifyConfirmation(window);return 0;
         }
         finally { window.Close(); }
