@@ -67,7 +67,7 @@ Requires preinstalled .NET 8 and .NET 10 x64 runtimes.
 "@,[Text.UTF8Encoding]::new($false))
 
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
-& $packer $stage -o $output
+& $packer $stage --ui -o $output
 if($LASTEXITCODE -ne 0){throw 'OneSetup packaging failed.'}
 $hash=(Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText($sidecar,"$hash *$(Split-Path $output -Leaf)`n",[Text.Encoding]::ASCII)

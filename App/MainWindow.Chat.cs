@@ -177,9 +177,9 @@ sealed partial class MainWindow
     }
 
     // ---- progress bubbles ------------------------------------------------------------------------------------------------
-    static string SizeText(long bytes) => bytes >= 1L << 30 ? $"{bytes / 1073741824.0:F2} GB" : bytes >= 1 << 20 ? $"{bytes / 1048576.0:F1} MB" : bytes >= 1024 ? $"{bytes / 1024.0:F0} KB" : bytes + " B";
-    static string SpeedText(double bytesPerSecond) => bytesPerSecond >= 1 << 20 ? $"{bytesPerSecond / 1048576.0:F1} MB/s" : $"{bytesPerSecond / 1024.0:F0} KB/s";
-    static string TimeLeft(TimeSpan span) => span.TotalHours >= 1 ? $"{(int)span.TotalHours} 小时 {span.Minutes} 分" : span.TotalMinutes >= 1 ? $"{(int)span.TotalMinutes} 分 {span.Seconds} 秒" : $"{Math.Max(1, (int)span.TotalSeconds)} 秒";
+    internal static string SizeText(long bytes) => bytes >= 1L << 30 ? $"{bytes / 1073741824.0:F2} GB" : bytes >= 1 << 20 ? $"{bytes / 1048576.0:F1} MB" : bytes >= 1024 ? $"{bytes / 1024.0:F0} KB" : bytes + " B";
+    internal static string SpeedText(double bytesPerSecond) => bytesPerSecond >= 1 << 20 ? $"{bytesPerSecond / 1048576.0:F1} MB/s" : $"{bytesPerSecond / 1024.0:F0} KB/s";
+    internal static string TimeLeft(TimeSpan span) => span.TotalHours >= 1 ? $"{(int)span.TotalHours} 小时 {span.Minutes} 分" : span.TotalMinutes >= 1 ? $"{(int)span.TotalMinutes} 分 {span.Seconds} 秒" : $"{Math.Max(1, (int)span.TotalSeconds)} 秒";
 
     void AddTransferView(ChatTransfer transfer)
     {
@@ -273,6 +273,24 @@ sealed partial class MainWindow
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException) { Say(ex.Message); }
     }
 
+    // ---- the floating island ---------------------------------------------------------------------------------------
+    IslandWindow? island;
+
+    void StartIsland()
+    {
+        if (engine == null || directory == null || island != null) return;
+        island = new IslandWindow(engine, LabelOf, id => openChatPeer == id && IsVisible && WindowState != WindowState.Minimized, OpenFromIsland);
+        island.Start();
+    }
+
+    string LabelOf(string peerId)
+    {
+        Peer? peer; lock (engine!.State.Peers) peer = engine.State.Peers.FirstOrDefault(p => p.Id == peerId);
+        return peer != null ? PeerLabel(peer).Split(" · ")[0] : directory?.CodeOf(peerId) ?? peerId[..Math.Min(6, peerId.Length)];
+    }
+
+    void OpenFromIsland(string peerId) { ShowFromTray(); OpenChat(peerId, LabelOf(peerId)); }
+
     // ---- unread ----------------------------------------------------------------------------------------------------
     // A message arriving while its conversation is closed: a note on screen, and the badge on the device's card.
     readonly HashSet<string> chatWatched = new();
@@ -282,7 +300,7 @@ sealed partial class MainWindow
         var chat = engine.ChatFor(peerId);
         chat.MessageAdded += message => Dispatcher.UIThread.Post(() =>
         {
-            if (message.Mine || openChatPeer == peerId) return;
+            if (message.Mine || openChatPeer == peerId || island != null && !Motion.NoIsland) return;   // the island announces it
             var preview = message.Kind == ChatKind.Text ? message.Text : (message.Kind == ChatKind.Image ? "[图片] " : "[文件] ") + message.FileName;
             Toast(label + "：" + (preview.Length > 30 ? preview[..30] + "…" : preview));
         });

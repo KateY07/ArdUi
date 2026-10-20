@@ -30,6 +30,10 @@ static class ConnectFlowTests
         Check(ConnectFlow.NormaliseCode("A7B2K!") == null, "symbols are not part of a code");
         Check(ConnectFlow.NormaliseCode("ＡＢＣ１２３") == null, "full-width letters are not a code");
         Check(ConnectFlow.NormaliseCode("设备A7B2K9") == "A7B2K9", "non-ASCII characters are ignored");
+        Check(Kind(new IOException("客户端版本过旧，请升级到 ArdUi v5.pre1 或更高版本。")) == ConnectFailure.Outdated, "an outdated client is told to upgrade");
+        Check(ClientVersion.Allowed("v5.pre1") && ClientVersion.Allowed("v5.pre12") && ClientVersion.Allowed("v6.pre1") && !ClientVersion.Allowed("v5.pre0"), "v5.pre1 and newer are allowed");
+        Check(!ClientVersion.Allowed("v4.pre9") && !ClientVersion.Allowed("v3.pre17") && !ClientVersion.Allowed(null) && !ClientVersion.Allowed("") && !ClientVersion.Allowed("5.0.0-pre.1") && !ClientVersion.Allowed("v5.pre"), "older, missing and malformed versions are refused");
+        Check(Program.Version == "v5.pre1", "this build announces v5.pre1");
         return failures == 0 ? 0 : 1;
     }
 }

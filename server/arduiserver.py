@@ -21,7 +21,15 @@ ENDPOINT = re.compile(r'[0-9a-f]{64}\Z')
 TICKET = re.compile(r'[0-9a-f]{32}\Z')
 COMPUTER_NAME = re.compile(r'[^\x00-\x1f\x7f]{1,64}\Z')
 SIGNING_KEY = os.environ.get('ARDUI_TRANSIT_KEY', DB + '.transit-key')
-VERSION = 'v2.pre1'
+VERSION = 'v5.pre1'
+# Clients older than this are refused with 426 (the header is "v<major>.pre<n>", sent by ArdUi since v5.pre1; older clients send none).
+MIN_CLIENT = (5, 1)
+CLIENT = re.compile(r'v(\d{1,3})\.pre(\d{1,3})\Z')
+
+def check_client(environ):
+    match = CLIENT.fullmatch(environ.get('HTTP_X_ARDUI_CLIENT', ''))
+    if match is None or (int(match.group(1)), int(match.group(2))) < MIN_CLIENT:
+        raise ApiError(426, '客户端版本过旧，请升级到 ArdUi v5.pre1 或更高版本。')
 
 def transit_signer():
     folder = os.path.dirname(os.path.abspath(SIGNING_KEY))
@@ -248,8 +256,10 @@ def dispatch(path, endpoint, data, ip, envelope):
         target_id=text(data,'targetEndpoint',ENDPOINT)
         ticket=text(data,'requestId',TICKET)
         expires=data.get('expires')
-        if type(expires) is not int or not now < expires <= now+360 or set(data)!={'code','sessionId','targetEndpoint','requestId','expires'}:
+        if type(expires) is not int or not now < expires <= now+360 or set(data)!={'code','sessionId','targetEndpoint','requestId','expires','client'}:
             raise ApiError(400,'连接请求无效；服务器不接收密码。')
+        client=data.get('client'); match=CLIENT.fullmatch(client) if isinstance(client,str) else None
+        if match is None or (int(match.group(1)),int(match.group(2)))<MIN_CLIENT: raise ApiError(426,'客户端版本过旧，请升级到 ArdUi v5.pre1 或更高版本。')
         limit('connect-device:'+endpoint,20,60)
         with database() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -363,12 +373,13 @@ def application(environ,start_response):
     status=200
     try:
         path=environ.get('PATH_INFO','')
-        if path=='/api/health' and environ['REQUEST_METHOD']=='GET': result={'service':'arduiserver','version':VERSION,'ok':True}
+        if path=='/api/health' and environ['REQUEST_METHOD']=='GET': result={'service':'arduiserver','version':VERSION,'minClient':'v%d.pre%d' % MIN_CLIENT,'ok':True}
         elif environ['REQUEST_METHOD']!='POST': raise ApiError(405,'此接口仅接受 POST。')
         else:
             try: length=int(environ.get('CONTENT_LENGTH') or 0)
             except ValueError: raise ApiError(400,'无效内容长度。')
             if not 1<=length<=32768: raise ApiError(413,'请求体大小无效。')
+            check_client(environ)
             # Caddy overwrites this header; the backend listens on loopback only.
             ip=environ.get('HTTP_X_REAL_IP') or environ.get('REMOTE_ADDR','unknown')
             endpoint,data,envelope=authenticate(path,environ['wsgi.input'].read(length),ip)

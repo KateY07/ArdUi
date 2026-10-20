@@ -50,6 +50,7 @@ sealed class DirectoryClient : IAsyncDisposable
             throw new InvalidDataException("可信服务器必须使用 HTTPS。");
         http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
         { BaseAddress = server, Timeout = TimeSpan.FromSeconds(20), MaxResponseContentBufferSize = 65536 };
+        http.DefaultRequestHeaders.Add("X-ArdUi-Client", Program.Version);   // the server refuses clients older than v5.pre1
         var seed = File.ReadAllBytes(Path.Combine(engine.State.IdentityDirectory, "identity"));
         try { key = NSec.Cryptography.Key.Import(NSec.Cryptography.SignatureAlgorithm.Ed25519, seed, NSec.Cryptography.KeyBlobFormat.RawPrivateKey); }
         finally { CryptographicOperations.ZeroMemory(seed); }
@@ -287,6 +288,8 @@ sealed class DirectoryClient : IAsyncDisposable
             var request = Verify<ServerRequest>(ticket.Proof, "/api/v1/connect", Wire.Endpoint(ticket.ControllerEndpoint));
             if (request.TargetEndpoint != engine.Id || request.Code != Code || request.SessionId != ticket.ClientSessionId || request.RequestId != ticket.Id || request.Expires != ticket.Expires)
                 throw new InvalidDataException("连接请求与设备签名不匹配。");
+            if (!ClientVersion.Allowed(request.Client))
+                throw new InvalidDataException($"对方的 ArdUi 版本过旧（需要 {ClientVersion.Minimum} 或更高），已拒绝其接入。");
             var sessionId = await engine.AcceptServerSession(ticket, (request, token) => AuthorizePassword(ticket, request, token), ct);
             await Call<JsonElement>($"/api/v1/tickets/{ticket.Id}/ready",
                 new ServerOffer(sessionId, ticket.Id, ticket.ControllerEndpoint, engine.Id, ticket.ClientSessionId, ticket.Expires), ct);
@@ -447,7 +450,7 @@ sealed class DirectoryClient : IAsyncDisposable
         try
         {
             var local = await Ard.Identity(dir, timeout.Token);
-            var request = new ServerRequest(machine,target.Endpoint,local,Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow.AddSeconds(background?60:300).ToUnixTimeSeconds());
+            var request = new ServerRequest(machine,target.Endpoint,local,Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow.AddSeconds(background?60:300).ToUnixTimeSeconds(),Program.Version);
             Report(machine,ConnectStage.Signal);
             await Call<JsonElement>("/api/v1/connect", request, timeout.Token);
             ServerOffer? offer = null;

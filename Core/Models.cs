@@ -53,7 +53,7 @@ sealed class Peer
 
 sealed record SignedEnvelope(string Endpoint, long IssuedAt, string Nonce, string Payload, string Signature);
 sealed record MachineInfo(string Code, string Endpoint);
-sealed record ServerRequest(string Code, string TargetEndpoint, string SessionId, string RequestId, long Expires);
+sealed record ServerRequest(string Code, string TargetEndpoint, string SessionId, string RequestId, long Expires, string? Client = null);
 sealed record ServerOffer(string SessionId, string RequestId, string ControllerEndpoint, string TargetEndpoint, string ClientSessionId, long Expires);
 sealed record ServerTicket(string Id, string ControllerEndpoint, string ControllerCode, string ClientSessionId, long Expires, SignedEnvelope Proof);
 sealed record PollReply(bool Enabled, ServerTicket[] Tickets);

@@ -36,6 +36,8 @@ static class Program
             { Release.Verify(args[1],args[2],args[3]); return 0; }
             if (args.Length == 2 && args[0] == "--audit-test")
                 return AuditTests.Run(args[1]).GetAwaiter().GetResult();
+            if (args.Length == 2 && args[0] == "--make-icon")
+            { AppIcon.WriteIco(args[1]); return 0; }
             if (args.Contains("--chat-ui-test"))
                 return ChatUiTests.Run();
             if (args.Contains("--chat-test"))
@@ -54,6 +56,8 @@ static class Program
                 return FrdTest.Run(args).GetAwaiter().GetResult();
             if (args.Length == 2 && args[0] == "--render-preview")
                 return Preview.Render(args[1]);
+            if (args.Length == 2 && args[0] == "--render-island")
+                return IslandPreview.Render(args[1]);
             if (args.Length == 2 && args[0] == "--render-host-preview")
                 return HostPreview.Render(args[1]);
             if (args.Length == 2 && args[0] == "--render-placement")

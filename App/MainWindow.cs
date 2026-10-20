@@ -166,6 +166,7 @@ sealed partial class MainWindow : Window
                 directory.ConfirmIncoming=async(pair,ct)=>await Dispatcher.UIThread.InvokeAsync(()=>ConfirmIncoming(pair,ct));
                 directory.Changed+=RequestRefresh;
                 directory.Notice+=message=>Dispatcher.UIThread.Post(()=>Say(message));
+                StartIsland();
                 allow.IsChecked=directory.Enabled;identityCard.IsVisible=directory.Enabled;allow.OnContent=allow.OffContent="允许被控";allow.IsEnabled=true;ready=true;directory.Start();passwordTimer.Start();UpdatePassword();Say("正在连接网络…");
             });
         };
@@ -175,7 +176,7 @@ sealed partial class MainWindow : Window
             if(!previewMode&&!exiting&&!closing&&e.CloseReason==WindowCloseReason.WindowClosing)
             {e.Cancel=true;HideToTray();return;}
             e.Cancel=true;if(closing)return;closing=true;IsEnabled=false;
-            try{passwordTimer.Stop();undoTimer.Stop();if(directory!=null)await directory.DisposeAsync();if(engine!=null)await engine.DisposeAsync();}
+            try{island?.Shutdown();passwordTimer.Stop();undoTimer.Stop();if(directory!=null)await directory.DisposeAsync();if(engine!=null)await engine.DisposeAsync();}
             finally{closed=true;Close();}
         };
         if(preview)

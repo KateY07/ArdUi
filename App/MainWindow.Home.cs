@@ -487,7 +487,15 @@ sealed partial class MainWindow
             try { Motion.SetReduced(motionBox.IsChecked == true); Say(motionBox.IsChecked == true ? "已设置减少动画，重新启动后生效。" : "已恢复动画，重新启动后生效。"); }
             catch (Exception ex) { Say(ex.Message); }
         };
-        var generalTab = new StackPanel { Spacing = 8, Children = { Section("启动", Card(startupBox)), Section("界面", Card(motionBox)) } };
+        var islandBox = new ToggleSwitch { OnContent = "显示灵动岛（屏幕右下角（托盘上方）的小胶囊，可拖动：新消息、未读数、文件进度）", OffContent = "显示灵动岛（屏幕顶部的小胶囊：新消息、未读数、文件进度）", IsChecked = !Motion.NoIsland };
+        var islandFull = new ToggleSwitch { OnContent = "全屏或演示时也显示灵动岛", OffContent = "全屏或演示时也显示灵动岛", IsChecked = Motion.IslandInFullscreen };
+        void SaveIsland()
+        {
+            try { Motion.SetIsland(islandBox.IsChecked == true, islandFull.IsChecked == true); island?.Enable(islandBox.IsChecked == true); islandFull.IsEnabled = islandBox.IsChecked == true; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Say(ex.Message); }
+        }
+        islandBox.IsCheckedChanged += (_, _) => SaveIsland(); islandFull.IsCheckedChanged += (_, _) => SaveIsland(); islandFull.IsEnabled = islandBox.IsChecked == true;
+        var generalTab = new StackPanel { Spacing = 8, Children = { Section("启动", Card(startupBox)), Section("界面", Card(new StackPanel { Spacing = 6, Children = { motionBox, islandBox, islandFull } })) } };
         var tabs = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         var pages = new (string Name, Control Body)[] { ("通用", generalTab), ("设备管理", devicesTab), ("被控与授权", accessTab), ("日志与关于", aboutTab) };
         var tabButtons = new List<Button>();

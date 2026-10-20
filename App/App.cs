@@ -2,12 +2,12 @@ namespace ArdUi;
 
 static class AppIcon
 {
-    public static WindowIcon Create()
+    // Logo A: a cursor sending out two signal arcs, white on a terracotta tile; drawn at any size.
+    public static byte[] Png(int size)
     {
-        using var bitmap=new SKBitmap(new SKImageInfo(64,64,SKColorType.Bgra8888,SKAlphaType.Premul));using var canvas=new SKCanvas(bitmap);
+        using var bitmap=new SKBitmap(new SKImageInfo(size,size,SKColorType.Bgra8888,SKAlphaType.Premul));using var canvas=new SKCanvas(bitmap);
         canvas.Clear(SKColors.Transparent);
-        // Logo A: a cursor sending out two signal arcs, white on a terracotta tile.
-        const float S=64;
+        float S=size;
         using var tile=new SKPaint{Color=new SKColor(0xC6,0x61,0x3F),IsAntialias=true};
         using var fill=new SKPaint{Color=SKColors.White,IsAntialias=true};
         using var edge=new SKPaint{Color=SKColors.White,IsAntialias=true,Style=SKPaintStyle.Stroke,StrokeWidth=S*.03f,StrokeJoin=SKStrokeJoin.Round};
@@ -20,7 +20,24 @@ static class AppIcon
         foreach(var r in new[]{.20f,.27f})
             canvas.DrawArc(new SKRect(S*(.34f-r),S*(.28f-r),S*(.34f+r),S*(.28f+r)),-82,62,false,wave);
         using var image=SKImage.FromBitmap(bitmap);using var data=image.Encode(SKEncodedImageFormat.Png,100);
-        return new WindowIcon(new MemoryStream(data.ToArray(),false));
+        return data.ToArray();
+    }
+    public static WindowIcon Create()=>new(new MemoryStream(Png(64),false));
+
+    // A Windows .ico with several sizes (PNG frames), used as the program's icon in Explorer, the taskbar and the Start menu.
+    public static void WriteIco(string path)
+    {
+        var sizes=new[]{16,24,32,48,64,128,256};
+        var frames=sizes.Select(Png).ToArray();
+        using var file=File.Create(path);using var writer=new BinaryWriter(file);
+        writer.Write((short)0);writer.Write((short)1);writer.Write((short)sizes.Length);
+        var offset=6+16*sizes.Length;
+        for(var i=0;i<sizes.Length;i++)
+        {
+            writer.Write((byte)(sizes[i]==256?0:sizes[i]));writer.Write((byte)(sizes[i]==256?0:sizes[i]));writer.Write((byte)0);writer.Write((byte)0);
+            writer.Write((short)1);writer.Write((short)32);writer.Write(frames[i].Length);writer.Write(offset);offset+=frames[i].Length;
+        }
+        foreach(var frame in frames)writer.Write(frame);
     }
 }
 
