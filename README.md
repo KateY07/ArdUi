@@ -76,7 +76,7 @@ Packaging the installer needs [onesetup](https://github.com/KateY07/onesetup) v3
 powershell -File packaging\build-onesetup-release.ps1
 ```
 
-Source layout: [ARCHITECTURE.md](ARCHITECTURE.md). Release notes: [docs/releases](docs/releases).
+Source layout: [ARCHITECTURE.md](ARCHITECTURE.md). Release notes: [release-notes](release-notes).
 
 ## Licenses and third-party components
 

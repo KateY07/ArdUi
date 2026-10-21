@@ -57,7 +57,7 @@ $installer=Join-Path $root 'install.ps1'
 $bytes=[IO.File]::ReadAllBytes($installer)
 if($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF){throw 'install.ps1 must be UTF-8 with BOM.'}
 Copy-Item -LiteralPath $installer,(Join-Path $root 'packaging\offline\install.bat') -Destination $stage
-$notes=Join-Path $root "docs\releases\$version.md"
+$notes=Join-Path $root "release-notes\$version.md"
 if(Test-Path -LiteralPath $notes){Copy-Item -LiteralPath $notes -Destination (Join-Path $stage 'RELEASE-NOTES.md')}
 [IO.File]::WriteAllText((Join-Path $stage 'RELEASE.txt'),@"
 ArdUi $version

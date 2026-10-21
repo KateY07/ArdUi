@@ -69,7 +69,7 @@ dotnet run --project ArdUi.csproj -- --self-test        # 基础自检
 powershell -File packaging\build-onesetup-release.ps1
 ```
 
-源码结构见 [ARCHITECTURE.md](ARCHITECTURE.md)，各版本变化见 [docs/releases](docs/releases)。
+源码结构见 [ARCHITECTURE.md](ARCHITECTURE.md)，各版本变化见 [release-notes](release-notes)。
 
 ## 许可与第三方组件
 
