@@ -38,6 +38,20 @@ static class Program
                 return AuditTests.Run().GetAwaiter().GetResult();
             if (args.Length == 2 && args[0] == "--make-icon")
             { AppIcon.WriteIco(args[1]); return 0; }
+            if (args.Length >= 1 && args[0] == "--netdiag")
+            { using var output = Console.OpenStandardOutput(); output.Write(System.Text.Encoding.UTF8.GetBytes(NetDiag.Run(new NetDiagOptions { DirectoryUrl = new Settings().Server, RelayHostPort = new Uri(new Settings().Relay).Authority, Probe = args.Length > 1 ? (_ => NetProbeLive.Ticket(args[1], new Settings().Server)) : null, ProbeFallbackHost = new Uri(new Settings().Server).Host }).GetAwaiter().GetResult().ToText())); return 0; }
+            if (args.Length >= 2 && args[0] == "--render-netdiag")
+                return NetDiagPreview.Render(args[1], args.Length > 2 ? args[2] : null);
+            if (args.Length >= 2 && args[0] == "--mapping-live")
+                return NetProbeLive.Mapping(args[1], args.Length > 2 ? args[2] : new Settings().Server).GetAwaiter().GetResult();
+            if (args.Length >= 2 && args[0] == "--probe-live")
+                return NetProbeLive.Run(args[1], args.Length > 2 ? args[2] : new Settings().Server).GetAwaiter().GetResult();
+            if (args.Contains("--voice-test"))
+                return VoiceTests.Run().GetAwaiter().GetResult();
+            if (args.Contains("--netprobe-test"))
+                return NetProbeTests.Run().GetAwaiter().GetResult();
+            if (args.Contains("--netdiag-test"))
+                return NetDiagTests.Run().GetAwaiter().GetResult();
             if (args.Contains("--chat-ui-test"))
                 return ChatUiTests.Run();
             if (args.Contains("--chat-test"))

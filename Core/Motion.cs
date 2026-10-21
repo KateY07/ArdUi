@@ -11,9 +11,10 @@ static class Motion
     static extern bool SystemParametersInfo(uint action, uint param, out bool value, uint winIni);
 
     static readonly string prefsPath = Path.Combine(Program.DataRoot, "ui.json");
-    sealed class Prefs { public bool ReduceMotion { get; set; } public bool NoIsland { get; set; } public bool IslandInFullscreen { get; set; } public int? IslandX { get; set; } public int? IslandY { get; set; } }
+    sealed class Prefs { public bool ReduceMotion { get; set; } public bool NoIsland { get; set; } public bool IslandInFullscreen { get; set; } public int? IslandX { get; set; } public int? IslandY { get; set; } public bool NoVoice { get; set; } }
 
     public static bool UserReduced { get; private set; }
+    public static bool NoVoice { get; private set; }             // incoming voice calls are refused
     public static bool NoIsland { get; private set; }            // the floating island is switched off
     public static (int X, int Y)? IslandPosition { get; private set; }   // where the user dragged the island to
     public static bool IslandInFullscreen { get; private set; }   // ...and may also show over full-screen apps and presentations
@@ -21,7 +22,7 @@ static class Motion
 
     static Motion()
     {
-        try { if (File.Exists(prefsPath) && JsonSerializer.Deserialize<Prefs>(File.ReadAllText(prefsPath), Wire.Json) is { } prefs) { UserReduced = prefs.ReduceMotion; NoIsland = prefs.NoIsland; IslandInFullscreen = prefs.IslandInFullscreen; if (prefs.IslandX is { } x && prefs.IslandY is { } y) IslandPosition = (x, y); } }
+        try { if (File.Exists(prefsPath) && JsonSerializer.Deserialize<Prefs>(File.ReadAllText(prefsPath), Wire.Json) is { } prefs) { UserReduced = prefs.ReduceMotion; NoIsland = prefs.NoIsland; NoVoice = prefs.NoVoice; IslandInFullscreen = prefs.IslandInFullscreen; if (prefs.IslandX is { } x && prefs.IslandY is { } y) IslandPosition = (x, y); } }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException) { }
         var system = true;
         try { if (OperatingSystem.IsWindows() && SystemParametersInfo(SpiGetClientAreaAnimation, 0, out var on, 0)) system = on; }
@@ -37,9 +38,10 @@ static class Motion
         UserReduced = reduced; Save();
     }
 
+    public static void SetVoice(bool allowed) { NoVoice = !allowed; Save(); }
     public static void SetIsland(bool shown, bool inFullscreen) { NoIsland = !shown; IslandInFullscreen = inFullscreen; Save(); }
 
     public static void SetIslandPosition((int X, int Y)? position) { IslandPosition = position; Save(); }
 
-    static void Save() => File.WriteAllText(prefsPath, JsonSerializer.Serialize(new Prefs { ReduceMotion = UserReduced, NoIsland = NoIsland, IslandInFullscreen = IslandInFullscreen, IslandX = IslandPosition?.X, IslandY = IslandPosition?.Y }, Wire.Json));
+    static void Save() => File.WriteAllText(prefsPath, JsonSerializer.Serialize(new Prefs { ReduceMotion = UserReduced, NoIsland = NoIsland, NoVoice = NoVoice, IslandInFullscreen = IslandInFullscreen, IslandX = IslandPosition?.X, IslandY = IslandPosition?.Y }, Wire.Json));
 }

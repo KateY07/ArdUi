@@ -27,9 +27,9 @@ sealed partial class MainWindow
     Border BuildChat()
     {
         var close = Chrome.IconButton(Look.CrossPath, 12, 30); ToolTip.SetTip(close, "关闭"); close.Click += (_, _) => CloseChat();
-        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), Margin = new Thickness(0, 0, 0, 8) };
+        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"), Margin = new Thickness(0, 0, 0, 8) };
         head.Children.Add(Look.Icon(ChatPath, 18, Look.Accent)); ((Control)head.Children[0]).Margin = new Thickness(0, 0, 10, 0);
-        Grid.SetColumn(chatTitle, 1); head.Children.Add(chatTitle); Grid.SetColumn(close, 2); head.Children.Add(close);
+        Grid.SetColumn(chatTitle, 1); head.Children.Add(chatTitle); SetChatCall(null); Grid.SetColumn(chatCall, 2); head.Children.Add(chatCall); Grid.SetColumn(close, 3); head.Children.Add(close);
         chatScroll.Content = chatList; chatScroll.Padding = new Thickness(2);
         var listBox = new Border { Child = chatScroll, Background = new SolidColorBrush(Color.FromArgb(120, 245, 244, 238)), CornerRadius = new CornerRadius(14), Padding = new Thickness(8), Height = 330 };
         var attach = Chrome.IconButton(ClipPath, 17, 36); ToolTip.SetTip(attach, "添加文件、图片或视频（也可以拖进来或 Ctrl+V 粘贴），按发送才会发出");

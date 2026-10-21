@@ -11,21 +11,32 @@ $version=[IO.File]::ReadAllText((Join-Path $payload 'release.txt'),[Text.Encodin
 if([string]::IsNullOrWhiteSpace($version)){throw '安装包缺少版本信息。'}
 $data=Join-Path $root 'data'
 Write-Host ".title 安装 ArdUi $version"
-Step 8 '复制程序文件'
 $destination=Join-Path (Join-Path $root 'versions') $version
+# A running ArdUi (or its ard.exe / FRD) keeps its files locked and would only be activated by a new launch: stop whatever runs from this
+# installation first, then wait until the files are free.
+Step 4 '结束正在运行的 ArdUi'
+$versions=Join-Path $root 'versions'
+$running=@(Get-CimInstance Win32_Process -Filter "Name='ArdUi.exe' OR Name='ard.exe' OR Name='FRD.exe' OR Name='frd-wintools.exe'" -ErrorAction SilentlyContinue | Where-Object {
+    $_.ExecutablePath -and $_.ExecutablePath.StartsWith($versions+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)})
+foreach($process in $running){Write-Host ".info 结束进程 $($process.Name) ($($process.ProcessId))";Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue}
+if($running.Count -gt 0){
+    $until=(Get-Date).AddSeconds(10)
+    while((Get-Date) -lt $until -and (Get-Process -Id $running.ProcessId -ErrorAction SilentlyContinue)){Start-Sleep -Milliseconds 200}
+}
+Step 8 '复制程序文件'
 
 New-Item -ItemType Directory -Force -Path $root,(Join-Path $root 'versions'),$destination | Out-Null
 Copy-Item -Path (Join-Path $payload '*') -Destination $destination -Recurse -Force
-# FFmpeg is an optional FRD extension that the user unpacks next to FRD.exe (frdfmpeg). A new version folder starts without it,
+# FFmpeg is an optional FRD extension that the user unpacks next to FRD.exe (frd\ffmpeg). A new version folder starts without it,
 # so carry the newest earlier copy over instead of making the user install it again.
-$ffmpegTarget=Join-Path $destination 'frdfmpeg'
+$ffmpegTarget=Join-Path $destination 'frd\ffmpeg'
 if(-not (Test-Path -LiteralPath $ffmpegTarget -PathType Container) -or -not (Get-ChildItem -LiteralPath $ffmpegTarget -Filter 'avcodec-*.dll' -ErrorAction SilentlyContinue)){
     $earlier=Get-ChildItem -LiteralPath (Join-Path $root 'versions') -Directory -ErrorAction SilentlyContinue |
-        Where-Object {$_.FullName -ne $destination -and (Get-ChildItem -LiteralPath (Join-Path $_.FullName 'frdfmpeg') -Filter 'avcodec-*.dll' -ErrorAction SilentlyContinue)} |
+        Where-Object {$_.FullName -ne $destination -and (Get-ChildItem -LiteralPath (Join-Path $_.FullName 'frd\ffmpeg') -Filter 'avcodec-*.dll' -ErrorAction SilentlyContinue)} |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if($earlier){
         New-Item -ItemType Directory -Force -Path $ffmpegTarget | Out-Null
-        Copy-Item -Path (Join-Path $earlier.FullName 'frdfmpeg\*') -Destination $ffmpegTarget -Recurse -Force
+        Copy-Item -Path (Join-Path $earlier.FullName 'frd\ffmpeg\*') -Destination $ffmpegTarget -Recurse -Force
         Write-Host ".info FFmpeg extension carried over from $($earlier.Name)"
     }
 }

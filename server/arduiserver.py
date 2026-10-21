@@ -22,6 +22,10 @@ TICKET = re.compile(r'[0-9a-f]{32}\Z')
 COMPUTER_NAME = re.compile(r'[^\x00-\x1f\x7f]{1,64}\Z')
 SIGNING_KEY = os.environ.get('ARDUI_TRANSIT_KEY', DB + '.transit-key')
 VERSION = 'v5.pre1'
+# Network probe (see probe_udp.py): this server only mints short-lived tokens, each bound to the caller's IP address.
+PROBE_KEY = os.environ.get('ARDUI_PROBE_KEY', DB + '.probe-key')
+PROBE_HOST = os.environ.get('ARDUI_PROBE_HOST', '')
+PROBE_PORT = int(os.environ.get('ARDUI_PROBE_PORT', '7843'))
 # Clients older than this are refused with 426 (the header is "v<major>.pre<n>", sent by ArdUi since v5.pre1; older clients send none).
 MIN_CLIENT = (5, 1)
 CLIENT = re.compile(r'v(\d{1,3})\.pre(\d{1,3})\Z')
@@ -165,6 +169,33 @@ def authenticate(path, body, ip):
     except sqlite3.IntegrityError: raise ApiError(401, '请求已经使用，请重试。')
     return endpoint,data,envelope
 
+def probe_key():
+    folder = os.path.dirname(os.path.abspath(PROBE_KEY))
+    os.makedirs(folder, exist_ok=True)
+    if not os.path.exists(PROBE_KEY):
+        fd, pending = tempfile.mkstemp(prefix='.probe-key-', dir=folder)
+        try:
+            with os.fdopen(fd, 'wb') as out:
+                out.write(secrets.token_bytes(32)); out.flush(); os.fsync(out.fileno())
+            try: os.link(pending, PROBE_KEY)
+            except FileExistsError: pass
+        finally: os.unlink(pending)
+    with open(PROBE_KEY, 'rb') as source: return source.read()
+
+def probe_ip16(text):
+    import ipaddress
+    try: address = ipaddress.ip_address(text.split('%')[0])
+    except ValueError: raise ApiError(400, '无法确定来源地址。')
+    if address.version == 6 and address.ipv4_mapped is not None: address = address.ipv4_mapped
+    return (b'\x00' * 10 + b'\xff\xff' + address.packed if address.version == 4 else address.packed), str(address)
+
+def probe_token(lifetime=120):
+    # nonce + expiry + HMAC(key, "ARDP-token2" + nonce + expiry): it names no address (a machine behind several internet lines leaves through
+    # different ones); the probe service makes every source address prove itself with a cookie round trip before it sends anything there.
+    import hashlib, hmac, struct
+    nonce = secrets.token_bytes(8); expiry = struct.pack('>I', int(time.time()) + lifetime)
+    return nonce + expiry + hmac.new(probe_key(), b'ARDP-token2\0' + nonce + expiry, hashlib.sha256).digest()[:16]
+
 def registered(db, endpoint):
     row = db.execute('SELECT * FROM devices WHERE endpoint=?',(endpoint,)).fetchone()
     if row is None: raise ApiError(403, '请先注册本机。')
@@ -198,6 +229,15 @@ def dispatch(path, endpoint, data, ip, envelope):
             row=db.execute('SELECT endpoint,code FROM devices WHERE code=?',(code,)).fetchone()
         if row is None: raise ApiError(404,'机器编号不存在。')
         return dict(row)
+    if path == '/api/v1/probe/start':
+        # A short-lived token for the UDP probe service (registered devices only, every level rate limited). The token names no address; the
+        # probe service only ever sends to addresses that answered its cookie challenge. 'ip' is the address this request came from.
+        if data: raise ApiError(400, '探测请求不接受参数。')
+        limit('probe-device:'+endpoint, 12, 3600); limit('probe-ip:'+ip, 30, 3600); limit('probe-all', 1500, 3600)
+        with database() as db: registered(db, endpoint)
+        _, seen = probe_ip16(ip)
+        return {'v': 2, 'token': probe_token().hex(), 'expires': int(time.time()) + 120, 'ip': seen, 'host': PROBE_HOST,
+                'ports': [PROBE_PORT, PROBE_PORT + 1]}
     if path == '/api/v1/access':
         enabled=data.get('enabled')
         if type(enabled) is not bool or set(data)!={'enabled'}: raise ApiError(400,'无效访问开关；服务器不接收密码。')

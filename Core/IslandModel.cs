@@ -19,14 +19,27 @@ sealed class IslandModel
     public string? BubbleText { get; private set; }
     public string? BubblePeer { get; private set; }
     public string? UnreadPeer { get; private set; }   // the device whose message came last: where a click on the unread badge leads
+    // A voice call, if one is ringing or running: it takes the island over until it ends.
+    public CallState Call { get; private set; }
+    public string? CallPeer { get; private set; }
+    public string? CallLabel { get; private set; }
+    public TimeSpan CallElapsed { get; private set; }
+    public bool CallMuted { get; private set; }
+    public string? CallNote { get; private set; }
     DateTimeOffset bubbleUntil;
     public event Action? Changed;
 
     // Something is worth showing: a connection, an unread message, or a file on its way.
-    public bool Visible => Enabled && !Suppressed && (Connected > 0 || Unread > 0 || Transfers.Count > 0);
+    public bool Visible => Enabled && (!Suppressed || Call != CallState.Idle) && (Connected > 0 || Unread > 0 || Transfers.Count > 0 || Call != CallState.Idle);
     public bool BubbleVisible => Visible && BubbleText != null;
     public ChatTransfer? Transfer => Transfers.FirstOrDefault();
 
+    public void SetCall(CallState state, string? peer, string? label, TimeSpan elapsed, bool muted, string? note = null)
+    {
+        var seconds = (long)elapsed.TotalSeconds; var before = (Call, CallPeer, CallLabel, (long)CallElapsed.TotalSeconds, CallMuted, CallNote);
+        Call = state; CallPeer = state == CallState.Idle ? null : peer; CallLabel = state == CallState.Idle ? null : label; CallElapsed = state == CallState.Idle ? default : elapsed; CallMuted = state == CallState.Idle ? false : muted; CallNote = state == CallState.Idle ? null : note;
+        if (before != (Call, CallPeer, CallLabel, seconds, CallMuted, CallNote)) Changed?.Invoke();
+    }
     public void SetEnabled(bool value) { if (Enabled == value) return; Enabled = value; Changed?.Invoke(); }
     public void SetSuppressed(bool value) { if (Suppressed == value) return; Suppressed = value; Changed?.Invoke(); }
     public void SetConnected(int count) { if (Connected == count) return; Connected = count; Changed?.Invoke(); }

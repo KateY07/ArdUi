@@ -67,7 +67,7 @@ Requires the preinstalled .NET 8 x64 runtime (FRD is Native AOT and needs none).
 "@,[Text.UTF8Encoding]::new($false))
 
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
-& $packer $stage --ui -o $output
+& $packer $stage --ui --icon (Join-Path $root 'App\ardui.ico') -o $output
 if($LASTEXITCODE -ne 0){throw 'OneSetup packaging failed.'}
 $hash=(Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText($sidecar,"$hash *$(Split-Path $output -Leaf)`n",[Text.Encoding]::ASCII)

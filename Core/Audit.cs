@@ -150,6 +150,7 @@ sealed class AuditSession : IAsyncDisposable
     string? folder; H264Recorder? recorder; Thread? loop; ScreenGrabber? grabber; volatile bool stopping;
     long frames; int videoRuns;
     ChatChannel? chat; Action<ChatMessage>? chatHook;
+    CallChannel? call; Action<CallEnd>? callHook;
 
     AuditSession(AuditStore store, string code, string endpoint, bool once, Perm perms, int fps, int segmentSeconds)
     {
@@ -226,8 +227,23 @@ sealed class AuditSession : IAsyncDisposable
 
     // ---- the conversation ---------------------------------------------------------------------------------------------------
     // Transcript, files and pictures go into the session's folder (created by the first message).
-    public void Attach(ChatChannel channel)
+    public void Attach(ChatChannel channel, CallChannel? calls = null)
     {
+        if (calls != null)
+        {
+            // Voice calls are kept as call records (who, when, how long, how it ended); the sound itself is not recorded.
+            call = calls;
+            callHook = end =>
+            {
+                try
+                {
+                    var target = EnsureFolder();
+                    lock (gate) File.AppendAllText(Path.Combine(target, "chat.jsonl"), JsonSerializer.Serialize(new { at = end.At - end.Duration, until = end.At, from = end.Incoming ? Code : "host", kind = "Call", answered = end.Answered, seconds = (int)end.Duration.TotalSeconds, text = end.Reason }, AuditStore.Line) + "\n");
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { FileLog.Write("audit", "通话记录失败：" + ex.Message); }
+            };
+            calls.Ended += callHook;
+        }
         lock (gate)
         {
             chat = channel;
@@ -257,7 +273,7 @@ sealed class AuditSession : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        lock (gate) { if (chat != null && chatHook != null) chat.MessageAdded -= chatHook; }
+        lock (gate) { if (chat != null && chatHook != null) chat.MessageAdded -= chatHook; if (call != null && callHook != null) call.Ended -= callHook; }
         await EndVideo();
         string? target; lock (gate) target = folder;
         if (target == null) return;   // nothing was recorded or said: nothing to keep
@@ -288,11 +304,11 @@ sealed class AuditService : IAsyncDisposable
     public bool IsRecording(string endpoint) => sessions.TryGetValue(endpoint, out var s) && s.Recording;
 
     // A controlling device is in: its session is recorded from now on, screen included whenever the screen is being used.
-    public void Open(string endpoint, string code, bool once, Perm perms, ChatChannel chat)
+    public void Open(string endpoint, string code, bool once, Perm perms, ChatChannel chat, CallChannel? call = null)
     {
         if (sessions.ContainsKey(endpoint)) return;
         var session = AuditSession.Open(Store, code, endpoint, once, perms);
-        session.Attach(chat);
+        session.Attach(chat, call);
         session.Failure += reason => Failure?.Invoke(endpoint, reason);
         if (!sessions.TryAdd(endpoint, session)) { _ = session.DisposeAsync().AsTask(); }
     }

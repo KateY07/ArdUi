@@ -30,6 +30,7 @@ sealed class IslandView : Grid
     bool pressed;
     public event Action? PillDown, PillMove, PillUp;
     public event Action<ChatTransfer>? CancelClicked;
+    public event Action? CallAccept, CallHang, CallMute;
 
     public IslandView(IslandModel model, bool animated = true)
     {
@@ -92,7 +93,7 @@ sealed class IslandView : Grid
     DoubleTransition WidthMotion() => new() { Property = WidthProperty, Duration = animated ? TimeSpan.FromMilliseconds(420) : TimeSpan.Zero, Easing = new QuinticEaseOut() };
 
     // Nothing to report: the island rests half-faded.
-    bool Calm => model.Transfer == null && model.Unread == 0 && !model.BubbleVisible;
+    bool Calm => model.Call == CallState.Idle && model.Transfer == null && model.Unread == 0 && !model.BubbleVisible;
 
     // ---- content ------------------------------------------------------------------------------------------------
     public void Apply()
@@ -104,7 +105,7 @@ sealed class IslandView : Grid
             return;
         }
         var transfer = model.Transfer;
-        var sig = (transfer == null ? "idle" : transfer.Id + transfer.State) + "|" + (model.Unread > 0) + "|" + (model.Connected > 0);
+        var sig = (model.Call == CallState.Idle ? "" : "call" + model.Call + model.CallMuted + model.CallLabel + model.CallNote) + (transfer == null ? "idle" : transfer.Id + transfer.State) + "|" + (model.Unread > 0) + "|" + (model.Connected > 0);
         if (!shown)
         {
             signature = sig; Build(transfer, instant: true);
@@ -131,7 +132,19 @@ sealed class IslandView : Grid
     {
         arc = null; percent = line1 = line2 = countText = null; badge = null;
         row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, VerticalAlignment = VerticalAlignment.Center };
-        if (t != null)
+        if (model.Call != CallState.Idle)
+        {
+            var ringing = model.Call == CallState.Ringing;
+            row.Children.Add(new Border { Width = 30, Height = 30, Margin = new Thickness(2, 0, 0, 0), CornerRadius = new CornerRadius(15), Background = ringing ? Look.Accent : model.Call == CallState.Active ? Green : Soft, Child = Look.Icon(MainWindow.PhonePath, 15, Brushes.White, 2) });
+            line1 = Label(12.5, Brushes.White, true); line1.TextTrimming = TextTrimming.CharacterEllipsis; line2 = Label(11, Dim, false);
+            row.Children.Add(new StackPanel { Width = 150, VerticalAlignment = VerticalAlignment.Center, Children = { line1, line2 } });
+            callLine = line2;
+            if (model.Call == CallState.Active) row.Children.Add(Disc(Soft, MainWindow.MicPath, model.CallMuted ? Brush.Parse("#D79A3B") : Soft, () => CallMute?.Invoke()));
+            if (ringing) row.Children.Add(Disc(Green, MainWindow.PhonePath, Green, () => CallAccept?.Invoke()));
+            row.Children.Add(Disc(Red, Look.CrossPath, Red, () => CallHang?.Invoke()));
+            LiveCall();
+        }
+        else if (t != null)
         {
             row.Children.Add(t.State == TransferState.Done ? Check() : Ring(t));
             line1 = Label(12.5, Brushes.White, true); line1.TextTrimming = TextTrimming.CharacterEllipsis; line2 = Label(11, Dim, false);
@@ -167,8 +180,29 @@ sealed class IslandView : Grid
         else pill.Width = width;
     }
 
+    TextBlock? callLine;
+    void LiveCall()
+    {
+        if (line1 == null || callLine == null) return;
+        var e = model.CallElapsed;
+        line1.Text = model.CallLabel ?? "";
+        callLine.Text = model.Call switch { CallState.Ringing => "来电 · 语音通话", CallState.Calling => "正在呼叫…", _ => (e.TotalHours >= 1 ? e.ToString(@"h\:mm\:ss") : e.ToString(@"mm\:ss")) + (model.CallMuted ? " · 已静音" : " · 通话中") };
+        if (model.Call == CallState.Active && model.CallNote != null) callLine.Text = model.CallNote;
+    }
+
+    Control Disc(IBrush color, string path, IBrush hoverBase, Action click)
+    {
+        var disc = new Border { Width = 26, Height = 26, CornerRadius = new CornerRadius(13), Background = color, Child = Look.Icon(path, 12, Brushes.White, 2.2), VerticalAlignment = VerticalAlignment.Center, RenderTransformOrigin = RelativePoint.Center, Cursor = new Cursor(StandardCursorType.Hand) };
+        disc.Transitions = new Transitions { Slide(140, new CubicEaseOut()) };
+        disc.PointerEntered += (_, _) => disc.RenderTransform = Ops(0, 1.12);
+        disc.PointerExited += (_, _) => disc.RenderTransform = Ops(0, 1);
+        disc.PointerPressed += (_, e) => { e.Handled = true; click(); };
+        return disc;
+    }
+
     void Live(ChatTransfer? t)
     {
+        if (model.Call != CallState.Idle) { LiveCall(); return; }
         if (t != null && arc != null && line1 != null && line2 != null)
         {
             arc.SweepAngle = Math.Max(2, 360 * t.Fraction);

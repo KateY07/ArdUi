@@ -10,7 +10,15 @@ sealed class Gateway : IAsyncDisposable
     readonly ConcurrentDictionary<int, Task> tasks = new();
     readonly ConcurrentDictionary<int,TcpClient> clients=new();
     readonly ConcurrentDictionary<string, TargetUdp> udpFlows = new();
-    readonly ConcurrentDictionary<int,byte> frdTcp=new(),frdUdp=new();
+    readonly ConcurrentDictionary<int,byte> frdTcp=new(),frdUdp=new(),voiceUdp=new();
+    // The UDP port this machine listens on for a voice call (open only while that call lasts).
+    public void PermitVoiceUdp(int port,bool enabled)
+    {
+        if(enabled){voiceUdp[port]=0;return;}
+        voiceUdp.TryRemove(port,out _);
+        foreach(var pair in udpFlows.Where(p=>p.Key.EndsWith("/"+port,StringComparison.Ordinal)).ToArray())
+            if(udpFlows.TryRemove(pair.Key,out var flow))flow.Dispose();
+    }
     // Is the screen being used right now: FRD running on this machine, or an RDP connection open.
     int rdpBridges; bool lastScreenActive; readonly object activityGate = new();
     public bool ScreenActive => !frdTcp.IsEmpty || Volatile.Read(ref rdpBridges) > 0;
@@ -151,7 +159,7 @@ sealed class Gateway : IAsyncDisposable
                     Attached?.Invoke();
                     continue;
                 }
-                if (!udpAllowed.Contains(port)&&!frdUdp.ContainsKey(port)) continue;
+                if (!udpAllowed.Contains(port)&&!frdUdp.ContainsKey(port)&&!voiceUdp.ContainsKey(port)) continue;
                 var key = $"{packet.RemoteEndPoint}/{port}";
                 if (!udpFlows.TryGetValue(key, out var flow))
                 {

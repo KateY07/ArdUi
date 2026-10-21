@@ -143,7 +143,7 @@ sealed partial class MainWindow : Window
             Children={new Logo(72){Animate=true,HorizontalAlignment=HorizontalAlignment.Center},T_("正在连接网络…")}};
         connectingOverlay.IsVisible=!previewMode;
         titleBar=bar;SetupAttention(!previewMode&&Motion.Enabled);
-        Content=new Grid{Children={Chrome.Backdrop(!previewMode),scrim,pageArea,connectingOverlay,bar,inviteOverlay,BuildChat(),approvalOverlay,toastHost}};
+        Content=new Grid{Children={Chrome.Backdrop(!previewMode),scrim,pageArea,connectingOverlay,bar,inviteOverlay,BuildChat(),BuildCallBanner(),approvalOverlay,toastHost}};
         ToolTip.SetTip(endpoint,"本机永久 EndpointId，用于首次连接时核对身份。");
         Opened += async (_,_) =>
         {
@@ -470,6 +470,7 @@ sealed partial class MainWindow : Window
     void Refresh()
     {
         if(engine==null)return;
+        UpdateCalls();
         
         if(directory!=null && directory.Code.Length!=0 && machine.Text!=directory.Code)
         {machine.Text=directory.Code;Say("就绪");engine.Events.Add("INFO","系统","设备已注册，编号 "+directory.Code+"，服务器 "+engine.Settings.Server);}

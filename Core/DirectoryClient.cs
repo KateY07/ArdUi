@@ -510,6 +510,14 @@ sealed class DirectoryClient : IAsyncDisposable
     {
         lock(sync){access.SideWidth=Math.Clamp(width,180,360);Save();}
     }
+    // The host ended the session on purpose: stop recovering it (like Pause), and say why.
+    public async Task PeerHungUp(string id,string text)
+    {
+        Peer? peer;lock(engine.State.Peers)peer=engine.State.Peers.Find(p=>p.Id==id);
+        if(peer==null)return;
+        peer.AutoConnect=false;engine.State.Save();connects.Cancel(peer.Code);await engine.DropOutgoing(peer.Id);await StopReconnect(peer.Id);
+        engine.SetStatus(peer.Id,"已授权 · "+text+"，已暂停自动重连");Changed?.Invoke();
+    }
     public async Task Pause(Peer peer)
     {
         peer.AutoConnect=false;engine.State.Save();connects.Cancel(peer.Code);await engine.DropOutgoing(peer.Id);await StopReconnect(peer.Id);

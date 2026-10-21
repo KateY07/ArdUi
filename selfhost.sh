@@ -8,13 +8,21 @@
 #   --http-only       only run the directory on 127.0.0.1:PORT; you bring your own HTTPS reverse proxy
 #   --port N          local port of the directory (default 8091)
 #   --ref NAME        git branch or tag of KateY07/ArdUi to take arduiserver.py from (default main)
-#   --file PATH       use this arduiserver.py instead of downloading it
+#   --file PATH       use this arduiserver.py instead of downloading it (servers that cannot reach GitHub)
+#   --base-url URL    download arduiserver.py from URL/server/arduiserver.py instead of raw.githubusercontent.com
+#   --pip-index URL   Python package index for gunicorn and cryptography (default: pip's own setting)
+#   --caddy-binary P  use this Caddy binary instead of downloading one from caddyserver.com
+#   --tls-internal    sign the certificate with Caddy's own local CA instead of Let's Encrypt (tests, private networks; clients will not trust it)
+#   --no-probe        do not install the UDP network probe (the part of ArdUi's network diagnosis that needs the server)
+#   --probe-port N    first UDP port of the probe (it uses N and N+1, default 7843); open both in your firewall / cloud security group
+#   --probe-host H    the host name clients use for the probe (default: the --domain)
+#   --name NAME       service name, user and directories (default arduiserver); lets a second instance run beside another one
 #   --dry-run         print what would be done and change nothing
 #   --uninstall       remove the services (data in /var/lib/arduiserver is kept)
 set -euo pipefail
 
-DOMAIN=; PORT=8091; REF=main; SRC_FILE=; HTTP_ONLY=false; DRY=false; UNINSTALL=false
-APP=/opt/arduiserver; DATA=/var/lib/arduiserver; CONF=/etc/ardui; CADDY_DATA=/var/lib/ardui-caddy
+DOMAIN=; PORT=8091; REF=main; SRC_FILE=; BASE_URL=; PIP_INDEX=; CADDY_BIN=; NAME=arduiserver; PROBE=true; PROBE_PORT=7843; PROBE_HOST=; TLS_INTERNAL=false; HTTP_ONLY=false; DRY=false; UNINSTALL=false
+CONF=/etc/ardui; CADDY_DATA=/var/lib/ardui-caddy
 
 say()  { printf '\033[1m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -30,6 +38,14 @@ while [ $# -gt 0 ]; do
     --port) PORT=${2:?}; shift 2;;
     --ref) REF=${2:?}; shift 2;;
     --file) SRC_FILE=${2:?}; shift 2;;
+    --base-url) BASE_URL=${2:?}; shift 2;;
+    --pip-index) PIP_INDEX=${2:?}; shift 2;;
+    --caddy-binary) CADDY_BIN=${2:?}; shift 2;;
+    --name) NAME=${2:?}; shift 2;;
+    --tls-internal) TLS_INTERNAL=true; shift;;
+    --no-probe) PROBE=false; shift;;
+    --probe-port) PROBE_PORT=${2:?}; shift 2;;
+    --probe-host) PROBE_HOST=${2:?}; shift 2;;
     --dry-run) DRY=true; shift;;
     --uninstall) UNINSTALL=true; shift;;
     -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
@@ -37,13 +53,16 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+case "$NAME" in ''|*[!a-z0-9-]*|-*) die "--name may only contain lower-case letters, digits and '-'";; esac
+[ ${#NAME} -le 32 ] || die "--name is too long (32 characters at most)"
+APP=/opt/$NAME; DATA=/var/lib/$NAME
 [ "$(id -u)" -eq 0 ] || $DRY || die "run as root (sudo)"
 [ "$(uname -s)" = Linux ] || die "Linux only"
 command -v systemctl >/dev/null || die "systemd is required"
 
 if $UNINSTALL; then
   say "removing services"
-  for unit in arduiserver ardui-caddy; do
+  for unit in "$NAME" "$NAME-probe" ardui-caddy; do
     run systemctl disable --now "$unit" 2>/dev/null || true
     run rm -f "/etc/systemd/system/$unit.service"
   done
@@ -54,6 +73,8 @@ fi
 
 $HTTP_ONLY || [ -n "$DOMAIN" ] || die "give --domain NAME (or --http-only to run behind your own proxy)"
 case "$PORT" in ''|*[!0-9]*) die "--port must be a number";; esac
+case "$PROBE_PORT" in ''|*[!0-9]*) die "--probe-port must be a number";; esac
+[ -n "$PROBE_HOST" ] || PROBE_HOST=$DOMAIN
 
 # ---- packages ---------------------------------------------------------------------------------------------------
 say "checking packages"
@@ -71,26 +92,35 @@ fi
 
 # ---- the directory service --------------------------------------------------------------------------------------
 say "installing arduiserver"
-id arduiserver >/dev/null 2>&1 || run useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin arduiserver
+id "$NAME" >/dev/null 2>&1 || run useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin "$NAME"
 run install -d -m 755 "$APP"
-run install -d -m 700 -o arduiserver -g arduiserver "$DATA"
+run install -d -m 700 -o "$NAME" -g "$NAME" "$DATA"
 tmp=$(mktemp)
 if [ -n "$SRC_FILE" ]; then run cp "$SRC_FILE" "$tmp"
-else run curl -fsSL "https://raw.githubusercontent.com/KateY07/ArdUi/$REF/server/arduiserver.py" -o "$tmp"; fi
+else run curl -fsSL --connect-timeout 15 "${BASE_URL:-https://raw.githubusercontent.com/KateY07/ArdUi/$REF}/server/arduiserver.py" -o "$tmp" || die "could not download arduiserver.py (is GitHub reachable from here? use --file or --base-url)"; fi
 if ! $DRY; then grep -q 'def application' "$tmp" || die "that does not look like arduiserver.py"; echo "arduiserver.py sha256: $(sha256sum "$tmp" | cut -d' ' -f1)"; fi
 run install -m 644 "$tmp" "$APP/arduiserver.py"; rm -f "$tmp"
+if $PROBE; then
+  ptmp=$(mktemp)
+  if [ -n "$SRC_FILE" ] && [ -f "$(dirname "$SRC_FILE")/probe_udp.py" ]; then run cp "$(dirname "$SRC_FILE")/probe_udp.py" "$ptmp"
+  else run curl -fsSL --connect-timeout 15 "${BASE_URL:-https://raw.githubusercontent.com/KateY07/ArdUi/$REF}/server/probe_udp.py" -o "$ptmp" || die "could not download probe_udp.py (use --no-probe, or put it next to the --file arduiserver.py)"; fi
+  if ! $DRY; then grep -q 'class Service' "$ptmp" || die "that does not look like probe_udp.py"; fi
+  run install -m 644 "$ptmp" "$APP/probe_udp.py"; rm -f "$ptmp"
+fi
 [ -x "$APP/venv/bin/python" ] || run python3 -m venv "$APP/venv"
-run "$APP/venv/bin/pip" install --quiet --upgrade pip gunicorn cryptography
+run "$APP/venv/bin/pip" install --quiet --no-cache-dir ${PIP_INDEX:+--index-url "$PIP_INDEX"} --upgrade pip gunicorn cryptography
 
-write_file /etc/systemd/system/arduiserver.service 644 <<EOF
+write_file "/etc/systemd/system/$NAME.service" 644 <<EOF
 [Unit]
-Description=ArdUi device directory
+Description=ArdUi device directory ($NAME)
 After=network-online.target
 [Service]
-User=arduiserver
-Group=arduiserver
+User=$NAME
+Group=$NAME
 WorkingDirectory=$APP
 Environment=ARDUI_DATABASE=$DATA/devices.sqlite3
+Environment=ARDUI_PROBE_PORT=$PROBE_PORT
+$($PROBE && [ -n "$PROBE_HOST" ] && echo "Environment=ARDUI_PROBE_HOST=$PROBE_HOST")
 ExecStart=$APP/venv/bin/gunicorn --bind 127.0.0.1:$PORT --workers 1 --threads 8 --timeout 30 arduiserver:application
 Restart=on-failure
 UMask=0077
@@ -103,6 +133,32 @@ ReadWritePaths=$DATA
 WantedBy=multi-user.target
 EOF
 
+if $PROBE; then
+  write_file "/etc/systemd/system/$NAME-probe.service" 644 <<EOF
+[Unit]
+Description=ArdUi network probe, UDP $PROBE_PORT-$((PROBE_PORT + 1)) ($NAME)
+After=network-online.target
+[Service]
+User=$NAME
+Group=$NAME
+WorkingDirectory=$APP
+Environment=ARDUI_DATABASE=$DATA/devices.sqlite3
+Environment=ARDUI_PROBE_PORT=$PROBE_PORT
+ExecStart=$APP/venv/bin/python $APP/probe_udp.py
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=$DATA
+MemoryMax=256M
+TasksMax=64
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+
 # ---- HTTPS (Caddy) ----------------------------------------------------------------------------------------------
 if ! $HTTP_ONLY; then
   say "setting up HTTPS for $DOMAIN"
@@ -113,7 +169,8 @@ if ! $HTTP_ONLY; then
   fi
   if ! command -v caddy >/dev/null; then
     case "$(uname -m)" in x86_64|amd64) arch=amd64;; aarch64|arm64) arch=arm64;; armv7l) arch=arm;; *) die "no Caddy build for $(uname -m)";; esac
-    run curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=$arch" -o /usr/local/bin/caddy
+    if [ -n "$CADDY_BIN" ]; then run install -m 755 "$CADDY_BIN" /usr/local/bin/caddy
+    else run curl -fsSL --connect-timeout 15 "https://caddyserver.com/api/download?os=linux&arch=$arch" -o /usr/local/bin/caddy || die "could not download Caddy; install it yourself or pass --caddy-binary PATH"; fi
     run chmod 755 /usr/local/bin/caddy
   fi
   id ardui-caddy >/dev/null 2>&1 || run useradd --system --home-dir "$CADDY_DATA" --shell /usr/sbin/nologin ardui-caddy
@@ -121,6 +178,7 @@ if ! $HTTP_ONLY; then
   run install -d -m 700 -o ardui-caddy -g ardui-caddy "$CADDY_DATA"
   write_file "$CONF/Caddyfile" 644 <<EOF
 $DOMAIN {
+$($TLS_INTERNAL && echo "    tls internal")
     encode zstd gzip
     header X-Content-Type-Options nosniff
     handle /api/* {
@@ -155,29 +213,42 @@ fi
 # ---- start and check --------------------------------------------------------------------------------------------
 say "starting"
 run systemctl daemon-reload
-run systemctl enable arduiserver
-run systemctl restart arduiserver
+run systemctl enable "$NAME"
+run systemctl restart "$NAME"
+$PROBE && { run systemctl enable "$NAME-probe"; run systemctl restart "$NAME-probe"; }
 $HTTP_ONLY || { run systemctl enable ardui-caddy; run systemctl restart ardui-caddy; }
 $DRY && { echo "(dry run: nothing was changed)"; exit 0; }
 
 for _ in $(seq 1 20); do curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && break; sleep 1; done
-health=$(curl -fsS "http://127.0.0.1:$PORT/api/health" 2>/dev/null) || { journalctl -u arduiserver --no-pager -n 20; die "the directory did not start"; }
+health=$(curl -fsS "http://127.0.0.1:$PORT/api/health" 2>/dev/null) || { ! command -v journalctl >/dev/null || journalctl -u "$NAME" --no-pager -n 20; die "the directory did not start"; }
 echo "local health: $health"
+if $PROBE; then
+  sleep 1
+  if ss -lun 2>/dev/null | grep -qE ":$PROBE_PORT\\s"; then echo "probe: listening on UDP $PROBE_PORT and $((PROBE_PORT + 1))"; else warn "the probe is not listening yet: journalctl -u $NAME-probe"; fi
+fi
 url="http://127.0.0.1:$PORT/"
 if ! $HTTP_ONLY; then
   url="https://$DOMAIN/"
   say "waiting for the certificate (needs DNS for $DOMAIN to point here and ports 80/443 open)"
   ok=false
-  for _ in $(seq 1 45); do curl -fsS "https://$DOMAIN/api/health" >/dev/null 2>&1 && { ok=true; break; }; sleep 2; done
-  $ok && echo "public health: $(curl -fsS "https://$DOMAIN/api/health")" || { warn "https://$DOMAIN/api/health is not answering yet; see: journalctl -u ardui-caddy"; }
+  k=; $TLS_INTERNAL && k=-k   # a certificate from Caddy's own CA is not trusted by curl
+  for _ in $(seq 1 45); do curl -fsS $k --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/health" >/dev/null 2>&1 && { ok=true; break; }; sleep 2; done
+  $ok && echo "public health: $(curl -fsS $k --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/health")" || { warn "https://$DOMAIN/api/health is not answering yet; see: journalctl -u ardui-caddy"; }
 fi
 
+client_url=$url; proxy_note=
+if $HTTP_ONLY; then
+  client_url="https://YOUR-DOMAIN/"
+  proxy_note="(--http-only: put your HTTPS reverse proxy in front, /api/* -> 127.0.0.1:$PORT, and use its https:// address below.)"
+fi
 cat <<EOF
 
 Done. The directory is running at $url
+$proxy_note
 
 Point ArdUi at it (on every machine), in  %LOCALAPPDATA%\\ArdUi\\data\\config.json  set:
-    "server": "$url"
-then restart ArdUi. Back up $DATA/ (it holds the device database).
-Logs:  journalctl -u arduiserver -f
+    "server": "$client_url"
+then restart ArdUi.
+$($PROBE && echo "Network diagnosis: open UDP $PROBE_PORT and $((PROBE_PORT + 1)) in the firewall / cloud security group so that ArdUi's probe can reach the server.") Back up $DATA/ (it holds the device database).
+Logs:  journalctl -u $NAME -f
 EOF

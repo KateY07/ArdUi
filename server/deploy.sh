@@ -24,6 +24,31 @@ ReadWritePaths=/var/lib/arduiserver
 [Install]
 WantedBy=multi-user.target
 EOF
+# Network probe for ArdUi's network diagnosis (UDP 7843-7844; open both in the cloud security group)
+install -m 644 /tmp/probe_udp.py /opt/arduiserver/probe_udp.py
+cat > /etc/systemd/system/ardui-probe.service <<'EOF'
+[Unit]
+Description=ArdUi network probe, UDP 7843-7844
+After=network-online.target
+[Service]
+User=arduiserver
+Group=arduiserver
+WorkingDirectory=/opt/arduiserver
+Environment=ARDUI_DATABASE=/var/lib/arduiserver/devices.sqlite3
+Environment=ARDUI_PROBE_PORT=7843
+ExecStart=/usr/bin/python3 /opt/arduiserver/probe_udp.py
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/arduiserver
+MemoryMax=256M
+TasksMax=64
+[Install]
+WantedBy=multi-user.target
+EOF
 cp -n /etc/caddy/Caddyfile /etc/caddy/Caddyfile.pre-ardui || true
 cat > /etc/caddy/Caddyfile <<'EOF'
 f.visnova.cn {
@@ -44,4 +69,6 @@ EOF
 systemctl daemon-reload
 systemctl enable --now arduiserver
 systemctl restart arduiserver
+systemctl enable --now ardui-probe
+systemctl restart ardui-probe
 systemctl reload caddy

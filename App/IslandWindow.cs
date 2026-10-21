@@ -43,6 +43,9 @@ sealed class IslandWindow : Window
         view.PillDown += () => { GetCursorPos(out dragFrom); dragOrigin = Position; dragged = false; };
         view.PillMove += Drag; view.PillUp += () => { if (!dragged) OnPillClicked(); else Remember(); };
         view.CancelClicked += t => t.Cancel();
+        view.CallAccept += async () => { if (CallOf(model.CallPeer) is { } c) try { await c.Accept(); } catch (Exception ex) when (ex is IOException or InvalidOperationException) { Diagnostics.Log("call", ex.Message); } };
+        view.CallHang += async () => { if (CallOf(model.CallPeer) is { } c) try { if (c.State == CallState.Ringing) await c.Decline(); else await c.Hangup(); } catch (Exception ex) when (ex is IOException or InvalidOperationException) { Diagnostics.Log("call", ex.Message); } };
+        view.CallMute += () => { if (CallOf(model.CallPeer) is { } c) c.Muted = !c.Muted; };
         model.Changed += () => { if (model.Visible) EnsureShown(); else HideSoon(); };
         tick.Tick += (_, _) => Tick(); hit.Tick += (_, _) => HitTest();
     }
@@ -131,9 +134,14 @@ sealed class IslandWindow : Window
         });
     }
 
+    CallChannel? CallOf(string? peer) => peer == null ? null : engine.CallFor(peer);
+
     void Tick()
     {
         if (closing) return;
+        var call = engine.Calls.FirstOrDefault(c => c.Value.State != CallState.Idle);
+        if (call.Value is { } running) { Watch(call.Key); model.SetCall(running.State, call.Key, labelOf(call.Key), running.Elapsed, running.Muted, running.Note); }
+        else model.SetCall(CallState.Idle, null, null, default, false);
         live = engine.Outgoing.Values.Concat(engine.Incoming.Values).Where(s => s.Live).Select(s => s.PeerId).Distinct().ToArray();
         var unread = 0; var active = new List<ChatTransfer>();
         foreach (var peer in live)
@@ -166,6 +174,7 @@ sealed class IslandWindow : Window
 
     void OnPillClicked()
     {
+        if (model.Call != CallState.Idle) { if (model.CallPeer != null) openChat(model.CallPeer); return; }
         var peer = model.UnreadPeer is { } p && live.Contains(p) ? p : model.Transfer is { } t && owners.TryGetValue(t, out var owner) ? owner : live.FirstOrDefault();
         if (peer == null) return;
         model.DismissBubble(); openChat(peer);

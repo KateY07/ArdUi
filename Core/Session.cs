@@ -69,6 +69,46 @@ sealed class Session : IAsyncDisposable
         Overlay.Control=(method,data,ct)=>method.StartsWith("frd-",StringComparison.Ordinal)?HandleFrd(method,data,ct):
             other!=null?other(method,data,ct):throw new IOException("未知控制请求。");
     }
+    // Voice calls: the control methods call-offer / call-answer / call-end, and the media ports (the host listens, the controller sends).
+    public void ConfigureCall(CallChannel call)
+    {
+        var other=Overlay!.Control;var link=new SessionCallLink(this);
+        Overlay.Control=(method,data,ct)=>method.StartsWith("call-",StringComparison.Ordinal)?call.Handle(link,method,data,ct):
+            other!=null?other(method,data,ct):throw new IOException("未知控制请求。");
+    }
+    internal CallMedia OpenVoiceHost()
+    {
+        if(!Host||gateway==null)throw new IOException("只有被控端可以接收通话的声音。");
+        var transport=new HostVoiceTransport();var port=transport.Port;
+        gateway.PermitVoiceUdp(port,true);
+        return new CallMedia(transport,port,()=>gateway.PermitVoiceUdp(port,false));
+    }
+    internal CallMedia OpenVoiceController(int port)
+    {
+        if(Host||Overlay==null)throw new IOException("请先建立已授权连接。");
+        return new CallMedia(new ControllerVoiceTransport(LocalPort,Capability,port),0,()=>{});
+    }
+    // The other side ends the session on purpose ("bye"): this side must not try to recover it.
+    public event Action<string>? PeerEnded;
+    public void ConfigureBye()
+    {
+        var other=Overlay!.Control;
+        Overlay.Control=(method,data,ct)=>method=="bye"?HandleBye(data):
+            other!=null?other(method,data,ct):throw new IOException("未知控制请求。");
+    }
+    Task<object> HandleBye(JsonElement data)
+    {
+        var reason=data.ValueKind==JsonValueKind.Object&&data.TryGetProperty("reason",out var value)?value.GetString()??"":"";
+        PeerEnded?.Invoke(reason);
+        return Task.FromResult<object>(new{ok=true});
+    }
+    // Tells the other side that this end is closing the session on purpose, so that it does not keep trying to bring it back.
+    public async Task SayBye(string reason)
+    {
+        var overlay=Overlay; if(overlay==null||!Live)return;
+        try{using var timeout=new CancellationTokenSource(TimeSpan.FromMilliseconds(1500));await overlay.Request("bye",new{reason},timeout.Token);}
+        catch(Exception ex){Diagnostics.Log("bye",ex.Message);}   // an older peer, or the link is already gone: nothing more to do
+    }
     async Task<object> HandleFrd(string method,JsonElement data,CancellationToken ct)
     {
         if(!Host||gateway==null)throw new IOException("FRD 只能由已授权主控请求被控端启动。");

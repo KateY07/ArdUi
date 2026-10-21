@@ -495,9 +495,11 @@ sealed partial class MainWindow
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Say(ex.Message); }
         }
         islandBox.IsCheckedChanged += (_, _) => SaveIsland(); islandFull.IsCheckedChanged += (_, _) => SaveIsland(); islandFull.IsEnabled = islandBox.IsChecked == true;
-        var generalTab = new StackPanel { Spacing = 8, Children = { Section("启动", Card(startupBox)), Section("界面", Card(new StackPanel { Spacing = 6, Children = { motionBox, islandBox, islandFull } })) } };
+        var voiceBox = new ToggleSwitch { OnContent = "允许语音通话（对方呼叫时响铃；建议戴耳机，避免回声）", OffContent = "允许语音通话（已关闭：自动拒绝来电）", IsChecked = !Motion.NoVoice };
+        voiceBox.IsCheckedChanged += (_, _) => { try { Motion.SetVoice(voiceBox.IsChecked == true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Say(ex.Message); } };
+        var generalTab = new StackPanel { Spacing = 8, Children = { Section("启动", Card(startupBox)), Section("界面", Card(new StackPanel { Spacing = 6, Children = { motionBox, islandBox, islandFull } })), Section("语音", Card(voiceBox)) } };
         var tabs = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-        var pages = new (string Name, Control Body)[] { ("通用", generalTab), ("设备管理", devicesTab), ("被控与授权", accessTab), ("日志与关于", aboutTab) };
+        var pages = new (string Name, Control Body)[] { ("通用", generalTab), ("设备管理", devicesTab), ("被控与授权", accessTab), ("网络诊断", BuildNetDiagTab()), ("麦克风诊断", BuildMicDiagTab()), ("日志与关于", aboutTab) };
         var tabButtons = new List<Button>();
         void Select(int index)
         {

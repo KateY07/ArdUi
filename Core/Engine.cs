@@ -25,7 +25,7 @@ sealed class Engine : IAsyncDisposable
         {
             Events.Add("ERROR","审计","审计录屏失败，已结束该会话："+reason);
             Notice?.Invoke("审计录屏失败，已断开对方：" + reason);
-            _=DropIncoming(endpoint);
+            _=DropIncoming(endpoint,"audit");
         };
         Audit.Changed+=()=>Changed?.Invoke();
     }
@@ -97,7 +97,7 @@ sealed class Engine : IAsyncDisposable
                 _ = DropIncoming(peer.Id);
             }
         }
-        Audit.Open(peer.Id, code, gateway.Once, gateway.Perms, ChatFor(peer.Id));
+        Audit.Open(peer.Id, code, gateway.Once, gateway.Perms, ChatFor(peer.Id), CallFor(peer.Id));
         gateway.ScreenActivity += Screen;
         if (!session.Live) { await Audit.End(peer.Id); return; }
         _ = session.Completion.ContinueWith(_ => Audit.End(peer.Id), TaskScheduler.Default);
@@ -115,6 +115,20 @@ sealed class Engine : IAsyncDisposable
         chat.Changed+=()=>Changed?.Invoke();
         return chat;
     });
+    readonly ConcurrentDictionary<string,CallChannel> calls=new();
+    public IEnumerable<KeyValuePair<string,CallChannel>> Calls=>calls;
+    // The voice call with one device: on the session that is live (the controlling one first), with the sound card of this machine.
+    public CallChannel CallFor(string peerId)=>calls.GetOrAdd(peerId,id=>
+    {
+        var call=new CallChannel(()=>
+        {
+            if(Outgoing.TryGetValue(id,out var outgoing)&&outgoing.Live&&outgoing.Overlay!=null)return new SessionCallLink(outgoing);
+            if(Incoming.TryGetValue(id,out var incoming)&&incoming.Live&&incoming.Overlay!=null)return new SessionCallLink(incoming);
+            return null;
+        },()=>new MicrophoneInput(),()=>new SpeakerOutput(),()=>!Motion.NoVoice);
+        call.Changed+=()=>Changed?.Invoke();
+        return call;
+    });
     void ConfigureOverlay(Session session)
     {
         if(session.Overlay==null||DirectoryApi==null||session.Transit!=null)return;
@@ -122,6 +136,10 @@ sealed class Engine : IAsyncDisposable
         session.Notice+=message=>{Update(session.PeerId,message);Notice?.Invoke(message);};
         session.ConfigureFrd(Settings.FrdPath);
         session.ConfigureChat(ChatFor(session.PeerId));
+        session.ConfigureBye();
+        var call=CallFor(session.PeerId);session.ConfigureCall(call);
+        _=session.Completion.ContinueWith(_=>call.Close(session),TaskScheduler.Default);
+        session.PeerEnded+=reason=>OnPeerEnded(session,reason);
         var conversation = ChatFor(session.PeerId); _ = session.Completion.ContinueWith(_ => conversation.Close(), TaskScheduler.Default);
         session.Overlay.Changed+=()=>Update(session.PeerId,Describe(session,session.Host));
     }
@@ -152,8 +170,33 @@ sealed class Engine : IAsyncDisposable
         bool temporary;lock(State.Peers)temporary=State.Peers.Find(p=>p.Id==id)?.Temporary==true;
         if(temporary)State.Remove(id);
     }
+    // The other side hung up on purpose: this side ends the session and, as the controller, stops trying to recover it.
+    void OnPeerEnded(Session session,string reason)
+    {
+        var id=session.PeerId;
+        var text=reason switch
+        {
+            "revoked"=>"被控端已撤销授权","stopped"=>"被控端已关闭被控访问","audit"=>"被控端因审计录屏失败断开了连接",
+            _=>session.Host?"控制端已断开连接":"被控端已断开连接",
+        };
+        _=Task.Run(async()=>
+        {
+            try
+            {
+                if(session.Host){operations.Cancel("in:"+id);if(Incoming.TryRemove(new KeyValuePair<string,Session>(id,session)))await session.DisposeAsync();Update(id,text);}
+                else if(DirectoryApi!=null)await DirectoryApi.PeerHungUp(id,text);
+                Notice?.Invoke(text+"。");
+            }
+            catch(Exception ex){Diagnostics.Log("peer-ended",ex.Message);}
+        });
+    }
     public async Task Disconnect(string id)
     {
+        // Say goodbye first, so the other side knows it was on purpose and does not start recovering.
+        var goodbyes=new List<Task>();
+        if(Incoming.TryGetValue(id,out var hosted))goodbyes.Add(hosted.SayBye("host"));
+        if(Outgoing.TryGetValue(id,out var controlling))goodbyes.Add(controlling.SayBye("controller"));
+        await Task.WhenAll(goodbyes);
         operations.Cancel("out:"+id);operations.Cancel("in:"+id);
         if(Outgoing.TryRemove(id,out var outgoing))await outgoing.DisposeAsync();
         if(Incoming.TryRemove(id,out var incoming))await incoming.DisposeAsync();
@@ -172,12 +215,14 @@ sealed class Engine : IAsyncDisposable
     }
     public async Task StopIncoming()
     {
+        await Task.WhenAll(Incoming.ToArray().Select(pair=>pair.Value.SayBye("stopped")));
         operations.CancelWhere(key=>key.StartsWith("in:",StringComparison.Ordinal));
         await Task.WhenAll(Incoming.ToArray().Select(async pair=>
         {if(Incoming.TryRemove(pair)){await pair.Value.DisposeAsync();Update(pair.Key,"被控访问已关闭");}}));
     }
-    public async Task DropIncoming(string id)
+    public async Task DropIncoming(string id,string reason="revoked")
     {
+        if(Incoming.TryGetValue(id,out var live))await live.SayBye(reason);
         operations.Cancel("in:"+id);
         if(Incoming.TryRemove(id,out var session))await session.DisposeAsync();
         Update(id,"被控访问已撤销");

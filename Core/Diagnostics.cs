@@ -3,6 +3,7 @@ namespace ArdUi;
 static class Diagnostics
 {
     static readonly ConcurrentQueue<object> events = new();
+    public static NetDiagReport? LastNetwork { get; set; }   // the latest run of the network diagnosis page: kinds and verdicts only, no addresses
     public static string Redact(string value)
     {
         value=Regex.Replace(value,@"\b(?:\d{1,3}\.){3}\d{1,3}\b","[IPv4]");
@@ -26,6 +27,7 @@ static class Diagnostics
             endpoint=engine?.Id,os=Environment.OSVersion.VersionString,memoryBytes=process.WorkingSet64,cpuSeconds=process.TotalProcessorTime.TotalSeconds,
             sessions=engine?.Outgoing.Values.Concat(engine.Incoming.Values).Select(s=>new{peer=s.PeerId,host=s.Host,network=s.Network,s.TcpRtt,s.UdpRtt,s.BandwidthMbps,s.BandwidthLowerBoundMbps,overlay=s.Overlay?.Snapshot()}).ToArray()});
         Entry("events.json",events.ToArray());
+        if(LastNetwork is{} net)Entry("network.json",new{at=net.At,nat=net.Nat,upnpMapping=net.UpnpMappingAvailable,sections=net.Sections.Select(x=>new{x.Title,level=x.Level.ToString(),summary=Redact(x.Summary)})});
         Entry("privacy.json",new{ipAddresses="redacted",excluded=new[]{"private keys","passwords","session keys","capabilities","tickets","payloads","handshakes"}});
         return path;
     }
