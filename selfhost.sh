@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ArdUi self-hosting: the device directory (arduiserver) behind Caddy with automatic HTTPS.
 #
-#   curl -fsSL https://katey07.github.io/ArdUi/selfhost.sh | sudo bash -s -- --domain ardui.example.com
+#   curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | sudo bash -s -- --domain ardui.example.com
 #
 # Options:
 #   --domain NAME     public DNS name that already points at this machine (ports 80 and 443 must be reachable)

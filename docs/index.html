@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ArdUi · Windows 远程访问</title>
-<meta name="description" content="ArdUi：点对点加密的 Windows 远程访问。设备编号连接、逐设备授权、对话与文件传输、被控端审计录屏，可自托管。">
+<title>ArdUi · High-performance remote access for Windows</title>
+<meta name="description" content="ArdUi: high-performance, peer-to-peer, end-to-end encrypted remote access for Windows. Connect by device ID, per-device permissions, chat and file transfer, host-side audit recording. Self-hostable.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='23' fill='%23C6613F'/%3E%3Cpath d='M30 24V74L43 62L52 82L61 78L52 58H70Z' fill='white' stroke='white' stroke-width='3' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
 :root{
@@ -111,137 +111,169 @@ footer .wrap{display:flex;flex-wrap:wrap;gap:18px;align-items:center}footer .sp{
 .reveal{opacity:0;transform:translateY(12px);transition:opacity .5s ease,transform .5s cubic-bezier(.2,.8,.2,1)}
 .reveal.in{opacity:1;transform:none}
 @media(prefers-reduced-motion:reduce){.reveal{opacity:1;transform:none;transition:none}html{scroll-behavior:auto}.btn{transition:none}}
+
+/* language: English by default; the toggle switches every [data-l] */
+html[lang=en] [data-l=zh],html[lang=zh-CN] [data-l=en]{display:none}
+.lang{border:1px solid var(--line);background:var(--bg);color:var(--muted);border-radius:8px;padding:5px 11px;font:inherit;font-size:13.5px;cursor:pointer}
+.lang:hover{color:var(--ink);background:var(--bg2)}
+.grid.four{grid-template-columns:repeat(4,1fr)}
+@media(max-width:1000px){.grid.four{grid-template-columns:repeat(2,1fr)}}@media(max-width:560px){.grid.four{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
-
-
 <nav><div class="wrap">
   <a class="brand" href="#top"><svg width="28" height="28" viewBox="0 0 100 100" aria-hidden="true"><rect width="100" height="100" rx="23" fill="#C6613F"/><path d="M30 24V74L43 62L52 82L61 78L52 58H70Z" fill="#fff" stroke="#fff" stroke-width="3" stroke-linejoin="round"/><path d="M36.5 11.6A27 27 0 0 1 60 14M42 20A20 20 0 0 1 58 21" transform="translate(0 6)" fill="none" stroke="#fff" stroke-width="5.5" stroke-linecap="round"/></svg>ArdUi</a>
-  <div class="links"><a href="#intro">简介</a><a href="#quick">快速入门</a><a href="#selfhost">自托管</a><a href="promo.html">演示短片</a><a class="btn primary" href="https://github.com/KateY07/ArdUi/releases" id="navDl">下载</a></div>
+  <div class="links">
+    <a href="#why"><span data-l="en">Why ArdUi</span><span data-l="zh">特点</span></a>
+    <a href="#quick"><span data-l="en">Quick start</span><span data-l="zh">快速入门</span></a>
+    <a href="#selfhost"><span data-l="en">Self-host</span><span data-l="zh">自托管</span></a>
+    <a href="promo.html"><span data-l="en">Demo</span><span data-l="zh">演示短片</span></a>
+    <button class="lang" id="langBtn" type="button" aria-label="Switch language"><span data-l="en">中文</span><span data-l="zh">EN</span></button>
+    <a class="btn primary" href="https://github.com/KateY07/ArdUi/releases"><span data-l="en">Download</span><span data-l="zh">下载</span></a>
+  </div>
 </div></nav>
 
 <main class="wrap" id="top">
   <header class="hero">
     <div>
-      <span class="eyebrow"><i></i><span id="ver">开源 · Windows 10/11</span></span>
-      <h1>点对点加密的<br>Windows 远程访问</h1>
-      <p class="lead">在两台电脑之间建立端到端加密的连接，用设备编号找到对方，不用配置 IP、端口或虚拟网卡。被控端逐设备授权，远程桌面、文件传输、对话和审计都在一个应用里。</p>
-      <div class="cta"><a class="btn primary" href="https://github.com/KateY07/ArdUi/releases">下载 ArdUi</a><a class="btn ghost" href="#quick">3 分钟上手</a><a class="btn ghost" href="#selfhost">自己部署服务器</a></div>
-      <p class="meta">Windows 10/11 x64 · 需要 .NET 8 与 .NET 10 运行时 · 开源（<a href="https://github.com/KateY07/ArdUi">GitHub</a>）</p>
+      <span class="eyebrow"><i></i><span id="ver"><span data-l="en">Open source · Windows 10/11</span><span data-l="zh">开源 · Windows 10/11</span></span></span>
+      <h1><span data-l="en">High-performance remote access for Windows</span><span data-l="zh">高性能的 Windows 远程访问</span></h1>
+      <p class="lead"><span data-l="en">Peer-to-peer and end-to-end encrypted. Devices find each other by a short ID, so there are no IP addresses, ports or virtual adapters to set up. Run your own directory server with one command.</span><span data-l="zh">点对点、端到端加密。用设备编号找到对方，不用配置 IP、端口或虚拟网卡。一条命令即可自托管目录服务器。</span></p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/KateY07/ArdUi/releases"><span data-l="en">Download ArdUi</span><span data-l="zh">下载 ArdUi</span></a>
+        <a class="btn" href="#quick"><span data-l="en">Quick start</span><span data-l="zh">快速入门</span></a>
+        <a class="btn" href="https://github.com/KateY07/ArdUi"><span data-l="en">View on GitHub</span><span data-l="zh">GitHub 源码</span></a>
+      </div>
+      <p class="meta"><span data-l="en">Windows 10/11 x64 · needs the .NET 8 and .NET 10 runtimes</span><span data-l="zh">Windows 10/11 x64 · 需要 .NET 8 与 .NET 10 运行时</span></p>
     </div>
-    <div class="demo" aria-label="界面演示">
+    <div class="demo" aria-label="Demo">
       <div class="bar"><b></b><b></b><b></b><span style="margin-left:6px">ArdUi</span></div>
       <div class="body">
-        <div class="row"><span class="dot"></span><div><div class="code">K4DD0B</div><div class="sub">FRD · 已连接 · 直连 IPv6</div></div><span class="sp chip">仅此一次</span></div>
-        <div class="row"><span class="dot" style="background:#bf8700;animation:none"></span><div><div class="code">A7B2K9</div><div class="sub">桌面 · 文件 · 在线</div></div></div>
+        <div class="row"><span class="dot"></span><div><div class="code">K4DD0B</div><div class="sub"><span data-l="en">FRD · connected · direct IPv6</span><span data-l="zh">FRD · 已连接 · 直连 IPv6</span></div></div><span class="sp chip"><span data-l="en">once only</span><span data-l="zh">仅此一次</span></span></div>
+        <div class="row"><span class="dot" style="background:#bf8700;animation:none"></span><div><div class="code">A7B2K9</div><div class="sub"><span data-l="en">Desktop · files · online</span><span data-l="zh">桌面 · 文件 · 在线</span></div></div></div>
       </div>
       <div class="stage"><div class="island">
-        <div class="bubble"><b>K4DD0B</b>你好，帮我看看这个报错？</div>
+        <div class="bubble"><b>K4DD0B</b><span data-l="en">Can you check this error?</span><span data-l="zh">你好，帮我看看这个报错？</span></div>
         <div class="pill"><span class="mk"><svg width="14" height="14" viewBox="0 0 100 100"><path d="M30 24V74L43 62L52 82L61 78L52 58H70Z" fill="#fff"/></svg></span><span class="g"></span>
-          <span class="file"><span class="ring"></span><span>setup.exe<small>3.2 MB/s · 剩余 12 秒</small></span></span>
+          <span class="file"><span class="ring"></span><span>setup.exe<small>3.2 MB/s</small></span></span>
           <span class="badge">3</span></div>
       </div></div>
     </div>
   </header>
 
-  <section id="intro" class="reveal">
-    <h2>简介</h2>
-    <p class="sub">ArdUi 是基于 ARD（Iroh）的 Windows 远程访问应用。设备用永久密钥证明身份，连接经过端到端加密，中央服务器只分配编号、协调连接，看不到你的密码和内容。</p>
-    <div class="grid">
-      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div><h3>端到端加密</h3><p>设备身份是永久公钥，连接直接在两台设备间加密，服务器只做协调，不转手你的数据。</p></div>
-      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h16"/></svg></div><h3>设备编号，免配置</h3><p>输入对方的编号和一次性密码，核对身份即可连接。不用 IP、端口、虚拟网卡，也不需要管理员权限。</p></div>
-      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg></div><h3>被控端说了算</h3><p>逐设备授权远程桌面（FRD）、RDP、文件，默认只开 FRD。支持“仅接受这一次”，随时断开。</p></div>
-      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h3>对话与文件传输</h3><p>文字、图片、文件（最大 2 GB）直接发给对方，显示速度与进度，可取消，传输时仍能聊天。</p></div>
-      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/></svg></div><h3>被控端审计录屏</h3><p>对方使用屏幕时，在被控端本地录制（10 帧/秒），最多占用 10 GB，循环覆盖；使用 Windows 自带的 H.264 编码器。</p></div>
-      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="15" width="16" height="5" rx="2.5"/><path d="M12 4v7M9 8l3 3 3-3"/></svg></div><h3>灵动岛小组件</h3><p>屏幕右下角的小胶囊：显示连接状态、新消息气泡、未读数和文件传输进度，点一下直接打开对话。</p></div>
+  <section id="why" class="reveal">
+    <h2><span data-l="en">Why ArdUi</span><span data-l="zh">为什么选择 ArdUi</span></h2>
+    <p class="sub"><span data-l="en">Built on ARD (Iroh). Every device has a permanent key; its public key is its identity.</span><span data-l="zh">基于 ARD（Iroh）。每台设备有一对永久密钥，公钥就是它的身份。</span></p>
+    <div class="grid four">
+      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg></div>
+        <h3><span data-l="en">High performance</span><span data-l="zh">高性能</span></h3>
+        <p><span data-l="en">Direct UDP paths between devices, with automatic fallback to a relay when a direct path is not possible. Low-latency desktop streaming through FRD.</span><span data-l="zh">设备之间优先走 UDP 直连，直连不通时自动回退到中继。通过 FRD 提供低延迟的桌面画面。</span></p></div>
+      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="12" r="2.5"/><path d="M8 12h8"/></svg></div>
+        <h3><span data-l="en">Peer-to-peer</span><span data-l="zh">点对点</span></h3>
+        <p><span data-l="en">Your data goes straight from one device to the other. The directory server only hands out device IDs and coordinates the connection; it is never in the data path.</span><span data-l="zh">数据直接在两台设备之间传输。目录服务器只分配设备编号、协调连接，不在数据路径上。</span></p></div>
+      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div>
+        <h3><span data-l="en">End-to-end encrypted</span><span data-l="zh">端到端加密</span></h3>
+        <p><span data-l="en">Identities are verified before any password is sent, and the server never receives passwords. The host approves each controlling device, and can revoke it at any time.</span><span data-l="zh">先核对身份，再发送密码，服务器永远收不到密码。被控端逐设备批准，随时可以撤销。</span></p></div>
+      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/></svg></div>
+        <h3><span data-l="en">Self-hostable</span><span data-l="zh">可自托管</span></h3>
+        <p><span data-l="en">Run your own directory server on a Linux machine with a single command, HTTPS included. Everything is open source.</span><span data-l="zh">在 Linux 服务器上用一条命令部署自己的目录服务器，自带 HTTPS。全部开源。</span></p></div>
     </div>
 
-    <div class="flow reveal" aria-label="工作方式">
-      <div class="node"><b>主控设备</b>输入编号与密码</div><div class="arrow">⇄</div>
-      <div class="node"><b>目录服务器</b>分配编号 · 协调连接<br><small style="color:var(--muted)">不接收密码</small></div><div class="arrow">⇄</div>
-      <div class="node"><b>被控设备</b>核对身份 · 同意授权</div>
+    <h2 style="margin-top:56px"><span data-l="en">What is in the box</span><span data-l="zh">功能</span></h2>
+    <div class="grid">
+      <div class="card"><h3><span data-l="en">Device ID connect</span><span data-l="zh">编号连接</span></h3><p><span data-l="en">Enter the device ID and a one-time password, compare the device fingerprint, and the host approves. Later connections need no password.</span><span data-l="zh">输入设备编号和一次性密码，核对设备指纹，由被控端同意。之后重连无需密码。</span></p></div>
+      <div class="card"><h3><span data-l="en">Per-device permissions</span><span data-l="zh">逐设备授权</span></h3><p><span data-l="en">Allow FRD, RDP and file access separately for each device (FRD only by default), or accept a connection just once.</span><span data-l="zh">为每台设备分别开放 FRD、RDP、文件（默认只开 FRD），也可以“仅接受这一次”。</span></p></div>
+      <div class="card"><h3><span data-l="en">Chat and file transfer</span><span data-l="zh">对话与文件传输</span></h3><p><span data-l="en">Text, images and files up to 2 GB, with speed and progress, cancellable, and chat keeps working during a transfer.</span><span data-l="zh">文字、图片、文件（最大 2 GB），显示速度与进度，可取消，传输时仍可聊天。</span></p></div>
+      <div class="card"><h3><span data-l="en">Audit recording</span><span data-l="zh">审计录屏</span></h3><p><span data-l="en">While a device uses the screen, it is recorded locally on the host (10 fps, up to 10 GB, oldest overwritten) with the Windows H.264 encoder.</span><span data-l="zh">对方使用屏幕时，在被控端本地录制（10 帧/秒，最多 10 GB，循环覆盖），使用 Windows 自带的 H.264 编码器。</span></p></div>
+      <div class="card"><h3><span data-l="en">Floating island</span><span data-l="zh">灵动岛</span></h3><p><span data-l="en">A small draggable pill near the tray: connection state, message bubbles, unread count and file progress. Click to open the chat.</span><span data-l="zh">托盘上方可拖动的小胶囊：连接状态、消息气泡、未读数和文件进度，点击打开对话。</span></p></div>
+      <div class="card"><h3><span data-l="en">No admin rights</span><span data-l="zh">无需管理员权限</span></h3><p><span data-l="en">No drivers and no network changes. Your device identity and settings are kept across upgrades.</span><span data-l="zh">不装驱动，不改网络设置；升级时保留设备身份和配置。</span></p></div>
     </div>
-    <p class="note"><b>数据怎么走：</b>协调完成后，两台设备经 ARD 直接建立端到端加密连接（直连优先，不通时自动走中继）。服务器不在数据路径上，也保存不了你的密码。</p>
+
+    <div class="flow" aria-label="How it works">
+      <div class="node"><b><span data-l="en">Controller</span><span data-l="zh">主控设备</span></b><span data-l="en">enters ID and password</span><span data-l="zh">输入编号与密码</span></div><div class="arrow">⇄</div>
+      <div class="node"><b><span data-l="en">Directory server</span><span data-l="zh">目录服务器</span></b><span data-l="en">IDs and coordination only</span><span data-l="zh">仅分配编号、协调连接</span></div><div class="arrow">⇄</div>
+      <div class="node"><b><span data-l="en">Host</span><span data-l="zh">被控设备</span></b><span data-l="en">verifies and approves</span><span data-l="zh">核对身份并同意</span></div>
+    </div>
+    <p class="note"><b><span data-l="en">How data flows:</span><span data-l="zh">数据怎么走：</span></b> <span data-l="en">after coordination, the two devices open an end-to-end encrypted connection through ARD (direct first, relay only if needed). The server is not on the data path and cannot read it.</span><span data-l="zh">协调完成后，两台设备经 ARD 建立端到端加密连接（直连优先，不通时才走中继）。服务器不在数据路径上，也读不了数据。</span></p>
   </section>
 
   <section id="quick" class="reveal">
-    <h2>快速入门</h2>
-    <p class="sub">两台电脑都装同一个应用。被控功能默认关闭，只想控制别人的话不用开。</p>
+    <h2><span data-l="en">Quick start</span><span data-l="zh">快速入门</span></h2>
+    <p class="sub"><span data-l="en">Install the same app on both computers. Being controlled is off by default, so if you only want to control other machines you can leave it off.</span><span data-l="zh">两台电脑装同一个应用。被控功能默认关闭，只想控制别人的话不用开。</span></p>
     <div class="steps">
-      <div class="step"><div><h3>下载并安装</h3><p>到 <a href="https://github.com/KateY07/ArdUi/releases">Releases</a> 下载最新的 <code class="i">ArdUi-vX.exe</code> 并双击运行，会出现安装窗口。安装目录在 <code class="i">%LOCALAPPDATA%\ArdUi</code>，设备身份和配置会在升级时保留。需要先装 .NET 8 与 .NET 10 桌面运行时。</p></div></div>
-      <div class="step"><div><h3>被控端：开启“允许被控”</h3><p>在要被访问的电脑上打开 ArdUi，打开“允许被控”，会得到 6 位编号，点击后显示 10 秒的首次密码。把编号和密码告诉对方。</p></div></div>
-      <div class="step"><div><h3>主控端：输入编号和密码</h3><p>在另一台电脑上输入编号与密码，点“连接”。双方通过电话等独立渠道核对完整的设备指纹，被控端点“接受”（或“仅接受这一次”，并可勾选开放哪些功能）。</p></div></div>
-      <div class="step"><div><h3>开始使用</h3><p>已授权的设备出现在列表里：点 <b>FRD</b> 看桌面，<b>桌面</b> 用 RDP，<b>文件</b> 访问共享，点对话图标发消息和文件。之后再连不用重新输入密码。</p></div></div>
+      <div class="step"><div><h3><span data-l="en">Download and install</span><span data-l="zh">下载并安装</span></h3><p><span data-l="en">Get the latest <code class="i">ArdUi-vX.exe</code> from <a href="https://github.com/KateY07/ArdUi/releases">GitHub Releases</a> and run it. It installs to <code class="i">%LOCALAPPDATA%\ArdUi</code> and keeps your identity and settings on upgrades. The .NET 8 and .NET 10 desktop runtimes are required.</span><span data-l="zh">到 <a href="https://github.com/KateY07/ArdUi/releases">GitHub Releases</a> 下载最新的 <code class="i">ArdUi-vX.exe</code> 并运行。安装在 <code class="i">%LOCALAPPDATA%\ArdUi</code>，升级时保留设备身份和配置。需要先装 .NET 8 与 .NET 10 桌面运行时。</span></p></div></div>
+      <div class="step"><div><h3><span data-l="en">On the host: allow control</span><span data-l="zh">被控端：允许被控</span></h3><p><span data-l="en">On the computer you want to reach, switch on “Allow control”. You get a device ID, and a first-connection password that shows for 10 seconds when you click it. Give both to the person connecting.</span><span data-l="zh">在要被访问的电脑上打开“允许被控”，得到设备编号；点击后显示 10 秒的首次密码。把两者告诉对方。</span></p></div></div>
+      <div class="step"><div><h3><span data-l="en">On the controller: connect</span><span data-l="zh">主控端：连接</span></h3><p><span data-l="en">Enter the ID and password and press Connect. Compare the full device fingerprint over a separate channel, such as a phone call. The host accepts (or accepts just once) and chooses which features to allow.</span><span data-l="zh">输入编号与密码，点“连接”。用电话等独立渠道核对完整设备指纹，被控端点“接受”（或“仅接受这一次”）并选择开放的功能。</span></p></div></div>
+      <div class="step"><div><h3><span data-l="en">Use it</span><span data-l="zh">开始使用</span></h3><p><span data-l="en">Authorized devices appear in the list: FRD for the desktop, Desktop for RDP, Files for shares, and the chat icon for messages and files.</span><span data-l="zh">已授权的设备出现在列表里：FRD 看桌面，“桌面”用 RDP，“文件”访问共享，对话图标发消息和文件。</span></p></div></div>
     </div>
-    <p class="note" style="margin-top:16px"><b>提示：</b>被控端在“被控与授权”里可以随时撤销某台设备或断开正在使用的连接；有人使用屏幕时，被控端首页会在该设备旁显示“● 录屏中”。</p>
   </section>
 
   <section id="selfhost" class="reveal">
-    <h2>自托管</h2>
-    <p class="sub">默认使用公共的设备目录服务。想完全掌握在自己手里，可以在一台有域名的 Linux 服务器上部署自己的目录服务，一条命令完成。</p>
+    <h2><span data-l="en">Self-hosting</span><span data-l="zh">自托管</span></h2>
+    <p class="sub"><span data-l="en">By default ArdUi uses a public directory service. To keep everything in your hands, deploy your own directory server on a Linux machine with a domain name.</span><span data-l="zh">默认使用公共的设备目录服务。想自己掌握，可以在有域名的 Linux 服务器上部署自己的目录服务器。</span></p>
     <div class="two">
       <div>
-        <h3 style="margin:0 0 4px">一键部署目录服务</h3>
-        <p class="sub" style="margin-bottom:6px">需要：Linux（systemd）、root 权限、已指向本机的域名、开放 80/443 端口。脚本会安装 Python 环境、目录服务和带自动 HTTPS 的 Caddy。</p>
-<pre><button class="copy" type="button">复制</button>curl -fsSL https://katey07.github.io/ArdUi/selfhost.sh | sudo bash -s -- --domain ardui.example.com</pre>
-        <p class="sub" style="margin:0">先预览不改动：加 <code class="i">--dry-run</code>；已有反向代理：加 <code class="i">--http-only</code>；卸载：<code class="i">--uninstall</code>（数据保留）。</p>
+        <h3 style="margin:0 0 4px"><span data-l="en">One-command install</span><span data-l="zh">一键部署</span></h3>
+        <p class="sub" style="margin-bottom:6px"><span data-l="en">Needs Linux with systemd, root, a domain pointing at the machine, and ports 80/443 open. It installs a Python environment, the directory service and Caddy with automatic HTTPS.</span><span data-l="zh">需要：Linux（systemd）、root 权限、已指向本机的域名、开放 80/443 端口。脚本安装 Python 环境、目录服务和带自动 HTTPS 的 Caddy。</span></p>
+<pre><button class="copy" type="button"><span data-l="en">Copy</span><span data-l="zh">复制</span></button>curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | sudo bash -s -- --domain ardui.example.com</pre>
+        <p class="sub" style="margin:0"><span data-l="en">Preview first with <code class="i">--dry-run</code>; behind your own proxy use <code class="i">--http-only</code>; remove with <code class="i">--uninstall</code> (data is kept). <a href="https://github.com/KateY07/ArdUi/blob/main/selfhost.sh">Read the script</a>.</span><span data-l="zh">先预览：<code class="i">--dry-run</code>；已有反向代理：<code class="i">--http-only</code>；卸载：<code class="i">--uninstall</code>（数据保留）。<a href="https://github.com/KateY07/ArdUi/blob/main/selfhost.sh">查看脚本</a>。</span></p>
       </div>
       <div>
-        <h3 style="margin:0 0 4px">让客户端使用它</h3>
-        <p class="sub" style="margin-bottom:6px">脚本结束时会打印这一步。在每台电脑的 ArdUi 数据目录里改配置，然后重启 ArdUi：</p>
-<pre><button class="copy" type="button">复制</button># %LOCALAPPDATA%\ArdUi\data\config.json
+        <h3 style="margin:0 0 4px"><span data-l="en">Point the clients at it</span><span data-l="zh">让客户端使用它</span></h3>
+        <p class="sub" style="margin-bottom:6px"><span data-l="en">The script prints this at the end. On every computer, edit the ArdUi config and restart ArdUi:</span><span data-l="zh">脚本结束时会打印这一步。在每台电脑上改 ArdUi 配置，然后重启：</span></p>
+<pre><button class="copy" type="button"><span data-l="en">Copy</span><span data-l="zh">复制</span></button># %LOCALAPPDATA%\ArdUi\data\config.json
 {
   "server": "https://ardui.example.com/"
 }</pre>
-        <p class="sub" style="margin:0">验证：浏览器打开 <code class="i">https://你的域名/api/health</code>，应返回 <code class="i">"ok": true</code>。</p>
+        <p class="sub" style="margin:0"><span data-l="en">Check it: open <code class="i">https://your-domain/api/health</code>, it should return <code class="i">"ok": true</code>.</span><span data-l="zh">验证：打开 <code class="i">https://你的域名/api/health</code>，应返回 <code class="i">"ok": true</code>。</span></p>
       </div>
     </div>
-    <div class="note" style="margin-top:18px">
-      <b>范围说明：</b>脚本部署的是<b>设备目录服务</b>（编号、在线状态、连接协调）。流量中继和中继目录（M）默认仍使用公共节点；如果也想自建，请参考仓库里的 <a href="https://github.com/KateY07/ard2/tree/main/native_relay">中继节点部署文档</a>，那部分目前需要手动完成（证书与节点登记）。我们还没有在全新服务器上做完整的端到端验收，遇到问题请到 <a href="https://github.com/KateY07/ArdUi/issues">Issues</a> 反馈。
-    </div>
-    <table style="margin-top:18px">
-      <tr><th>组成</th><th>作用</th><th>自托管</th></tr>
-      <tr><td>目录服务</td><td>分配 6 位编号、在线状态、连接协调（不接收密码）</td><td>一键脚本</td></tr>
-      <tr><td>中继目录 M 与中继节点</td><td>直连不通时的转发；列出可用中继</td><td>手动（见文档）</td></tr>
-      <tr><td>ARD</td><td>端到端加密连接与路径选择</td><td>随安装包提供</td></tr>
+    <div class="note" style="margin-top:20px"><b><span data-l="en">Scope:</span><span data-l="zh">范围说明：</span></b> <span data-l="en">the script deploys the <b>device directory service</b> (IDs, presence, connection coordination). Relay nodes and the relay directory (M) still default to the public ones; to run your own see the <a href="https://github.com/KateY07/ard2/tree/main/native_relay">relay node guide</a>, which is a manual process for now. The complete self-hosting flow has not yet been verified end to end on a fresh server; please report problems in <a href="https://github.com/KateY07/ArdUi/issues">Issues</a>.</span><span data-l="zh">脚本部署的是<b>设备目录服务</b>（编号、在线状态、连接协调）。中继节点和中继目录（M）默认仍使用公共节点；自建它们请见<a href="https://github.com/KateY07/ard2/tree/main/native_relay">中继节点部署文档</a>，目前需要手动完成。完整的自托管流程还没有在全新服务器上做过端到端验收，遇到问题请到 <a href="https://github.com/KateY07/ArdUi/issues">Issues</a> 反馈。</span></div>
+    <table style="margin-top:20px">
+      <tr><th><span data-l="en">Component</span><span data-l="zh">组成</span></th><th><span data-l="en">Role</span><span data-l="zh">作用</span></th><th><span data-l="en">Self-hosting</span><span data-l="zh">自托管</span></th></tr>
+      <tr><td><span data-l="en">Directory service</span><span data-l="zh">目录服务</span></td><td><span data-l="en">Device IDs, presence, connection coordination (never receives passwords)</span><span data-l="zh">设备编号、在线状态、连接协调（不接收密码）</span></td><td><span data-l="en">One command</span><span data-l="zh">一键脚本</span></td></tr>
+      <tr><td><span data-l="en">Relay directory (M) and relay nodes</span><span data-l="zh">中继目录 M 与中继节点</span></td><td><span data-l="en">Forwarding when no direct path exists; lists available relays</span><span data-l="zh">直连不通时转发；列出可用中继</span></td><td><span data-l="en">Manual (see guide)</span><span data-l="zh">手动（见文档）</span></td></tr>
+      <tr><td>ARD</td><td><span data-l="en">End-to-end encrypted connections and path selection</span><span data-l="zh">端到端加密连接与路径选择</span></td><td><span data-l="en">Ships with the installer</span><span data-l="zh">随安装包提供</span></td></tr>
     </table>
   </section>
 
   <section class="reveal">
-    <h2>想先看看？</h2>
-    <p class="sub">一段 1 分钟的动画演示，介绍从输入编号到被控授权、对话与审计的完整流程。</p>
-    <a class="btn primary" href="promo.html">观看演示短片</a>
+    <h2><span data-l="en">See it in action</span><span data-l="zh">想先看看？</span></h2>
+    <p class="sub"><span data-l="en">A short animated walkthrough: from entering an ID to host approval, chat and audit.</span><span data-l="zh">一段简短的动画演示：从输入编号到被控授权、对话与审计。</span></p>
+    <a class="btn primary" href="promo.html"><span data-l="en">Watch the demo</span><span data-l="zh">观看演示短片</span></a>
   </section>
 </main>
 
 <footer><div class="wrap">
-  <span>ArdUi · <a href="https://github.com/KateY07/ArdUi">GitHub</a> · <a href="https://github.com/KateY07/ArdUi/releases">发布版本</a> · <a href="https://github.com/KateY07/ArdUi/issues">反馈问题</a></span>
-  <span class="sp">第三方组件说明见仓库 <a href="https://github.com/KateY07/ArdUi/blob/main/THIRD-PARTY-NOTICES.md">THIRD-PARTY-NOTICES.md</a></span>
+  <span>ArdUi · <a href="https://github.com/KateY07/ArdUi">GitHub</a> · <a href="https://github.com/KateY07/ArdUi/releases">Releases</a> · <a href="https://github.com/KateY07/ArdUi/issues">Issues</a></span>
+  <span class="sp"><a href="https://github.com/KateY07/ArdUi/blob/main/THIRD-PARTY-NOTICES.md">Third-party notices</a></span>
 </div></footer>
 
 <script>
-// copy buttons
+var KEY='ardui-lang';
+function setLang(l){
+  document.documentElement.lang=l==='zh'?'zh-CN':'en';
+  document.title=l==='zh'?'ArdUi · 高性能的 Windows 远程访问':'ArdUi · High-performance remote access for Windows';
+  try{localStorage.setItem(KEY,l)}catch(e){}
+}
+(function(){
+  var l='en'; try{l=localStorage.getItem(KEY)==='zh'?'zh':'en'}catch(e){}
+  setLang(l);
+  document.getElementById('langBtn').addEventListener('click',function(){setLang(document.documentElement.lang==='en'?'zh':'en')});
+})();
 document.querySelectorAll('pre .copy').forEach(function(b){
   b.addEventListener('click',function(){
-    var t=b.parentElement.textContent.replace(/复制|已复制/,'').trim();
-    (navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(function(){b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1400)}).catch(function(){});
+    var pre=b.parentElement, text=Array.prototype.map.call(pre.childNodes,function(n){return n===b?'':n.textContent}).join('').trim();
+    var done=b.innerHTML; var zh=document.documentElement.lang!=='en';
+    (navigator.clipboard?navigator.clipboard.writeText(text):Promise.reject()).then(function(){b.textContent=zh?'已复制':'Copied';setTimeout(function(){b.innerHTML=done},1400)}).catch(function(){});
   });
 });
-// reveal on scroll
 (function(){
   var els=document.querySelectorAll('.reveal');
   if(!('IntersectionObserver' in window)){els.forEach(function(e){e.classList.add('in')});return}
-  var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}})},{threshold:.12});
+  var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}})},{threshold:.1});
   els.forEach(function(e){io.observe(e)});
 })();
-// show the newest release number (best effort; the page works without it)
-try{
-  fetch('https://api.github.com/repos/KateY07/ArdUi/releases?per_page=5').then(function(r){return r.ok?r.json():[]}).then(function(list){
-    var r=list.find(function(x){return !x.draft});
-    if(r){document.getElementById('ver').textContent='最新版本 '+r.tag_name;}
-  }).catch(function(){});
-}catch(e){}
 </script>
 </body>
 </html>
