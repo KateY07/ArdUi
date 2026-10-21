@@ -17,7 +17,7 @@ $frdCandidates=@(Get-ChildItem -LiteralPath 'D:\pub\FRD' -File -Filter 'v*.zip' 
 })
 $frdArchive=($frdCandidates | Sort-Object Major,Pre -Descending | Select-Object -First 1).Path
 $outputRoot='D:\pub\ArdUi'
-$output=Join-Path $outputRoot ($version+'_setup.exe')
+$output=Join-Path $outputRoot ('ArdUi-'+$version+'_setup.exe')
 $sidecar=$output+'.sha256'
 $archive=Join-Path $outputRoot ($version+'.zip')
 $stage=Join-Path $root ('dist\'+$version+'-onesetup')
