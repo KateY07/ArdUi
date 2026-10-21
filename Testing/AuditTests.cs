@@ -1,22 +1,22 @@
 namespace ArdUi;
 
-// `ArdUi.exe --audit-test <ffmpeg.exe>`: the budget is kept, recording produces real video, and a recorder that cannot run is noticed.
+// `ArdUi.exe --audit-test`: the budget is kept, recording produces real H.264 video (Windows Media Foundation), and bad input is refused.
 static class AuditTests
 {
     static int failures;
     static void Check(bool ok, string name) { if (!ok) { failures++; Console.Error.WriteLine("FAIL " + name); } else Console.WriteLine("ok   " + name); }
 
-    public static async Task<int> Run(string ffmpeg)
+    public static async Task<int> Run()
     {
         var root = Path.Combine(Path.GetTempPath(), "ArdUi-audit-test-" + Guid.NewGuid().ToString("N"));
         try
         {
             Pruning(Path.Combine(root, "prune"));
             Grabbing();
-            await Recording(Path.Combine(root, "rec"), ffmpeg);
-            await OnDemand(Path.Combine(root, "demand"), ffmpeg);
+            await Recording(Path.Combine(root, "rec"));
+            await OnDemand(Path.Combine(root, "demand"));
             await GatewayActivity();
-            await Failures(Path.Combine(root, "fail"), ffmpeg);
+            await Failures(Path.Combine(root, "fail"));
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { } }
         return failures == 0 ? 0 : 1;
@@ -61,10 +61,10 @@ static class AuditTests
         catch (IOException ex) { Check(false, "screen capture: " + ex.Message); }
     }
 
-    static async Task Recording(string root, string ffmpeg)
+    static async Task Recording(string root)
     {
         var store = new AuditStore(root);
-        var session = AuditSession.Open(store, ffmpeg, "ABC123", new string('e', 64), once: true, Perm.Frd, fps: 10, segmentSeconds: 2);
+        var session = AuditSession.Open(store, "ABC123", new string('e', 64), true, Perm.Frd, fps: 10, segmentSeconds: 2);
         Check(session.Folder == null && !session.Recording, "nothing is recorded, nor any folder made, until there is something to record");
         var chat = new ChatChannel(Path.Combine(root, "chatfiles"), () => (m, d, ct) => Task.FromResult(JsonSerializer.SerializeToElement(new { ok = true })));
         session.Attach(chat);
@@ -75,15 +75,16 @@ static class AuditTests
         await session.EndVideo();
         Check(!session.Recording, "recording stops when asked");
         var folder = session.Folder!;
-        var first = Directory.GetFiles(folder, "rec-*.mkv").Select(Path.GetFileName).OrderBy(f => f).ToArray();
+        var first = Directory.GetFiles(folder, "rec-*.mp4").Select(Path.GetFileName).OrderBy(f => f).ToArray();
         Check(first.Length >= 2 && first.All(f => new FileInfo(Path.Combine(folder, f!)).Length > 1000), "video is written in segments");
         // the screen is used again later in the same session: new segments, the old ones stay
         session.BeginVideo(); await Task.Delay(2600); await session.EndVideo();
-        var second = Directory.GetFiles(folder, "rec-*.mkv").Select(Path.GetFileName).OrderBy(f => f).ToArray();
+        var second = Directory.GetFiles(folder, "rec-*.mp4").Select(Path.GetFileName).OrderBy(f => f).ToArray();
         Check(second.Length > first.Length && first.All(second.Contains), "a later recording continues the numbering and never overwrites the earlier video");
-        var info = Process.Start(new ProcessStartInfo(ffmpeg, "-hide_banner -i \"" + Path.Combine(folder, first[0]!) + "\"") { RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true })!;
-        var text = await info.StandardError.ReadToEndAsync(); await info.WaitForExitAsync();
-        Check(text.Contains("Video: h264", StringComparison.Ordinal) && (text.Contains("10 fps", StringComparison.Ordinal) || text.Contains("10 tbr", StringComparison.Ordinal)), "it is H.264 at 10 frames a second");
+        // a real MP4: an 'ftyp' box first, then movie data ('moov' or fragments 'moof') carrying H.264 ('avc1')
+        var head = File.ReadAllBytes(Path.Combine(folder, first[0]!)); var headText = System.Text.Encoding.Latin1.GetString(head);
+        if (Environment.GetEnvironmentVariable("ARDUI_AUDIT_TEST_KEEP") is { Length: > 0 } keep) File.Copy(Path.Combine(folder, first[0]!), keep, true);
+        Check(headText[4..8] == "ftyp" && headText.Contains("avc1", StringComparison.Ordinal) && (headText.Contains("moof", StringComparison.Ordinal) || headText.Contains("moov", StringComparison.Ordinal)), "it is an MP4 file with H.264 video");
         await session.DisposeAsync();
         Check(File.ReadAllText(Path.Combine(folder, "session.json")).Contains("ABC123", StringComparison.Ordinal), "the session is described (who, when, how)");
         Check(File.ReadAllText(Path.Combine(folder, "chat.jsonl")).Contains("审计测试消息", StringComparison.Ordinal), "the conversation is part of the record");
@@ -91,17 +92,17 @@ static class AuditTests
         Check(index.Contains("ABC123", StringComparison.Ordinal) && index.Contains("\"once\":true", StringComparison.Ordinal), "the session appears in the index");
 
         // a connected device that never uses the screen and never speaks leaves nothing behind
-        var idle = AuditSession.Open(store, ffmpeg, "IDLE00", "e", false, Perm.Frd); await idle.DisposeAsync();
+        var idle = AuditSession.Open(store, "IDLE00", "e", false, Perm.Frd); await idle.DisposeAsync();
         Check(!File.ReadAllText(Path.Combine(root, "index.jsonl")).Contains("IDLE00", StringComparison.Ordinal) && !Directory.GetDirectories(root).Any(d => d.EndsWith("IDLE00", StringComparison.Ordinal)), "a session without screen use or conversation leaves no record");
         // a conversation alone is kept, without video
-        var talk = AuditSession.Open(store, ffmpeg, "TALK00", "e", false, Perm.Files);
+        var talk = AuditSession.Open(store, "TALK00", "e", false, Perm.Files);
         talk.Attach(chat); await chat.SendText("只聊天"); await talk.DisposeAsync();
         Check(talk.Folder != null && File.Exists(Path.Combine(talk.Folder, "chat.jsonl")) && Directory.GetFiles(talk.Folder, "rec-*").Length == 0, "a conversation is kept even without any video");
     }
 
-    static async Task OnDemand(string root, string ffmpeg)
+    static async Task OnDemand(string root)
     {
-        var service = new AuditService(root, ffmpeg, grace: TimeSpan.FromSeconds(1.2));
+        var service = new AuditService(root, TimeSpan.FromSeconds(1.2));
         var chat = new ChatChannel(Path.Combine(root, "c"), () => null);
         service.Open("ep", "DEM000", false, Perm.Frd, chat);
         Check(!service.IsRecording("ep"), "an open session is not recorded while the screen is idle");
@@ -141,20 +142,11 @@ static class AuditTests
         Check(!gateway.ScreenActive && events.SequenceEqual([true, false, true, false]), "and stops counting when it closes");
     }
 
-    static async Task Failures(string root, string ffmpeg)
+    static Task Failures(string root)
     {
-        var store = new AuditStore(root);
-        var missing = AuditSession.Open(store, Path.Combine(root, "nothing.exe"), "X", "e", false, Perm.Frd);
-        try { missing.BeginVideo(); Check(false, "a missing encoder is refused"); }
-        catch (FileNotFoundException) { Check(true, "a missing encoder is refused"); }
-        // an encoder that dies at once: the failure is reported so the session can be ended
-        var fake = Path.Combine(Environment.SystemDirectory, "whoami.exe");
-        var failed = new TaskCompletionSource<string>();
-        var session = AuditSession.Open(store, fake, "BAD000", "e", false, Perm.Frd);
-        session.Failure += reason => failed.TrySetResult(reason);
-        session.BeginVideo();
-        var winner = await Task.WhenAny(failed.Task, Task.Delay(4000));
-        Check(winner == failed.Task && session.Failed, "an encoder that stops is reported as a failure");
-        await session.DisposeAsync();
+        Check(H264Recorder.Available, "this machine has a Windows H.264 encoder");
+        try { using var bad = new H264Recorder(root, 101, 64, 10, 60, 1); Check(false, "an odd frame size is refused"); }
+        catch (ArgumentException) { Check(true, "an odd frame size is refused"); }
+        return Task.CompletedTask;
     }
 }

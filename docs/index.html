@@ -3,17 +3,245 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ArdUi</title>
+<title>ArdUi · Windows 远程访问</title>
+<meta name="description" content="ArdUi：点对点加密的 Windows 远程访问。设备编号连接、逐设备授权、对话与文件传输、被控端审计录屏，可自托管。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='23' fill='%23C6613F'/%3E%3Cpath d='M30 24V74L43 62L52 82L61 78L52 58H70Z' fill='white' stroke='white' stroke-width='3' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
-:root{color-scheme:dark;--bg:#0b0d10;--card:#15191f;--line:#2a313b;--text:#eef2f6;--muted:#a8b2bf;--accent:#7dd3fc}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.65 system-ui,"Microsoft YaHei",sans-serif}.wrap{max-width:820px;margin:auto;padding:56px 22px 80px}h1{font-size:42px;margin:0 0 6px}.tag{color:var(--accent);font-weight:700}section{margin-top:24px;padding:22px;background:var(--card);border:1px solid var(--line);border-radius:14px}h2{margin:0 0 10px;font-size:20px}.muted{color:var(--muted)}code,pre{font-family:ui-monospace,Consolas,monospace}pre{overflow:auto;padding:14px;background:#080a0d;border:1px solid var(--line);border-radius:9px;color:#d8f4ff}a{color:var(--accent)}
+:root{
+  --bg:#fff;--bg2:#f6f8fa;--ink:#1f2328;--muted:#59636e;--line:#d1d9e0;--accent:#c6613f;--link:#0969da;
+  --btn:#1f2328;--btn-ink:#fff;--code:#f6f8fa;--code-ink:#1f2328;--code-line:#d1d9e0;--shadow:0 8px 24px rgba(31,35,40,.08);
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#0d1117;--bg2:#151b23;--ink:#f0f6fc;--muted:#9198a1;--line:#3d444d;--link:#4493f8;
+  --btn:#f0f6fc;--btn-ink:#0d1117;--code:#151b23;--code-ink:#f0f6fc;--code-line:#3d444d;--shadow:0 8px 24px rgba(0,0,0,.4);
+}}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:72px}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","Segoe UI Variable Text","PingFang SC","Microsoft YaHei",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:1040px;margin:0 auto;padding:0 24px}
+
+nav{position:sticky;top:0;z-index:10;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;align-items:center;gap:26px;height:56px}
+.brand{display:flex;align-items:center;gap:9px;font-weight:600;color:var(--ink)}
+.brand:hover{text-decoration:none}
+nav .links{margin-left:auto;display:flex;align-items:center;gap:22px;font-size:14.5px}
+nav .links a{color:var(--muted)}nav .links a:hover{color:var(--ink);text-decoration:none}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:9px 18px;border-radius:8px;font:inherit;font-weight:600;font-size:15px;border:1px solid var(--line);color:var(--ink);background:var(--bg);cursor:pointer;transition:background .15s,border-color .15s,transform .15s}
+.btn:hover{text-decoration:none;background:var(--bg2);border-color:color-mix(in srgb,var(--line) 60%,var(--ink))}
+.btn:active{transform:scale(.98)}
+.btn.primary{background:var(--btn);color:var(--btn-ink);border-color:var(--btn)}
+.btn.primary:hover{background:color-mix(in srgb,var(--btn) 86%,var(--bg));border-color:var(--btn)}
+nav .links .btn{padding:6px 14px;font-size:14px;color:var(--btn-ink)}
+nav .links .btn:hover{color:var(--btn-ink)}
+@media(max-width:720px){nav .links a:not(.btn){display:none}}
+
+.hero{display:grid;grid-template-columns:1fr 1fr;gap:56px;align-items:center;padding:88px 0 72px}
+@media(max-width:900px){.hero{grid-template-columns:1fr;gap:40px;padding:48px 0 40px}}
+.eyebrow{font-size:14px;color:var(--muted)}
+.eyebrow i{display:inline-block;width:7px;height:7px;border-radius:50%;background:#2da44e;margin-right:8px;vertical-align:middle}
+h1{font-size:clamp(34px,4.6vw,52px);line-height:1.16;margin:14px 0 16px;letter-spacing:-.02em;font-weight:700}
+.lead{font-size:18px;color:var(--muted);max-width:30em;margin:0 0 28px}
+.cta{display:flex;flex-wrap:wrap;gap:10px}
+.meta{margin-top:18px;font-size:13.5px;color:var(--muted)}
+
+.demo{border-radius:12px;background:var(--bg);border:1px solid var(--line);box-shadow:var(--shadow);overflow:hidden}
+.demo .bar{display:flex;align-items:center;gap:7px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--bg2);font-size:13px;color:var(--muted)}
+.demo .bar b{width:10px;height:10px;border-radius:50%;background:var(--line);display:inline-block}
+.demo .body{padding:14px;display:grid;gap:8px}
+.row{display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;border:1px solid var(--line)}
+.row .dot{width:9px;height:9px;border-radius:50%;background:#2da44e;animation:breathe 2.6s ease-in-out infinite}
+.row .code{font:600 14px ui-monospace,SFMono-Regular,Consolas,monospace}
+.row .sub{font-size:12.5px;color:var(--muted);margin:0;max-width:none}
+.row .sp{margin-left:auto}
+.chip{padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid var(--line);color:var(--muted)}
+.demo .stage{position:relative;height:150px;margin:2px 14px 14px;border-radius:8px;overflow:hidden;background:linear-gradient(135deg,#dbe4ee,#eceff3 60%,#f3e9e1)}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]) .demo .stage{background:linear-gradient(135deg,#1b2635,#222a35 60%,#2b2623)}}
+@keyframes breathe{50%{opacity:.45}}
+
+.island{position:absolute;right:12px;bottom:12px;display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+.pill{display:flex;align-items:center;gap:9px;height:40px;padding:0 12px 0 8px;border-radius:26px;background:rgba(22,19,17,.96);color:#fff;font-size:12.5px;
+  box-shadow:0 8px 20px rgba(0,0,0,.28),0 0 0 1px rgba(255,255,255,.12);animation:pillw 14s infinite cubic-bezier(.2,.8,.2,1)}
+.pill .mk{width:24px;height:24px;border-radius:7px;background:#c6613f;display:grid;place-items:center}
+.pill .g{width:8px;height:8px;border-radius:50%;background:#5fd38d}
+.pill .badge{min-width:20px;height:20px;border-radius:10px;background:#f0504a;font-weight:700;font-size:11px;display:grid;place-items:center;padding:0 6px;animation:badge 14s infinite}
+.pill .file{display:flex;align-items:center;gap:9px;max-width:0;overflow:hidden;white-space:nowrap;opacity:0;animation:filew 14s infinite cubic-bezier(.2,.8,.2,1)}
+.ring{width:26px;height:26px;border-radius:50%;background:conic-gradient(#e07a52 var(--p,40%),rgba(255,255,255,.18) 0);display:grid;place-items:center;animation:prog 14s infinite linear}
+.ring::after{content:"";width:18px;height:18px;border-radius:50%;background:#161311}
+.file small{display:block;color:rgba(255,255,255,.6);font-size:11px}
+.bubble{padding:9px 14px;border-radius:18px;background:rgba(22,19,17,.92);color:#fff;font-size:12.5px;max-width:230px;opacity:0;transform:translateY(8px) scale(.9);transform-origin:bottom right;animation:bub 14s infinite cubic-bezier(.2,.8,.2,1);box-shadow:0 8px 20px rgba(0,0,0,.25)}
+.bubble b{display:block;font-size:11px;color:rgba(255,255,255,.6)}
+@property --p{syntax:"<percentage>";inherits:false;initial-value:0%}
+@keyframes bub{0%,10%{opacity:0;transform:translateY(8px) scale(.9)}14%,34%{opacity:1;transform:none}38%,100%{opacity:0;transform:translateY(8px) scale(.9)}}
+@keyframes badge{0%,13%{transform:scale(0)}17%{transform:scale(1.5)}21%,100%{transform:scale(1)}}
+@keyframes filew{0%,48%{max-width:0;opacity:0}52%,84%{max-width:200px;opacity:1}88%,100%{max-width:0;opacity:0}}
+@keyframes prog{0%,50%{--p:5%}84%{--p:100%}100%{--p:100%}}
+@keyframes pillw{0%,100%{transform:scale(1)}14%{transform:scale(1.04)}18%{transform:scale(1)}}
+@media(prefers-reduced-motion:reduce){.pill,.pill *,.bubble,.row .dot,.ring{animation:none!important}.bubble{opacity:1;transform:none}}
+
+section{padding:64px 0;border-top:1px solid var(--line)}
+h2{font-size:clamp(24px,3vw,30px);margin:0 0 8px;letter-spacing:-.01em}
+.sub{color:var(--muted);margin:0 0 28px;max-width:42em}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+@media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:560px){.grid{grid-template-columns:1fr}}
+.card{padding:24px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);margin:0 -1px -1px 0;background:var(--bg)}
+.card .ic{color:var(--accent);margin-bottom:10px}
+.card h3{margin:0 0 6px;font-size:16px}.card p{margin:0;color:var(--muted);font-size:14.5px}
+.steps{counter-reset:s;display:grid;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.step{display:grid;grid-template-columns:36px 1fr;gap:16px;align-items:start;padding:20px 22px;border-bottom:1px solid var(--line)}
+.step:last-child{border-bottom:0}
+.step::before{counter-increment:s;content:counter(s);width:28px;height:28px;border-radius:50%;display:grid;place-items:center;font-weight:600;font-size:14px;border:1px solid var(--line);color:var(--muted);background:var(--bg2)}
+.step h3{margin:0 0 4px;font-size:16px}.step p{margin:0;color:var(--muted);font-size:15px}
+.flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:12px;align-items:center;margin:28px 0}
+.flow .node{padding:16px;border-radius:10px;background:var(--bg2);border:1px solid var(--line);text-align:center;font-size:14px;color:var(--muted)}
+.flow .node b{display:block;font-size:15px;margin-bottom:2px;color:var(--ink)}
+.flow .arrow{color:var(--muted);font-size:20px;text-align:center}
+@media(max-width:720px){.flow{grid-template-columns:1fr}.flow .arrow{transform:rotate(90deg)}}
+pre{position:relative;margin:12px 0;padding:14px 16px;padding-right:72px;border-radius:8px;background:var(--code);color:var(--code-ink);overflow:auto;font:13.5px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;border:1px solid var(--code-line)}
+pre .copy{position:absolute;top:9px;right:9px;padding:3px 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--muted);font:12px system-ui;cursor:pointer}
+pre .copy:hover{color:var(--ink)}
+code.i{padding:1px 6px;border-radius:6px;background:var(--code);border:1px solid var(--code-line);font:.88em ui-monospace,SFMono-Regular,Consolas,monospace}
+.note{padding:14px 16px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);font-size:14.5px;color:var(--muted)}
+.note b{color:var(--ink)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:28px}.two>div{min-width:0}@media(max-width:820px){.two{grid-template-columns:1fr}}
+table{width:100%;border-collapse:collapse;font-size:14.5px}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600}
+footer{padding:30px 0 48px;color:var(--muted);font-size:14px;border-top:1px solid var(--line)}
+footer .wrap{display:flex;flex-wrap:wrap;gap:18px;align-items:center}footer .sp{margin-left:auto}
+
+.reveal{opacity:0;transform:translateY(12px);transition:opacity .5s ease,transform .5s cubic-bezier(.2,.8,.2,1)}
+.reveal.in{opacity:1;transform:none}
+@media(prefers-reduced-motion:reduce){.reveal{opacity:1;transform:none;transition:none}html{scroll-behavior:auto}.btn{transition:none}}
 </style>
 </head>
-<body><main class="wrap">
-<div class="tag">Windows remote access</div>
-<h1>ArdUi</h1>
-<p class="muted">基于永久设备身份与端到端 ARD/Iroh 连接，访问已授权 Windows 设备的远程桌面、FRD 与 SMB 文件共享。</p>
-<section><h2>安装</h2><pre>irm https://katey07.github.io/ArdUi/install.ps1 | iex</pre><p>引导器分别取得 ArdUi、ARD 与 FRD 的固定 NuGet 版本，并复用本地已校验的组件，实现增量更新。</p><p><a href="https://github.com/KateY07/ArdUi">ArdUi 源码</a> · <a href="https://www.nuget.org/packages/KateY07.ArdUi.WinX64">ArdUi</a> · <a href="https://www.nuget.org/packages/KateY07.Ard.WinX64">ARD</a> · <a href="https://www.nuget.org/packages/KateY07.FRD.WinX64">FRD</a></p></section>
-<section><h2>安全边界</h2><p>首次连接需通过独立渠道核对完整 EndpointId。设备目录与中继可影响可用性及暴露必要的连接元数据，但不能在不持有设备私钥的情况下冒充已核对的设备或解密端到端流量。</p></section>
-<section><h2>状态</h2><p>Pages 由本仓库的 Actions 自动部署。首次打包发布后，NuGet 页面将显示可安装版本。</p></section>
-</main></body>
+<body>
+
+
+<nav><div class="wrap">
+  <a class="brand" href="#top"><svg width="28" height="28" viewBox="0 0 100 100" aria-hidden="true"><rect width="100" height="100" rx="23" fill="#C6613F"/><path d="M30 24V74L43 62L52 82L61 78L52 58H70Z" fill="#fff" stroke="#fff" stroke-width="3" stroke-linejoin="round"/><path d="M36.5 11.6A27 27 0 0 1 60 14M42 20A20 20 0 0 1 58 21" transform="translate(0 6)" fill="none" stroke="#fff" stroke-width="5.5" stroke-linecap="round"/></svg>ArdUi</a>
+  <div class="links"><a href="#intro">简介</a><a href="#quick">快速入门</a><a href="#selfhost">自托管</a><a href="promo.html">演示短片</a><a class="btn primary" href="https://github.com/KateY07/ArdUi/releases" id="navDl">下载</a></div>
+</div></nav>
+
+<main class="wrap" id="top">
+  <header class="hero">
+    <div>
+      <span class="eyebrow"><i></i><span id="ver">开源 · Windows 10/11</span></span>
+      <h1>点对点加密的<br>Windows 远程访问</h1>
+      <p class="lead">在两台电脑之间建立端到端加密的连接，用设备编号找到对方，不用配置 IP、端口或虚拟网卡。被控端逐设备授权，远程桌面、文件传输、对话和审计都在一个应用里。</p>
+      <div class="cta"><a class="btn primary" href="https://github.com/KateY07/ArdUi/releases">下载 ArdUi</a><a class="btn ghost" href="#quick">3 分钟上手</a><a class="btn ghost" href="#selfhost">自己部署服务器</a></div>
+      <p class="meta">Windows 10/11 x64 · 需要 .NET 8 与 .NET 10 运行时 · 开源（<a href="https://github.com/KateY07/ArdUi">GitHub</a>）</p>
+    </div>
+    <div class="demo" aria-label="界面演示">
+      <div class="bar"><b></b><b></b><b></b><span style="margin-left:6px">ArdUi</span></div>
+      <div class="body">
+        <div class="row"><span class="dot"></span><div><div class="code">K4DD0B</div><div class="sub">FRD · 已连接 · 直连 IPv6</div></div><span class="sp chip">仅此一次</span></div>
+        <div class="row"><span class="dot" style="background:#bf8700;animation:none"></span><div><div class="code">A7B2K9</div><div class="sub">桌面 · 文件 · 在线</div></div></div>
+      </div>
+      <div class="stage"><div class="island">
+        <div class="bubble"><b>K4DD0B</b>你好，帮我看看这个报错？</div>
+        <div class="pill"><span class="mk"><svg width="14" height="14" viewBox="0 0 100 100"><path d="M30 24V74L43 62L52 82L61 78L52 58H70Z" fill="#fff"/></svg></span><span class="g"></span>
+          <span class="file"><span class="ring"></span><span>setup.exe<small>3.2 MB/s · 剩余 12 秒</small></span></span>
+          <span class="badge">3</span></div>
+      </div></div>
+    </div>
+  </header>
+
+  <section id="intro" class="reveal">
+    <h2>简介</h2>
+    <p class="sub">ArdUi 是基于 ARD（Iroh）的 Windows 远程访问应用。设备用永久密钥证明身份，连接经过端到端加密，中央服务器只分配编号、协调连接，看不到你的密码和内容。</p>
+    <div class="grid">
+      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div><h3>端到端加密</h3><p>设备身份是永久公钥，连接直接在两台设备间加密，服务器只做协调，不转手你的数据。</p></div>
+      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h16"/></svg></div><h3>设备编号，免配置</h3><p>输入对方的编号和一次性密码，核对身份即可连接。不用 IP、端口、虚拟网卡，也不需要管理员权限。</p></div>
+      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg></div><h3>被控端说了算</h3><p>逐设备授权远程桌面（FRD）、RDP、文件，默认只开 FRD。支持“仅接受这一次”，随时断开。</p></div>
+      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h3>对话与文件传输</h3><p>文字、图片、文件（最大 2 GB）直接发给对方，显示速度与进度，可取消，传输时仍能聊天。</p></div>
+      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/></svg></div><h3>被控端审计录屏</h3><p>对方使用屏幕时，在被控端本地录制（10 帧/秒），最多占用 10 GB，循环覆盖；使用 Windows 自带的 H.264 编码器。</p></div>
+      <div class="card"><div class="ic"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="15" width="16" height="5" rx="2.5"/><path d="M12 4v7M9 8l3 3 3-3"/></svg></div><h3>灵动岛小组件</h3><p>屏幕右下角的小胶囊：显示连接状态、新消息气泡、未读数和文件传输进度，点一下直接打开对话。</p></div>
+    </div>
+
+    <div class="flow reveal" aria-label="工作方式">
+      <div class="node"><b>主控设备</b>输入编号与密码</div><div class="arrow">⇄</div>
+      <div class="node"><b>目录服务器</b>分配编号 · 协调连接<br><small style="color:var(--muted)">不接收密码</small></div><div class="arrow">⇄</div>
+      <div class="node"><b>被控设备</b>核对身份 · 同意授权</div>
+    </div>
+    <p class="note"><b>数据怎么走：</b>协调完成后，两台设备经 ARD 直接建立端到端加密连接（直连优先，不通时自动走中继）。服务器不在数据路径上，也保存不了你的密码。</p>
+  </section>
+
+  <section id="quick" class="reveal">
+    <h2>快速入门</h2>
+    <p class="sub">两台电脑都装同一个应用。被控功能默认关闭，只想控制别人的话不用开。</p>
+    <div class="steps">
+      <div class="step"><div><h3>下载并安装</h3><p>到 <a href="https://github.com/KateY07/ArdUi/releases">Releases</a> 下载最新的 <code class="i">ArdUi-vX.exe</code> 并双击运行，会出现安装窗口。安装目录在 <code class="i">%LOCALAPPDATA%\ArdUi</code>，设备身份和配置会在升级时保留。需要先装 .NET 8 与 .NET 10 桌面运行时。</p></div></div>
+      <div class="step"><div><h3>被控端：开启“允许被控”</h3><p>在要被访问的电脑上打开 ArdUi，打开“允许被控”，会得到 6 位编号，点击后显示 10 秒的首次密码。把编号和密码告诉对方。</p></div></div>
+      <div class="step"><div><h3>主控端：输入编号和密码</h3><p>在另一台电脑上输入编号与密码，点“连接”。双方通过电话等独立渠道核对完整的设备指纹，被控端点“接受”（或“仅接受这一次”，并可勾选开放哪些功能）。</p></div></div>
+      <div class="step"><div><h3>开始使用</h3><p>已授权的设备出现在列表里：点 <b>FRD</b> 看桌面，<b>桌面</b> 用 RDP，<b>文件</b> 访问共享，点对话图标发消息和文件。之后再连不用重新输入密码。</p></div></div>
+    </div>
+    <p class="note" style="margin-top:16px"><b>提示：</b>被控端在“被控与授权”里可以随时撤销某台设备或断开正在使用的连接；有人使用屏幕时，被控端首页会在该设备旁显示“● 录屏中”。</p>
+  </section>
+
+  <section id="selfhost" class="reveal">
+    <h2>自托管</h2>
+    <p class="sub">默认使用公共的设备目录服务。想完全掌握在自己手里，可以在一台有域名的 Linux 服务器上部署自己的目录服务，一条命令完成。</p>
+    <div class="two">
+      <div>
+        <h3 style="margin:0 0 4px">一键部署目录服务</h3>
+        <p class="sub" style="margin-bottom:6px">需要：Linux（systemd）、root 权限、已指向本机的域名、开放 80/443 端口。脚本会安装 Python 环境、目录服务和带自动 HTTPS 的 Caddy。</p>
+<pre><button class="copy" type="button">复制</button>curl -fsSL https://katey07.github.io/ArdUi/selfhost.sh | sudo bash -s -- --domain ardui.example.com</pre>
+        <p class="sub" style="margin:0">先预览不改动：加 <code class="i">--dry-run</code>；已有反向代理：加 <code class="i">--http-only</code>；卸载：<code class="i">--uninstall</code>（数据保留）。</p>
+      </div>
+      <div>
+        <h3 style="margin:0 0 4px">让客户端使用它</h3>
+        <p class="sub" style="margin-bottom:6px">脚本结束时会打印这一步。在每台电脑的 ArdUi 数据目录里改配置，然后重启 ArdUi：</p>
+<pre><button class="copy" type="button">复制</button># %LOCALAPPDATA%\ArdUi\data\config.json
+{
+  "server": "https://ardui.example.com/"
+}</pre>
+        <p class="sub" style="margin:0">验证：浏览器打开 <code class="i">https://你的域名/api/health</code>，应返回 <code class="i">"ok": true</code>。</p>
+      </div>
+    </div>
+    <div class="note" style="margin-top:18px">
+      <b>范围说明：</b>脚本部署的是<b>设备目录服务</b>（编号、在线状态、连接协调）。流量中继和中继目录（M）默认仍使用公共节点；如果也想自建，请参考仓库里的 <a href="https://github.com/KateY07/ard2/tree/main/native_relay">中继节点部署文档</a>，那部分目前需要手动完成（证书与节点登记）。我们还没有在全新服务器上做完整的端到端验收，遇到问题请到 <a href="https://github.com/KateY07/ArdUi/issues">Issues</a> 反馈。
+    </div>
+    <table style="margin-top:18px">
+      <tr><th>组成</th><th>作用</th><th>自托管</th></tr>
+      <tr><td>目录服务</td><td>分配 6 位编号、在线状态、连接协调（不接收密码）</td><td>一键脚本</td></tr>
+      <tr><td>中继目录 M 与中继节点</td><td>直连不通时的转发；列出可用中继</td><td>手动（见文档）</td></tr>
+      <tr><td>ARD</td><td>端到端加密连接与路径选择</td><td>随安装包提供</td></tr>
+    </table>
+  </section>
+
+  <section class="reveal">
+    <h2>想先看看？</h2>
+    <p class="sub">一段 1 分钟的动画演示，介绍从输入编号到被控授权、对话与审计的完整流程。</p>
+    <a class="btn primary" href="promo.html">观看演示短片</a>
+  </section>
+</main>
+
+<footer><div class="wrap">
+  <span>ArdUi · <a href="https://github.com/KateY07/ArdUi">GitHub</a> · <a href="https://github.com/KateY07/ArdUi/releases">发布版本</a> · <a href="https://github.com/KateY07/ArdUi/issues">反馈问题</a></span>
+  <span class="sp">第三方组件说明见仓库 <a href="https://github.com/KateY07/ArdUi/blob/main/THIRD-PARTY-NOTICES.md">THIRD-PARTY-NOTICES.md</a></span>
+</div></footer>
+
+<script>
+// copy buttons
+document.querySelectorAll('pre .copy').forEach(function(b){
+  b.addEventListener('click',function(){
+    var t=b.parentElement.textContent.replace(/复制|已复制/,'').trim();
+    (navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(function(){b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1400)}).catch(function(){});
+  });
+});
+// reveal on scroll
+(function(){
+  var els=document.querySelectorAll('.reveal');
+  if(!('IntersectionObserver' in window)){els.forEach(function(e){e.classList.add('in')});return}
+  var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}})},{threshold:.12});
+  els.forEach(function(e){io.observe(e)});
+})();
+// show the newest release number (best effort; the page works without it)
+try{
+  fetch('https://api.github.com/repos/KateY07/ArdUi/releases?per_page=5').then(function(r){return r.ok?r.json():[]}).then(function(list){
+    var r=list.find(function(x){return !x.draft});
+    if(r){document.getElementById('ver').textContent='最新版本 '+r.tag_name;}
+  }).catch(function(){});
+}catch(e){}
+</script>
+</body>
 </html>

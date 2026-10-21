@@ -220,7 +220,7 @@ sealed partial class MainWindow
     // Devices that are connecting to, or using, this machine: a breathing logo while they connect, a green dot once they are in.
     readonly StackPanel hostPanel = new() { Spacing = 6, IsVisible = false }, hostList = new() { Spacing = 6 };
     string hostSignature = "";
-    readonly TextBlock auditWarning = new() { Text = "审计录屏组件（ffmpeg）缺失：有设备连接时会被断开。请重新安装 ArdUi。", FontSize = 12, Foreground = Brush.Parse("#B3432B"), TextWrapping = TextWrapping.Wrap, IsVisible = false };
+    readonly TextBlock auditWarning = new() { Text = "本机没有可用的 H.264 编码器（Windows 媒体功能包）：有设备连接时会被断开。请安装“媒体功能包”。", FontSize = 12, Foreground = Brush.Parse("#B3432B"), TextWrapping = TextWrapping.Wrap, IsVisible = false };
     public event Action<string>? ActivityChanged;
     string lastActivity = "";
 

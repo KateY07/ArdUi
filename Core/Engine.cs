@@ -20,7 +20,7 @@ sealed class Engine : IAsyncDisposable
     Engine(State state, Settings settings, string id)
     {
         State=state; Settings=settings; Id=id;
-        Audit=new AuditService(Path.Combine(state.Root,"audit"),FfmpegPath(settings));
+        Audit=new AuditService(Path.Combine(state.Root,"audit"));
         Audit.Failure+=(endpoint,reason)=>
         {
             Events.Add("ERROR","审计","审计录屏失败，已结束该会话："+reason);
@@ -28,14 +28,6 @@ sealed class Engine : IAsyncDisposable
             _=DropIncoming(endpoint);
         };
         Audit.Changed+=()=>Changed?.Invoke();
-    }
-    // The encoder ships with FRD (frd\ffmpeg\ffmpeg.exe).
-    static string FfmpegPath(Settings settings)
-    {
-        string? frd=null;
-        try{frd=FrdRuntime.Resolve(settings.FrdPath);}catch(Exception ex)when(ex is IOException or InvalidOperationException or FileNotFoundException){}
-        var folder=frd!=null?Path.GetDirectoryName(frd)!:Path.Combine(AppContext.BaseDirectory,"frd");
-        return Path.Combine(folder,"ffmpeg","ffmpeg.exe");
     }
     public static async Task<Engine> Create(string root, Settings settings)
     {

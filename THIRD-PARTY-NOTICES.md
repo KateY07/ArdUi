@@ -9,6 +9,7 @@ ArdUi application logic is organized by responsibility as documented in `ARCHITE
 | NSec.Cryptography | 25.4.0 | https://github.com/ektrah/nsec — MIT |
 | ZXing.Net | 0.16.11 | https://github.com/micjahn/ZXing.Net — Apache-2.0 |
 | Tmds.DBus.Protocol | 0.21.3 | https://github.com/tmds/Tmds.DBus — MIT |
+| Vortice.MediaFoundation | 3.8.3 | https://github.com/amerkoleci/Vortice.Windows — MIT (Windows Media Foundation bindings; the audit recording uses the H.264 encoder built into Windows, no codec is distributed) |
 | SkiaSharp | Avalonia dependency | https://github.com/mono/SkiaSharp — MIT and native Skia notices |
 
 Running ArdUi requires the Microsoft .NET 8 Desktop Runtime. ArdUi does not distribute or call Wintun or tun2socks.

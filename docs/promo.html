@@ -1,0 +1,687 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ArdUi 宣传片</title>
+<style>
+:root{
+  --bg:#12100e; --ink:#1f1e1d; --cream:#f5f4ee; --acc:#c6613f; --acc2:#e07a52; --amber:#d79a3b; --green:#5e9e6e; --green2:#2f7d4f; --muted:#7a786f;
+  --font:"Segoe UI Variable Display","Segoe UI","Microsoft YaHei UI","PingFang SC","Noto Sans CJK SC",system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:#000;overflow:hidden;font-family:var(--font);color:#fff;-webkit-font-smoothing:antialiased}
+#viewport{position:fixed;inset:0 0 0 0;display:flex;align-items:center;justify-content:center;background:#000}
+#stage{position:relative;width:1920px;height:1080px;flex:none;overflow:hidden;background:var(--bg);transform-origin:center center}
+#world{position:absolute;inset:0;transform-origin:50% 50%}
+.abs{position:absolute}
+.scene{position:absolute;inset:0;display:none}
+
+/* ---------- global background ---------- */
+#bg{position:absolute;inset:0;background:radial-gradient(1200px 800px at 50% 40%,#2a1d16 0%,#12100e 70%)}
+.orb{position:absolute;border-radius:50%;filter:blur(110px);opacity:.55;will-change:transform}
+#o1{width:760px;height:760px;background:#c6613f;left:-120px;top:380px}
+#o2{width:560px;height:560px;background:#d79a3b;left:1300px;top:-160px;opacity:.38}
+#o3{width:700px;height:700px;background:#4d79b8;left:1180px;top:560px;opacity:.34}
+#grid{position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px);background-size:80px 80px;mask-image:radial-gradient(900px 600px at 50% 50%,#000 0%,transparent 80%);-webkit-mask-image:radial-gradient(900px 600px at 50% 50%,#000 0%,transparent 80%)}
+#vignette{position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,.55) 100%)}
+#flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;mix-blend-mode:screen}
+#ticker{position:absolute;left:0;right:0;bottom:0;height:5px;background:rgba(255,255,255,.06)}
+#tickerFill{height:100%;width:0;background:linear-gradient(90deg,var(--acc),var(--amber))}
+#grain{position:absolute;inset:0;pointer-events:none;opacity:.07;mix-blend-mode:overlay;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>")}
+
+/* ---------- typography ---------- */
+.big{font-weight:800;letter-spacing:-.02em;line-height:1.05}
+.center{left:0;right:0;text-align:center}
+.cap-title{font-size:74px;font-weight:800;letter-spacing:-.01em}
+.cap-sub{font-size:34px;color:rgba(255,255,255,.66);margin-top:14px;font-weight:500}
+.acc{color:var(--acc2)}
+.chip{display:inline-flex;align-items:center;gap:10px;padding:10px 22px;border-radius:999px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.18);font-size:28px;font-weight:600;backdrop-filter:blur(8px)}
+
+/* ---------- logo ---------- */
+.logo svg{display:block;overflow:visible}
+
+/* ---------- ArdUi window mock ---------- */
+#app{position:absolute;width:400px;height:650px;border-radius:18px;overflow:hidden;transform-origin:0 0;box-shadow:0 40px 120px rgba(0,0,0,.6),0 0 0 1px rgba(255,255,255,.14);color:var(--ink);font-size:12px;
+  background:linear-gradient(135deg,#fce9dc 0%,#f1e6ee 55%,#dde8f3 100%)}
+#app .aorb{position:absolute;border-radius:50%;filter:blur(46px)}
+#app .a1{width:260px;height:260px;background:#e88a63;left:-40px;top:300px}
+#app .a2{width:190px;height:190px;background:#f2b84b;left:270px;top:-50px}
+#app .a3{width:240px;height:240px;background:#8db6e8;left:230px;top:400px}
+#scrimA{position:absolute;inset:0;background:#1f1e1d;opacity:0;pointer-events:none}
+.glass{background:rgba(255,255,255,.72);border:1px solid rgba(255,255,255,.8);box-shadow:0 20px 50px rgba(48,30,20,.15),0 2px 6px rgba(0,0,0,.08)}
+#aTitle{position:absolute;left:14px;top:8px;right:10px;height:40px;display:flex;align-items:center;justify-content:space-between}
+#aCapsule{display:flex;align-items:center;gap:12px;padding:4px 14px 4px 10px;border-radius:20px}
+#aCode{font-family:Consolas,"Cascadia Mono",monospace;font-weight:700;font-size:14px;letter-spacing:2px}
+.adot{width:9px;height:9px;border-radius:50%;background:var(--green)}
+#aDiscs{display:flex;gap:8px}
+.disc{width:32px;height:32px;border-radius:16px;display:flex;align-items:center;justify-content:center}
+.disc svg{width:15px;height:15px}
+#aPage{position:absolute;left:0;right:0;top:48px;bottom:0}
+#card{position:absolute;left:14px;right:14px;border-radius:24px;padding:16px 18px;transform-origin:50% 50%}
+#cTitle{text-align:center;font-weight:700;font-size:17px;overflow:hidden}
+#field{height:50px;border-radius:25px;background:rgba(255,255,255,.86);border:1.2px solid rgba(255,255,255,.5);display:flex;align-items:center;position:relative;margin-top:14px}
+#fieldText{position:absolute;left:0;right:78px;text-align:center;font-family:Consolas,"Cascadia Mono",monospace;font-weight:700;font-size:22px;letter-spacing:5px;color:#7a786f}
+#fieldText b{color:#1f1e1d}
+#chev{position:absolute;right:50px;top:18px;width:14px;height:14px}
+#go{position:absolute;right:7px;top:7px;width:36px;height:36px;border-radius:50%;background:var(--acc);display:flex;align-items:center;justify-content:center;box-shadow:0 6px 14px rgba(198,97,63,.35)}
+#goRing{position:absolute;right:7px;top:7px;width:36px;height:36px;border-radius:50%;border:2px solid var(--acc);opacity:0;pointer-events:none}
+#go svg{width:17px;height:17px}
+#prog{position:absolute;left:26px;bottom:-3px;height:2.5px;border-radius:2px;background:var(--acc);width:0}
+#recents{overflow:hidden}
+#recents .row{display:flex;justify-content:center;gap:6px;padding-top:12px}
+#recents hr{border:0;height:1px;background:rgba(60,40,20,.25);margin-top:16px}
+#recents .lbl{text-align:center;color:var(--muted);margin-top:10px}
+.rc{width:56px;display:flex;flex-direction:column;align-items:center;gap:3px;color:var(--muted);font-size:11px}
+.av{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:#1f1e1d;background:rgba(255,255,255,.7);border:2px solid var(--green2)}
+.av.off{border:1.2px solid #e6e3d8;color:var(--muted);background:rgba(255,255,255,.4)}
+#lower{position:absolute;left:14px;right:14px}
+.sess{border-radius:12px;background:rgba(255,255,255,.85);border:1px solid rgba(255,255,255,.8);box-shadow:0 6px 18px rgba(48,30,20,.14);padding:10px 14px;display:flex;align-items:center;gap:12px;margin-top:6px}
+.sess .ic{width:30px;height:30px;flex:none;display:flex;align-items:center;justify-content:center}
+.sess .nm{font-weight:700;font-size:14px}.sess .nm i{font-style:normal;font-weight:400;color:var(--muted);font-size:12px;margin-left:6px}
+.sess .st{color:var(--muted);font-size:12px}.sess .st b{color:var(--green2)}
+.sess .grow{flex:1;min-width:0}
+.ibtn{width:36px;height:30px;border-radius:8px;background:#efede4;display:flex;align-items:center;justify-content:center;flex:none}
+.ibtn svg{width:16px;height:16px}
+.cx{width:26px;height:26px;border-radius:50%;background:#c9c6ba;display:flex;align-items:center;justify-content:center;flex:none}
+.cx svg{width:10px;height:10px}
+#strip{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);display:flex;align-items:center;gap:12px;padding:6px 14px;border-radius:22px;white-space:nowrap;font-size:12px}
+.sw{width:38px;height:22px;border-radius:11px;background:var(--acc);position:relative}
+.sw::after{content:"";position:absolute;right:3px;top:3px;width:16px;height:16px;border-radius:50%;background:#fff}
+#sCheck{display:none}
+
+/* ---------- remote desktop / files windows ---------- */
+.win{position:absolute;border-radius:14px;overflow:hidden;box-shadow:0 40px 100px rgba(0,0,0,.6),0 0 0 1px rgba(255,255,255,.16);background:#0f1b2e;transform-origin:50% 50%}
+.wbar{height:44px;display:flex;align-items:center;gap:12px;padding:0 16px;background:rgba(20,22,30,.92);font-size:18px;color:#dfe3ea}
+.wbar .dots{display:flex;gap:8px}.wbar .dots i{width:12px;height:12px;border-radius:50%;background:#555}
+.wbar .dots i:nth-child(1){background:#ff5f57}.wbar .dots i:nth-child(2){background:#febc2e}.wbar .dots i:nth-child(3){background:#28c840}
+.wbar .tag{margin-left:auto;font-size:15px;padding:4px 12px;border-radius:12px;background:rgba(94,158,110,.25);color:#9fe0b0}
+#rdBody{position:absolute;left:0;right:0;top:44px;bottom:0;background:radial-gradient(900px 500px at 70% 30%,#3d7be0 0%,#1c3a78 45%,#0c1730 100%)}
+.dwin{position:absolute;border-radius:10px;background:rgba(245,246,250,.96);box-shadow:0 20px 40px rgba(0,0,0,.35);overflow:hidden}
+.dwin .tb{height:30px;background:#e9ebf1;display:flex;align-items:center;gap:6px;padding:0 10px}
+.dwin .tb i{width:9px;height:9px;border-radius:50%;background:#bbb}
+.code{padding:14px 18px;font-family:Consolas,monospace;font-size:15px;line-height:1.7;color:#334}
+.code span{display:inline-block;height:9px;border-radius:5px;margin-right:8px;vertical-align:middle}
+#taskbar{position:absolute;left:0;right:0;bottom:0;height:46px;background:rgba(18,22,34,.82);display:flex;align-items:center;justify-content:center;gap:14px}
+#taskbar i{width:26px;height:26px;border-radius:7px;background:rgba(255,255,255,.22)}
+#cursor{position:absolute;width:22px;height:22px}
+#fileBody{position:absolute;left:0;right:0;top:44px;bottom:0;background:#f6f6f9;color:#223}
+.frow{display:flex;align-items:center;gap:14px;padding:11px 22px;font-size:18px;border-bottom:1px solid #ececf2}
+.frow .sz{margin-left:auto;color:#889;font-size:15px}
+.fi{width:26px;height:20px;border-radius:4px;background:#f2b84b;flex:none}.fi.f{background:#9db8e8;width:20px;height:26px}
+.pbar{height:6px;border-radius:3px;background:#e1e3ec;margin:0 22px;overflow:hidden}.pbar i{display:block;height:100%;background:var(--acc)}
+
+/* ---------- feature visuals ---------- */
+.node{position:absolute;width:170px;height:170px;border-radius:38px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.1);border:1.5px solid rgba(255,255,255,.28);backdrop-filter:blur(10px);box-shadow:0 30px 80px rgba(0,0,0,.4)}
+.node svg{width:84px;height:84px}
+.nlabel{position:absolute;font-size:26px;font-weight:700;text-align:center;width:260px;color:rgba(255,255,255,.85)}
+.pkt{position:absolute;width:16px;height:16px;border-radius:50%;margin:-8px 0 0 -8px}
+.pill{position:absolute;padding:8px 20px;border-radius:999px;font-size:28px;font-weight:700;white-space:nowrap}
+.bigchip{position:absolute;width:520px;height:96px;border-radius:26px;display:flex;align-items:center;gap:22px;padding:0 30px;font-size:34px;font-weight:700;background:rgba(255,255,255,.08);border:2px solid rgba(255,255,255,.2)}
+.bigchip .tick{width:44px;height:44px;border-radius:50%;border:3px solid rgba(255,255,255,.35);display:flex;align-items:center;justify-content:center;flex:none}
+.bigchip small{display:block;font-size:22px;font-weight:500;color:rgba(255,255,255,.6);margin-top:2px}
+.bigchip.on{background:rgba(224,122,82,.2);border-color:var(--acc2)}
+.bigchip.on .tick{background:var(--acc);border-color:var(--acc)}
+.aprv{position:absolute;width:760px;border-radius:40px;background:#fff;color:var(--ink);padding:44px 48px;box-shadow:0 60px 160px rgba(0,0,0,.6)}
+.aprv h3{font-size:40px;font-weight:800}.aprv p{font-size:24px;color:var(--muted);margin-top:10px}
+.abtn{display:inline-flex;align-items:center;justify-content:center;padding:18px 34px;border-radius:18px;font-size:28px;font-weight:700;background:#efede4;color:var(--ink)}
+.abtn.p{background:var(--acc);color:#fff}
+.hex{font-family:Consolas,monospace;font-size:28px;line-height:1.45;color:rgba(255,255,255,.55);letter-spacing:2px;overflow:hidden}
+.hex b{color:var(--acc2)}
+.stat{position:absolute;width:390px;height:430px;border-radius:44px;background:rgba(255,255,255,.07);border:1.5px solid rgba(255,255,255,.18);padding:40px;backdrop-filter:blur(10px)}
+.stat .num{font-size:150px;font-weight:800;letter-spacing:-.04em;line-height:1;background:linear-gradient(135deg,#fff,#f6c3ab);-webkit-background-clip:text;background-clip:text;color:transparent}
+.stat .unit{font-size:44px;font-weight:700;color:var(--acc2);margin-left:6px}
+.stat .lab{font-size:34px;font-weight:600;margin-top:30px;color:rgba(255,255,255,.82)}
+.stat .sub{font-size:22px;color:rgba(255,255,255,.5);margin-top:8px}
+#wipe{position:absolute;top:-10%;bottom:-10%;width:420px;background:linear-gradient(90deg,transparent,rgba(224,122,82,.95) 40%,rgba(255,255,255,.95) 50%,rgba(224,122,82,.95) 60%,transparent);transform:skewX(-14deg);opacity:0;mix-blend-mode:screen}
+
+/* ---------- player chrome ---------- */
+#ui{position:fixed;left:0;right:0;bottom:0;padding:14px 22px 18px;display:flex;align-items:center;gap:16px;background:linear-gradient(transparent,rgba(0,0,0,.72));transition:opacity .3s;font-size:14px;color:#fff;z-index:5}
+#ui.hide{opacity:0;pointer-events:none}
+#ui button{background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.22);border-radius:10px;padding:8px 14px;font:inherit;cursor:pointer}
+#ui button:hover{background:rgba(255,255,255,.24)}
+#seek{flex:1;accent-color:#e07a52}
+#time{min-width:110px;font-variant-numeric:tabular-nums;color:#ddd}
+#start{position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:26px;background:rgba(10,8,7,.88);backdrop-filter:blur(12px)}
+#start h1{font-size:54px;font-weight:800}#start p{color:#bbb;font-size:18px}
+#start .btns{display:flex;gap:16px}
+#start button{font:inherit;font-size:20px;font-weight:700;padding:16px 34px;border-radius:16px;border:0;cursor:pointer;color:#fff;background:#c6613f}
+#start button.g{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.25)}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute"><defs>
+  <linearGradient id="gAcc" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#e07a52"/><stop offset="1" stop-color="#b9532f"/></linearGradient>
+</defs></svg>
+
+<div id="viewport"><div id="stage"><div id="world">
+  <div id="bg"></div><div id="grid"></div>
+  <div class="orb" id="o1"></div><div class="orb" id="o2"></div><div class="orb" id="o3"></div>
+
+  <!-- 1 intro -->
+  <section class="scene" id="s1">
+    <div class="abs logo" id="introLogo" style="left:760px;top:250px;width:400px;height:400px"></div>
+    <div class="abs big center" id="wordmark" style="top:690px;font-size:150px;height:170px"></div>
+    <div class="abs center" id="tagline" style="top:870px;font-size:46px;font-weight:500;color:rgba(255,255,255,.75);letter-spacing:.2em">远程，本该如此简单。</div>
+  </section>
+
+  <!-- 2 pain -->
+  <section class="scene" id="s2">
+    <div id="painWords"></div>
+    <div class="abs" id="ring" style="left:810px;top:390px;width:300px;height:300px;border-radius:50%;border:6px solid var(--acc2);opacity:0"></div>
+  </section>
+
+  <!-- 3 demo -->
+  <section class="scene" id="s3">
+    <div id="caps" class="abs" style="left:1010px;top:110px;width:820px;height:200px"></div>
+    <div id="appWrap" class="abs" style="left:250px;top:55px;width:540px;height:880px"></div>
+    <div class="win" id="rd" style="left:1000px;top:330px;width:820px;height:520px">
+      <div class="wbar"><div class="dots"><i></i><i></i><i></i></div><span>SY0812A · 远程桌面（FRD）</span><span class="tag">● 加密直连</span></div>
+      <div id="rdBody">
+        <div class="dwin" style="left:60px;top:40px;width:470px;height:300px"><div class="tb"><i></i><i></i><i></i></div><div class="code" id="codeLines"></div></div>
+        <div class="dwin" style="left:420px;top:170px;width:330px;height:200px;background:rgba(255,255,255,.92)"><div class="tb"><i></i><i></i><i></i></div><div class="code"><span style="width:90px;background:#c6613f"></span><span style="width:60px;background:#9db8e8"></span><br><span style="width:150px;background:#ccd"></span><br><span style="width:120px;background:#ccd"></span></div></div>
+        <div id="taskbar"><i></i><i></i><i style="background:#c6613f"></i><i></i><i></i></div>
+        <svg id="cursor" viewBox="0 0 24 24"><path d="M5 3 L5 19 L9.5 15 L12.5 21.5 L15 20.5 L12 14 L18 14 Z" fill="#fff" stroke="#111" stroke-width="1.5" stroke-linejoin="round"/></svg>
+      </div>
+    </div>
+    <div class="win" id="fw" style="left:1280px;top:610px;width:560px;height:360px;background:#fff">
+      <div class="wbar" style="background:#e9ebf1;color:#223"><div class="dots"><i></i><i></i><i></i></div><span>\\SY0812A\Documents</span></div>
+      <div id="fileBody">
+        <div class="frow"><span class="fi"></span>项目资料<span class="sz">文件夹</span></div>
+        <div class="frow"><span class="fi f"></span>方案 v3.pdf<span class="sz">4.2 MB</span></div>
+        <div class="frow"><span class="fi f"></span>设计稿.fig<span class="sz">18 MB</span></div>
+        <div class="pbar" style="margin-top:14px"><i id="fprog" style="width:0"></i></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 features -->
+  <section class="scene" id="s4">
+    <div class="abs" id="fhead" style="left:140px;top:300px;width:820px"></div>
+    <div id="f1" class="abs" style="inset:0"></div>
+    <div id="f2" class="abs" style="inset:0"></div>
+    <div id="f3" class="abs" style="inset:0"></div>
+    <div id="f4" class="abs" style="inset:0"></div>
+    <div id="wipe"></div>
+  </section>
+
+  <!-- 5 stats -->
+  <section class="scene" id="s5">
+    <div class="abs center cap-title" id="statTitle" style="top:120px">真正的“直连”，才有这样的手感</div>
+    <div id="stats"></div>
+    <div id="eq" class="abs" style="left:150px;right:150px;bottom:110px;height:150px"></div>
+    <div class="abs center" style="bottom:46px;font-size:20px;color:rgba(255,255,255,.4)">示例数据：实际表现取决于双方网络</div>
+  </section>
+
+  <!-- 6 finale -->
+  <section class="scene" id="s6">
+    <div class="abs logo" id="endLogo" style="left:810px;top:200px;width:300px;height:300px"></div>
+    <div class="abs big center" id="endName" style="top:540px;font-size:170px;height:190px">ArdUi</div>
+    <div class="abs center" id="endSlogan" style="top:745px;font-size:56px;font-weight:600">远程，本该如此<span class="acc">简单</span>。</div>
+    <div class="abs center" id="endPills" style="top:850px;display:flex;justify-content:center;gap:22px"></div>
+    <div class="abs center" id="endCta" style="top:960px;font-size:28px;color:rgba(255,255,255,.55);letter-spacing:.12em">ARDUI · v4.pre9 · WINDOWS</div>
+  </section>
+
+  <div id="vignette"></div><div id="grain"></div><div id="flash"></div>
+  <div id="ticker"><div id="tickerFill"></div></div>
+</div></div></div>
+
+<div id="start">
+  <h1>ArdUi · 宣传片</h1>
+  <p>40 秒 · 120 BPM · 画面严格卡在鼓点上（空格暂停，← → 逐拍，F 全屏）</p>
+  <div class="btns"><button id="goAudio">▶ 播放（带音乐）</button><button class="g" id="goSilent">静音预览</button></div>
+</div>
+<div id="ui" class="hide">
+  <button id="pp">暂停</button>
+  <input id="seek" type="range" min="0" max="1000" value="0">
+  <span id="time">0:00 / 0:40</span>
+  <button id="mute">静音</button>
+  <button id="fs">全屏</button>
+</div>
+
+<script>
+/* =============================================================================================
+   ArdUi promo — everything is a pure function of the timeline position t (seconds), so a frame
+   can be rendered at any instant: window.renderAt(t). The beat grid is 120 BPM, 80 beats = 40 s.
+   ============================================================================================= */
+const BPM = 120, BEAT = 60 / BPM, BEATS = 80, TOTAL = BEATS * BEAT;
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const E = {
+  lin: t => t, out: t => 1 - Math.pow(1 - t, 3), in: t => t * t * t,
+  io: t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
+  back: t => { const c = 1.70158, c3 = c + 1; return 1 + c3 * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); },
+  expo: t => t >= 1 ? 1 : 1 - Math.pow(2, -10 * t),
+};
+const P = (beat, b0, b1, ease = E.out) => ease(clamp((beat - b0) / (b1 - b0)));
+const $ = s => document.querySelector(s);
+const el = (tag, cls, html, css) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; if (css) e.style.cssText = css; return e; };
+const X = (e, x = 0, y = 0, s = 1, r = 0) => { e.style.transform = `translate(${x}px,${y}px) scale(${s}) rotate(${r}deg)`; };
+const OP = (e, o) => { e.style.opacity = o; };
+const show = (e, on) => { e.style.display = on ? 'block' : 'none'; };
+
+/* ---------- reusable SVG ---------- */
+function arcPath(cx, cy, r, a0, a1) {
+  const p = a => [cx + r * Math.cos(a * Math.PI / 180), cy + r * Math.sin(a * Math.PI / 180)];
+  const [x0, y0] = p(a0), [x1, y1] = p(a1);
+  return `M${x0.toFixed(2)},${y0.toFixed(2)} A${r},${r} 0 0 1 ${x1.toFixed(2)},${y1.toFixed(2)}`;
+}
+function logoSVG(id) {
+  return `<svg viewBox="0 0 100 100" width="100%" height="100%">
+    <rect id="${id}T" x="0" y="0" width="100" height="100" rx="23" fill="url(#gAcc)"/>
+    <path id="${id}C" d="M30,24 L30,74 L43,62 L52,82 L61,78 L52,58 L70,58 Z" fill="#fff" stroke="#fff" stroke-width="3" stroke-linejoin="round"/>
+    <path id="${id}A1" d="${arcPath(34, 28, 20, -82, -20)}" fill="none" stroke="#fff" stroke-width="5.5" stroke-linecap="round" pathLength="100" stroke-dasharray="100" stroke-dashoffset="0"/>
+    <path id="${id}A2" d="${arcPath(34, 28, 27, -82, -20)}" fill="none" stroke="#fff" stroke-width="5.5" stroke-linecap="round" pathLength="100" stroke-dasharray="100" stroke-dashoffset="0"/>
+  </svg>`;
+}
+const ICON = {
+  monitor: `<svg viewBox="0 0 24 24" fill="none" stroke="#1f1e1d" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3,5 L21,5 L21,16 L3,16 Z M8,20 L16,20 M12,16 L12,20"/></svg>`,
+  folder: `<svg viewBox="0 0 24 24" fill="none" stroke="#1f1e1d" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3,7 L3,18 L21,18 L21,9 L12,9 L10,6 L3,6 Z"/></svg>`,
+  cross: `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><path d="M5,5 L19,19 M19,5 L5,19"/></svg>`,
+  arrow: `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5,12 L19,12 M13,6 L19,12 L13,18"/></svg>`,
+  chev: `<svg viewBox="0 0 24 24" fill="none" stroke="#7a786f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6,9 L12,15 L18,9"/></svg>`,
+  sliders: `<svg viewBox="0 0 24 24" fill="none" stroke="#7a786f" stroke-width="1.8" stroke-linecap="round"><path d="M4,6 L12,6 M16,6 a2,2 0 1 1 -4,0 a2,2 0 1 1 4,0 M16,6 L20,6 M4,12 L6,12 M10,12 a2,2 0 1 1 -4,0 a2,2 0 1 1 4,0 M10,12 L20,12 M4,18 L13,18 M17,18 a2,2 0 1 1 -4,0 a2,2 0 1 1 4,0 M17,18 L20,18"/></svg>`,
+  close: `<svg viewBox="0 0 24 24" fill="none" stroke="#7a786f" stroke-width="2" stroke-linecap="round"><path d="M5,5 L19,19 M19,5 L5,19"/></svg>`,
+  share: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#c6613f" stroke-width="1.8" stroke-linecap="round"><path d="M21,5 a3,3 0 1 1 -6,0 a3,3 0 1 1 6,0 M9,12 a3,3 0 1 1 -6,0 a3,3 0 1 1 6,0 M21,19 a3,3 0 1 1 -6,0 a3,3 0 1 1 6,0 M8.6,13.5 l6.8,4 M15.4,6.5 l-6.8,4"/></svg>`,
+  laptop: `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4,6 L20,6 L20,16 L4,16 Z M2,19 L22,19"/></svg>`,
+  server: `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"><path d="M4,4 L20,4 L20,10 L4,10 Z M4,14 L20,14 L20,20 L4,20 Z M7,7 L7.01,7 M7,17 L7.01,17"/></svg>`,
+  tick: `<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5,12.5 L10,17 L19,7.5"/></svg>`,
+  lock: `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6,11 L18,11 L18,20 L6,20 Z M8.5,11 L8.5,8 a3.5,3.5 0 0 1 7,0 L15.5,11"/></svg>`,
+};
+
+/* ---------- build the scenes ---------- */
+const S = id => document.getElementById(id);
+const s1 = S('s1'), s2 = S('s2'), s3 = S('s3'), s4 = S('s4'), s5 = S('s5'), s6 = S('s6');
+S('introLogo').innerHTML = logoSVG('i'); S('endLogo').innerHTML = logoSVG('e');
+// wordmark letters
+const letters = [...'ArdUi'].map(c => { const e = el('span', null, c, 'display:inline-block;will-change:transform'); S('wordmark').appendChild(e); return e; });
+
+// pain words
+const painList = [['端口映射？', '#f4a58a'], ['注册账号？', '#f6c36a'], ['公网 IP？', '#9ec0f0'], ['装 VPN？', '#c9a6f0']];
+const painEls = painList.map(([w, c]) => {
+  const wrap = el('div', 'abs center big', `<span style="position:relative;display:inline-block">${w}<i class="strike" style="position:absolute;left:-6%;right:-6%;top:54%;height:12px;background:#ff5a4d;border-radius:6px;transform-origin:0 50%;transform:scaleX(0)"></i></span>`, `top:420px;font-size:200px;color:${c};height:230px`);
+  S('painWords').appendChild(wrap); return wrap;
+});
+const none = el('div', 'abs center big', '全都不用。', 'top:400px;font-size:260px;height:300px;color:#fff'); S('painWords').appendChild(none);
+const oneId = el('div', 'abs center big', '一个 <span class="acc">ID</span>，就够了。', 'top:400px;font-size:200px;height:240px'); S('painWords').appendChild(oneId);
+
+// the app window
+const appHTML = `
+<div id="app">
+  <div class="aorb a1"></div><div class="aorb a2"></div><div class="aorb a3"></div>
+  <div id="scrimA"></div>
+  <div id="aTitle">
+    <div id="aCapsule" class="glass"><div class="logo" style="width:24px;height:24px">${logoSVG('t')}</div><span id="aCode">A7B2K9</span><span style="width:1px;height:16px;background:rgba(60,40,20,.25)"></span><span class="adot"></span><span style="color:#7a786f">在线</span></div>
+    <div id="aDiscs"><div class="disc glass">${ICON.sliders}</div><div class="disc glass">${ICON.close}</div></div>
+  </div>
+  <div id="aPage">
+    <div id="card" class="glass">
+      <div id="cTitle">连接到设备</div>
+      <div id="field"><div id="fieldText"></div><div id="chev">${ICON.chev}</div><div id="goRing"></div><div id="go">${ICON.arrow}</div><div id="prog"></div></div>
+      <div id="recents"><hr><div class="lbl">最近</div><div class="row">
+        <div class="rc"><div class="av">办</div>办公电脑</div><div class="rc"><div class="av">S</div>SY0812A</div><div class="rc"><div class="av">家</div>家里 NAS</div><div class="rc"><div class="av off">展</div>展厅内1</div></div></div>
+    </div>
+    <div id="lower">
+      <div class="sess" id="ph"><div class="ic" id="phIcon"></div><div class="grow"><div class="nm" id="phName">SY0812A · ZWIINS</div><div class="st" id="phSt">正在查找设备…</div></div><div class="cx" id="phX">${ICON.cross}</div></div>
+      <div class="sess" id="live"><div class="adot" style="width:11px;height:11px;box-shadow:0 0 0 3px #cfe8d6;background:#2f7d4f"></div><div class="grow"><div class="nm">SY0812A<i>ZWIINS</i></div><div class="st"><b>IPv6</b> · 18 Mbps · 9 ms</div></div><div class="ibtn" id="bFrd">${ICON.monitor}</div><div class="ibtn" id="bFile">${ICON.folder}</div><div class="cx">${ICON.cross}</div></div>
+    </div>
+    <div id="strip" class="glass"><span style="color:#7a786f">本机</span><div class="sw"></div><span>允许被控</span><span style="width:1px;height:18px;background:rgba(60,40,20,.25)"></span><span style="color:#c6613f;font-weight:700;display:flex;gap:6px;align-items:center">${ICON.share}邀请</span></div>
+  </div>
+</div>`;
+S('appWrap').innerHTML = appHTML;
+const app = S('app');
+// the placeholder icon (animated logo → check)
+S('phIcon').innerHTML = `<div class="logo" id="phLogo" style="width:30px;height:30px">${logoSVG('p')}</div>
+  <div id="phCheck" style="display:none;width:30px;height:30px;border-radius:50%;background:#2f7d4f;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path id="phTick" d="M5,12.5 L10,17 L19,7.5" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100"/></svg></div>`;
+const codeLines = S('codeLines');
+[[120, '#c6613f'], [200, '#9db8e8'], [90, '#8fcf9d'], [260, '#ccd'], [180, '#ccd'], [230, '#ccd'], [140, '#f2b84b'], [210, '#ccd']].forEach(([w, c], i) =>
+  codeLines.appendChild(el('div', null, `<span style="width:${w}px;background:${c}"></span><span style="width:${40 + (i * 37) % 90}px;background:#dde"></span>`)));
+
+// captions of the demo
+const capData = [[16, '输入 6 位设备 ID', 'A–Z、0–9，没有别的'], [21, '一次点击，自动核对身份', '指纹确认，防冒充'], [25, '已连接 · 直连优先', 'IPv6 / IPv4 自动选路'], [28, 'FRD 远程桌面，一键直达', '为远程而生的画面通道'], [31.5, '文件共享，同样一键', '像本地磁盘一样使用']];
+const capEls = capData.map(([b, t, s]) => { const e = el('div', 'abs', `<div class="cap-title">${t}</div><div class="cap-sub">${s}</div>`, 'left:0;top:0;width:820px'); S('caps').appendChild(e); return e; });
+
+// feature panels
+const fhead = S('fhead');
+const featData = [[34, '直连优先，<br><span class="acc">中继兜底</span>', 'IPv6 / IPv4 自动选路，链路中断时无缝切到 Relay'],
+                  [39, '按设备授权，<br><span class="acc">默认最小</span>', '每台设备单独决定：FRD、RDP、文件共享'],
+                  [44, '仅接受<br><span class="acc">这一次</span>', '不留授权记录，断开即失效'],
+                  [49, '端到端加密，<br><span class="acc">指纹核对</span>', '首次连接核对 EndpointId，再无中间人']];
+const featEls = featData.map(([b, t, s]) => { const e = el('div', 'abs', `<div class="big" style="font-size:104px">${t}</div><div class="cap-sub" style="font-size:34px;margin-top:30px;max-width:740px;line-height:1.35">${s}</div>`, 'left:0;top:0;width:900px'); fhead.appendChild(e); return e; });
+// f1: network path
+const f1 = S('f1');
+f1.innerHTML = `
+  <svg class="abs" style="left:0;top:0" width="1920" height="1080" viewBox="0 0 1920 1080">
+    <path id="pathDirect" d="M1085,620 L1625,620" stroke="#5e9e6e" stroke-width="7" fill="none" stroke-linecap="round" stroke-dasharray="14 16"/>
+    <path id="pathRelay" d="M1085,620 Q1355,260 1625,620" stroke="#d79a3b" stroke-width="7" fill="none" stroke-linecap="round" stroke-dasharray="14 16"/>
+  </svg>
+  <div class="node" style="left:930px;top:540px;width:170px;height:170px;margin:0" id="nA">${ICON.laptop}</div>
+  <div class="node" style="left:1610px;top:540px;margin:0" id="nB">${ICON.server}</div>
+  <div class="node" id="nR" style="left:1270px;top:240px;width:130px;height:130px;border-radius:30px;border-color:rgba(215,154,59,.7);background:rgba(215,154,59,.15)"><svg viewBox="0 0 24 24" style="width:64px;height:64px" fill="none" stroke="#d79a3b" stroke-width="1.6" stroke-linecap="round"><path d="M12,3 L12,9 M12,15 L12,21 M3,12 L9,12 M15,12 L21,12 M12,12 L12,12.01"/><circle cx="12" cy="12" r="3.5"/></svg></div>
+  <div class="nlabel" style="left:885px;top:730px">你的电脑</div>
+  <div class="nlabel" style="left:1565px;top:730px">对方电脑</div>
+  <div class="nlabel" id="rLbl" style="left:1235px;top:380px;color:#d79a3b">Relay 兜底</div>
+  <div class="pill" id="pillPath" style="left:1250px;top:660px;background:rgba(94,158,110,.22);color:#9fe0b0;border:1.5px solid rgba(94,158,110,.6)">IPv6 · 9 ms</div>
+  <div id="pkts"></div>`;
+const pkts = Array.from({ length: 6 }, () => { const e = el('div', 'pkt'); S('pkts').appendChild(e); return e; });
+// f2: permissions
+const f2 = S('f2');
+const permDefs = [['远程桌面（FRD）', '推荐 · 加密、可调画质'], ['RDP 远程桌面', 'Windows 原生 · 3389'], ['文件共享', 'SMB · 445']];
+f2.innerHTML = permDefs.map(([t, s], i) => `<div class="bigchip" id="pc${i}" style="left:1100px;top:${300 + i * 140}px"><div class="tick">${ICON.tick}</div><div>${t}<small>${s}</small></div></div>`).join('') +
+  `<div class="pill" id="permNote" style="left:1100px;top:760px;background:rgba(255,255,255,.1);color:rgba(255,255,255,.8)">新授权默认只开 FRD</div>`;
+// f3: approval
+const f3 = S('f3');
+f3.innerHTML = `<div class="aprv" id="aprv" style="left:1010px;top:250px">
+  <h3>Q8X2ND 请求获得本机控制权</h3><p>请与对方 ArdUi 中的完整 EndpointId 逐字核对。</p>
+  <div style="margin-top:22px;padding:14px 18px;border-radius:16px;background:#f6f5f0;font-family:Consolas,monospace;font-size:20px;color:#444;word-break:break-all">5889f4c2e3c89af503a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f</div>
+  <p style="margin-top:22px;font-weight:700;color:#555">允许对方使用：<span style="color:var(--acc)">● FRD</span> <span style="color:#aaa">○ RDP ○ 文件</span></p>
+  <div style="display:flex;gap:16px;margin-top:30px"><span class="abtn p" id="abOnce">仅接受这一次</span><span class="abtn">接受并信任</span><span class="abtn">拒绝</span></div></div>
+  <div class="abs" id="tempSess" style="left:1100px;top:420px;width:640px;padding:36px 44px;border-radius:40px;background:rgba(255,255,255,.1);border:2px solid rgba(94,158,110,.7)">
+    <div style="font-size:40px;font-weight:800">Q8X2ND · 仅此一次</div><div style="font-size:28px;color:rgba(255,255,255,.7);margin-top:10px">FRD · 会话结束后自动失效</div>
+    <div style="margin-top:30px;height:12px;border-radius:6px;background:rgba(255,255,255,.14);overflow:hidden"><i id="tempBar" style="display:block;height:100%;width:100%;background:linear-gradient(90deg,var(--green),var(--amber))"></i></div></div>`;
+// f4: encryption
+const f4 = S('f4');
+f4.innerHTML = `<div class="abs" style="left:1060px;top:280px;width:760px">
+  <div style="display:flex;align-items:center;gap:30px"><div style="width:150px;height:150px;border-radius:40px;background:rgba(255,255,255,.1);border:2px solid rgba(255,255,255,.25);display:flex;align-items:center;justify-content:center" id="lockBox"><div style="width:84px;height:84px">${ICON.lock}</div></div>
+  <div><div style="font-size:30px;color:rgba(255,255,255,.6)">EndpointId</div><div style="font-size:44px;font-weight:800" id="fpState">核对中…</div></div></div>
+  <div class="hex" id="hex" style="margin-top:44px;height:170px"></div>
+  <div style="display:flex;gap:16px;margin-top:40px;flex-wrap:wrap" id="fpChips"></div></div>`;
+['Ed25519 身份', '端到端加密', '一次性连接密码'].forEach(t => S('fpChips').appendChild(el('span', 'chip', t)));
+
+// stats
+const statDefs = [['9', 'ms', '往返延迟', '示例：IPv6 直连', 54], ['166', 'Mbps', '吞吐', '示例：局域网直连', 56], ['2', '栈', 'IPv4 + IPv6', '自动选择更优路径', 58], ['0', '配置', '端口映射 / 账号', '输入设备 ID 即可', 60]];
+const statEls = statDefs.map(([n, u, l, sub, b], i) => {
+  const e = el('div', 'stat', `<div style="display:flex;align-items:baseline"><span class="num">0</span><span class="unit">${u}</span></div><div class="lab">${l}</div><div class="sub">${sub}</div>`, `left:${105 + i * 440}px;top:260px`);
+  S('stats').appendChild(e); return e;
+});
+const eqBars = Array.from({ length: 64 }, (_, i) => { const e = el('i', null, '', `position:absolute;bottom:0;left:${i * 1.5625}%;width:1%;border-radius:4px;background:linear-gradient(0deg,#c6613f,#f2b84b)`); S('eq').appendChild(e); return e; });
+
+// finale
+['P2P 直连', '端到端加密', '按设备授权'].forEach(t => S('endPills').appendChild(el('span', 'chip', t, 'font-size:30px;padding:12px 28px')));
+
+/* ---------- per-scene animation ---------- */
+const hits = [0, 8, 16, 34, 54, 66, 72];
+function global(beat, t) {
+  const ph = beat % 1, k = Math.exp(-ph * 5.5) * (beat >= 8 ? 1 : .45);
+  const kick = beat >= 0 && beat < BEATS - 2 ? k : 0;
+  X(S('o1'), Math.sin(t * .3) * 60, Math.cos(t * .27) * 40, 1 + kick * .06);
+  X(S('o2'), Math.cos(t * .22) * 70, Math.sin(t * .31) * 50, 1 + kick * .05);
+  X(S('o3'), Math.sin(t * .2 + 2) * 80, Math.cos(t * .25) * 60, 1 + kick * .05);
+  // hue shift per section to give each part its own colour
+  const sec = beat < 16 ? 0 : beat < 34 ? 1 : beat < 54 ? 2 : beat < 66 ? 3 : 4;
+  const tint = ['#c6613f', '#c6613f', '#4d79b8', '#d79a3b', '#c6613f'][sec];
+  S('o1').style.background = tint;
+  let fl = 0; for (const h of hits) if (beat >= h) fl = Math.max(fl, Math.exp(-(beat - h) * 9) * (h === 16 || h === 72 ? .85 : .5));
+  OP(S('flash'), fl);
+  X(S('world'), 0, 0, 1 + (beat >= 16 && beat < 74 ? kick * .006 : 0));
+  S('tickerFill').style.width = (beat / BEATS * 100) + '%';
+  // fade in/out of the whole film
+  const fade = Math.min(P(beat, 0, .3, E.lin), 1 - P(beat, 78, 80, E.lin));
+  S('stage').style.filter = `brightness(${fade})`;
+}
+
+function scene1(beat) {
+  const on = beat < 8.2; show(s1, on); if (!on) return;
+  const tile = S('iT'), cur = S('iC'), a1 = S('iA1'), a2 = S('iA2');
+  const pop = P(beat, 0, 1.1, E.back);
+  X(S('introLogo'), 0, 0, .25 + .75 * pop, (1 - pop) * -25); OP(S('introLogo'), clamp(beat / .3));
+  OP(cur, P(beat, 1.5, 2.2)); cur.style.transform = `translate(${(1 - P(beat, 1.5, 2.2, E.back)) * -14}px,${(1 - P(beat, 1.5, 2.2, E.back)) * 14}px)`;
+  a1.style.strokeDashoffset = 100 - 100 * P(beat, 3, 3.45); a2.style.strokeDashoffset = 100 - 100 * P(beat, 3.5, 3.95);
+  letters.forEach((l, i) => { const p = P(beat, 4 + i * .5, 4.35 + i * .5, E.back); OP(l, p); X(l, 0, (1 - p) * 60, 1); l.style.filter = `blur(${(1 - p) * 14}px)`; });
+  OP(S('tagline'), P(beat, 6.2, 7)); X(S('tagline'), 0, (1 - P(beat, 6.2, 7)) * 20);
+  // pulse the logo on every beat
+  const k = Math.exp(-(beat % 1) * 6); X(S('introLogo'), 0, 0, (.25 + .75 * pop) * (1 + k * .025) * (1 + P(beat, 7.4, 8.2, E.in) * .35), (1 - pop) * -25);
+  OP(s1, 1 - P(beat, 7.5, 8.1, E.in));
+}
+
+function scene2(beat) {
+  const on = beat >= 7.9 && beat < 16.2; show(s2, on); if (!on) return; OP(s2, 1);
+  painEls.forEach((e, i) => {
+    const b0 = 8 + i, ap = P(beat, b0, b0 + .22, E.back), lv = P(beat, b0 + 1, b0 + 1.2, E.in);
+    const vis = beat >= b0 && beat < b0 + 1.25;
+    show(e, vis); OP(e, ap * (1 - lv));
+    const shake = beat >= b0 && beat < b0 + .25 ? Math.sin(beat * 90) * (1 - (beat - b0) / .25) * 10 : 0;
+    X(e, shake, (1 - ap) * 30 - lv * 80, 1.5 - .5 * ap);
+    const st = e.querySelector('.strike'); st.style.transform = `scaleX(${P(beat, b0 + .45, b0 + .72)})`;
+  });
+  const nb = 12, np = P(beat, nb, nb + .2, E.back);
+  show(none, beat >= nb && beat < 14.05); OP(none, np * (1 - P(beat, 13.85, 14.05, E.lin))); X(none, 0, 0, 1.6 - .6 * np);
+  OP(S('ring'), beat >= nb && beat < nb + 1 ? (1 - (beat - nb)) * .8 : 0); const rs = 1 + (beat - nb) * 6; X(S('ring'), 0, 0, rs);
+  const ob = 14, op = P(beat, ob, ob + .25, E.back);
+  show(oneId, beat >= ob); OP(oneId, op * (1 - P(beat, 15.6, 16.1, E.lin))); X(oneId, 0, (1 - op) * 40, 1.3 - .3 * op);
+  // riser: slow zoom into the last words
+  if (beat >= 14) X(S('painWords'), 0, 0, 1 + (beat - 14) * .025);
+  else X(S('painWords'), 0, 0, 1);
+}
+
+function scene3(beat) {
+  const on = beat >= 15.9 && beat < 34.3; show(s3, on); if (!on) return;
+  const out = P(beat, 33.4, 34.2, E.in); OP(s3, 1 - out); S('s3').style.transform = `scale(${1 + out * .12})`;
+  // captions
+  capEls.forEach((e, i) => {
+    const b0 = capData[i][0], b1 = i + 1 < capData.length ? capData[i + 1][0] : 34;
+    const ap = P(beat, b0, b0 + .3, E.out), lv = P(beat, b1 - .1, b1 + .1, E.in);
+    show(e, beat >= b0 - .01 && beat < b1 + .2); OP(e, ap * (1 - lv)); X(e, (1 - ap) * 60 - lv * 40, 0);
+  });
+  // the app window
+  const enter = P(beat, 16, 17, E.out);
+  X(S('appWrap'), 0, (1 - enter) * 160, 1); OP(S('appWrap'), clamp(enter * 1.5));
+  app.style.transform = `scale(1.35)`;
+  // typing
+  const chars = [...'A7B2K9'], typed = clamp(Math.floor((beat - 17) / .5) + 1, 0, 6);
+  const focus = P(beat, 16.6, 17, E.lin) * (1 - P(beat, 21, 21.3, E.lin));
+  S('scrimA').style.opacity = .2 * focus; S('aTitle').style.opacity = 1 - .45 * focus; S('strip').style.opacity = 1 - .45 * focus;
+  const ft = S('fieldText'); ft.innerHTML = typed === 0 ? 'ABC123' : chars.slice(0, typed).map(c => `<b>${c}</b>`).join('') + (typed < 6 ? '<span style="opacity:' + (Math.floor(beat * 4) % 2) + '">|</span>' : '');
+  if (typed === 0) ft.style.color = '#bdbaae'; else ft.style.color = '#7a786f';
+  S('field').style.boxShadow = focus > .5 ? '0 0 0 4px rgba(198,97,63,.22)' : 'none'; S('field').style.borderColor = focus > .5 ? '#c6613f' : 'rgba(255,255,255,.5)';
+  S('prog').style.width = (typed / 6 * 300) + 'px';
+  // the button: asleep → armed (ring) → pressed → spinner
+  const armed = P(beat, 19.5, 20, E.lin), press = beat >= 21 && beat < 21.25 ? 1 - Math.abs((beat - 21.125) / .125) : 0;
+  S('go').style.opacity = lerp(.5, 1, armed); S('go').style.transform = `scale(${1 - press * .12})`;
+  const ringP = P(beat, 20, 20.9, E.out); S('goRing').style.opacity = beat >= 20 && beat < 21 ? .65 * (1 - ringP) : 0; S('goRing').style.transform = `scale(${1 + ringP * .65})`;
+  // card compacts while connecting
+  const cp = P(beat, 21.15, 22.1, E.io);
+  S('cTitle').style.height = lerp(24, 0, cp) + 'px'; OP(S('cTitle'), 1 - cp);
+  S('recents').style.height = lerp(120, 0, cp) + 'px'; OP(S('recents'), 1 - cp);
+  S('field').style.marginTop = lerp(14, 0, cp) + 'px'; S('card').style.padding = `${lerp(16, 8, cp)}px 18px ${lerp(16, 10, cp)}px`;
+  S('card').style.top = lerp(150, 4, cp) + 'px'; S('card').style.transform = `scale(${1 + focus * .012})`;
+  S('lower').style.top = lerp(380, 100, cp) + 'px'; OP(S('lower'), 1);
+  // placeholder card → live card
+  const phIn = P(beat, 21.5, 22.0, E.back), phOut = P(beat, 26, 26.35, E.in);
+  const ph = S('ph'); show(ph, beat >= 21.5 && beat < 26.4); ph.style.opacity = phIn * (1 - phOut); X(ph, 0, (1 - phIn) * 40 - phOut * 8);
+  const stages = ['正在查找设备…', '正在核对设备身份…', '正在等待对方响应…', '正在建立加密连接…'];
+  const si = clamp(Math.floor(beat - 22.5 + 1), 0, 3); S('phSt').textContent = beat < 25 ? stages[clamp(Math.floor(beat - 21.5), 0, 3)] : '已连接';
+  const done = beat >= 25;
+  S('phLogo').style.display = done ? 'none' : 'block'; S('phCheck').style.display = done ? 'flex' : 'none';
+  S('phTick').style.strokeDashoffset = 100 - 100 * P(beat, 25, 25.7);
+  S('phX').style.display = done ? 'none' : 'flex';
+  const live = S('live'); show(live, beat >= 26); live.style.display = beat >= 26 ? 'flex' : 'none';
+  const lp = P(beat, 26, 26.5, E.back); live.style.opacity = clamp(lp); X(live, 0, (1 - lp) * 22);
+  // hover & click on FRD, then files
+  const hov = (b, a, z) => beat >= a && beat < z ? P(beat, a, a + .25) : 0;
+  const frdLift = hov(0, 28, 29), fileLift = hov(0, 31, 32);
+  S('bFrd').style.transform = `translateY(${-3 * frdLift}px) scale(${beat >= 28.6 && beat < 28.85 ? .9 : 1})`; S('bFrd').style.background = frdLift ? '#fbe4d8' : '#efede4';
+  S('bFile').style.transform = `translateY(${-3 * fileLift}px) scale(${beat >= 31.6 && beat < 31.85 ? .9 : 1})`; S('bFile').style.background = fileLift ? '#fbe4d8' : '#efede4';
+  // remote desktop & files windows
+  const rd = S('rd'), rp = P(beat, 29, 29.8, E.back);
+  show(rd, beat >= 28.9); rd.style.opacity = clamp(rp * 1.4); X(rd, (1 - rp) * -260, (1 - rp) * 40, .8 + .2 * rp, (1 - rp) * -5);
+  const cx = lerp(200, 560, P(beat, 29.8, 31.2, E.io)), cy = lerp(120, 250, P(beat, 29.8, 31.2, E.io));
+  const cur = S('cursor'); cur.style.left = cx + 'px'; cur.style.top = cy + 'px';
+  codeLines.style.clipPath = `inset(0 0 ${100 - 100 * P(beat, 29.2, 31.5, E.lin)}% 0)`;
+  const fw = S('fw'), fp = P(beat, 31.5, 32.3, E.back);
+  show(fw, beat >= 31.4); fw.style.opacity = clamp(fp * 1.4); X(fw, (1 - fp) * 220, (1 - fp) * 60, .8 + .2 * fp, (1 - fp) * 5);
+  S('fprog').style.width = (100 * P(beat, 32.3, 33.6, E.io)) + '%';
+}
+
+function scene4(beat) {
+  const on = beat >= 33.9 && beat < 54.3; show(s4, on); if (!on) return;
+  OP(s4, P(beat, 34, 34.1, E.lin) * (1 - P(beat, 53.7, 54.2, E.in)));
+  // wipes on the section changes
+  let wp = -1; for (const b of [34, 39, 44, 49]) if (beat >= b - .15 && beat < b + .35) wp = (beat - (b - .15)) / .5;
+  S('wipe').style.opacity = wp >= 0 ? 1 : 0; if (wp >= 0) S('wipe').style.left = lerp(-500, 1950, E.io(wp)) + 'px';
+  featEls.forEach((e, i) => {
+    const b0 = featData[i][0], b1 = i < 3 ? featData[i + 1][0] : 54;
+    const ap = P(beat, b0 + .05, b0 + .4, E.out), lv = P(beat, b1 - .05, b1 + .15, E.in);
+    show(e, beat >= b0 && beat < b1 + .2); OP(e, ap * (1 - lv)); X(e, (1 - ap) * -80, 0);
+  });
+  // sections' visuals
+  const secs = [S('f1'), S('f2'), S('f3'), S('f4')];
+  secs.forEach((e, i) => {
+    const b0 = featData[i][0], b1 = i < 3 ? featData[i + 1][0] : 54;
+    const ap = P(beat, b0 + .15, b0 + .55, E.out), lv = P(beat, b1 - .05, b1 + .15, E.in);
+    show(e, beat >= b0 && beat < b1 + .2); OP(e, ap * (1 - lv)); X(e, (1 - ap) * 120, 0);
+  });
+  // f1: packets along the chosen path; the direct line fails at 36.5 and recovers at 38
+  const down = beat >= 36.5 && beat < 38, bp = P(beat, 36.4, 36.7, E.out);
+  const direct = S('pathDirect'), relay = S('pathRelay');
+  direct.style.stroke = down ? '#e0564a' : '#5e9e6e'; direct.style.opacity = down ? .25 + .25 * Math.floor(beat * 6) % 2 : 1;
+  relay.style.opacity = down ? 1 : 0; OP(S('nR'), down ? 1 : .35); OP(S('rLbl'), down ? 1 : .35);
+  S('pillPath').textContent = down ? 'Relay · 38 ms' : 'IPv6 · 9 ms';
+  S('pillPath').style.background = down ? 'rgba(215,154,59,.22)' : 'rgba(94,158,110,.22)'; S('pillPath').style.color = down ? '#f1c470' : '#9fe0b0'; S('pillPath').style.borderColor = down ? 'rgba(215,154,59,.6)' : 'rgba(94,158,110,.6)';
+  pkts.forEach((p, i) => {
+    const u = ((beat * .5 + i / pkts.length) % 1);
+    let x, y;
+    if (down) { x = lerp(1085, 1625, u); const q = u; y = (1 - q) * (1 - q) * 620 + 2 * (1 - q) * q * 260 + q * q * 620; x = (1 - q) * (1 - q) * 1085 + 2 * (1 - q) * q * 1355 + q * q * 1625; }
+    else { x = lerp(1085, 1625, u); y = 620; }
+    p.style.left = x + 'px'; p.style.top = y + 'px'; p.style.background = down ? '#f1c470' : '#9fe0b0'; p.style.boxShadow = `0 0 18px ${down ? '#d79a3b' : '#5e9e6e'}`;
+    OP(p, Math.sin(u * Math.PI));
+  });
+  X(S('nA'), 0, 0, 1 + Math.exp(-(beat % 1) * 6) * .03);
+  // f2: toggles on the beat: FRD on; RDP on at 41; files on at 42; RDP off at 43
+  const on2 = [true, beat >= 41 && beat < 43, beat >= 42 && beat < 44.2];
+  on2.forEach((v, i) => { const c = S('pc' + i); c.classList.toggle('on', v); const pulse = [39.9, 41, 42].includes([39.9, 41, 42][i]) ? 0 : 0; });
+  [[39.4, 0], [41, 1], [42, 2], [43, 1]].forEach(([b, i]) => { const c = S('pc' + i); const k = beat >= b ? Math.exp(-(beat - b) * 9) : 0; c.style.transform = `scale(${1 + k * .05})`; });
+  S('pc2').querySelector('.tick').style.opacity = 1;
+  S('permNote').textContent = beat < 41 ? '新授权默认只开 FRD' : beat < 42 ? '＋ RDP' : beat < 43 ? '＋ 文件共享' : '随时可改 · 立即生效';
+  // f3: approval card → press once → temporary session pill → dissolves
+  const press3 = beat >= 46 && beat < 46.25 ? 1 - Math.abs((beat - 46.125) / .125) : 0;
+  S('abOnce').style.transform = `scale(${1 - press3 * .08})`;
+  const aprv = S('aprv'), swap = P(beat, 46.3, 46.7, E.in);
+  aprv.style.opacity = 1 - swap; X(aprv, 0, -swap * 40, 1 - swap * .1); aprv.style.display = beat < 46.8 ? 'block' : 'none';
+  const ts = S('tempSess'), tp = P(beat, 46.6, 47.1, E.back), tl = P(beat, 48.2, 48.9, E.in);
+  ts.style.display = beat >= 46.55 && beat < 49.1 ? 'block' : 'none'; ts.style.opacity = tp * (1 - tl); X(ts, 0, (1 - tp) * 40, 1 - tl * .15);
+  S('tempBar').style.width = (100 - 100 * P(beat, 47, 48.3, E.lin)) + '%';
+  // f4: hex stream, fingerprint verdict
+  const hex = S('hex'), seed = Math.floor(beat * 8);
+  let h = ''; for (let r = 0; r < 4; r++) { let line = ''; for (let c = 0; c < 12; c++) line += ((seed * 31 + r * 17 + c * 7) * 2654435761 >>> 0).toString(16).slice(-2) + ' '; h += (r === 1 && beat > 51 ? '<b>' + line + '</b>' : line) + '<br>'; }
+  hex.innerHTML = h;
+  S('fpState').textContent = beat < 51 ? '核对中…' : '指纹一致 ✓'; S('fpState').style.color = beat < 51 ? '#fff' : '#9fe0b0';
+  S('lockBox').style.borderColor = beat < 51 ? 'rgba(255,255,255,.25)' : '#5e9e6e'; S('lockBox').style.boxShadow = beat >= 51 ? '0 0 60px rgba(94,158,110,.5)' : 'none';
+  const chips = S('fpChips').children; for (let i = 0; i < 3; i++) { const p = P(beat, 51.5 + i * .5, 51.9 + i * .5, E.back); OP(chips[i], p); X(chips[i], 0, (1 - p) * 30); }
+}
+
+function scene5(beat) {
+  const on = beat >= 53.8 && beat < 66.3; show(s5, on); if (!on) return;
+  OP(s5, P(beat, 54, 54.2, E.lin) * (1 - P(beat, 65.5, 66.1, E.in)));
+  OP(S('statTitle'), P(beat, 54, 54.5)); X(S('statTitle'), 0, (1 - P(beat, 54, 54.5)) * -30);
+  statEls.forEach((e, i) => {
+    const b0 = statDefs[i][4], ap = P(beat, b0, b0 + .3, E.back);
+    OP(e, ap); X(e, 0, (1 - ap) * 120, .9 + .1 * ap, (1 - ap) * (i % 2 ? 4 : -4));
+    const target = +statDefs[i][0], cnt = Math.round(target * P(beat, b0 + .1, b0 + 1.1, E.out));
+    e.querySelector('.num').textContent = cnt;
+    const k = beat >= b0 ? Math.exp(-(beat - b0) * 8) : 0; e.style.boxShadow = `0 0 ${60 * k}px rgba(224,122,82,${.5 * k})`;
+  });
+  // beat-reactive bars
+  const ph = beat % 1, kk = Math.exp(-ph * 4);
+  eqBars.forEach((b, i) => { const v = (Math.sin(i * .5 + beat * 3) * .5 + .5) * .5 + (Math.sin(i * .21 - beat * 1.7) * .5 + .5) * .3 + kk * .35 * Math.exp(-i / 40); b.style.height = (10 + 140 * clamp(v) * P(beat, 54.5, 56, E.out)) + 'px'; });
+}
+
+function scene6(beat) {
+  const on = beat >= 65.9; show(s6, on); if (!on) return;
+  const lp = P(beat, 66, 66.5, E.back);
+  X(S('endLogo'), 0, 0, (.2 + .8 * lp) * (1 + Math.exp(-(beat % 1) * 7) * .02), (1 - lp) * 30); OP(S('endLogo'), clamp(lp * 2));
+  const a1 = S('eA1'), a2 = S('eA2');
+  a1.style.strokeDashoffset = 100 - 100 * P(beat, 67, 67.4); a2.style.strokeDashoffset = 100 - 100 * P(beat, 67.4, 67.8);
+  const np = P(beat, 67.5, 68, E.out); OP(S('endName'), np); X(S('endName'), 0, (1 - np) * 50); S('endName').style.letterSpacing = lerp(.3, -.02, np) + 'em';
+  const sp = P(beat, 69, 69.6, E.out); OP(S('endSlogan'), sp); X(S('endSlogan'), 0, (1 - sp) * 30);
+  [...S('endPills').children].forEach((c, i) => { const p = P(beat, 70 + i * .35, 70.5 + i * .35, E.back); OP(c, p); X(c, 0, (1 - p) * 40); });
+  OP(S('endCta'), P(beat, 72, 72.4)); S('endCta').style.letterSpacing = lerp(.4, .12, P(beat, 72, 73, E.out)) + 'em';
+  // the final hit at beat 72
+  if (beat >= 72) { const k = Math.exp(-(beat - 72) * 7); X(S('endName'), 0, 0, 1 + k * .05); }
+}
+
+function renderAt(t) {
+  t = clamp(t, 0, TOTAL); const beat = t / BEAT;
+  global(beat, t); scene1(beat); scene2(beat); scene3(beat); scene4(beat); scene5(beat); scene6(beat);
+  const m = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+  S('time').textContent = `${m(t)} / ${m(TOTAL)}`; S('seek').value = Math.round(t / TOTAL * 1000);
+}
+window.renderAt = renderAt;
+
+/* ---------- audio: a small synth that plays the same beat grid ---------- */
+let ctx = null, master = null, audioOn = true, nodes = [];
+function noiseBuf() { const b = ctx.createBuffer(1, ctx.sampleRate * 1, ctx.sampleRate), d = b.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; return b; }
+let NB = null;
+function env(g, t0, a, d, peak = 1) { g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(peak, t0 + a); g.gain.exponentialRampToValueAtTime(0.0001, t0 + a + d); }
+function kick(t, v = 1) { const o = ctx.createOscillator(), g = ctx.createGain(); o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(42, t + .14); env(g, t, .002, .38, v); o.connect(g).connect(master); o.start(t); o.stop(t + .5); }
+function noise(t, dur, type, freq, q, peak) { const s = ctx.createBufferSource(); s.buffer = NB; const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q; const g = ctx.createGain(); env(g, t, .002, dur, peak); s.connect(f).connect(g).connect(master); s.start(t, Math.random() * .5); s.stop(t + dur + .05); }
+function clap(t, v = 1) { noise(t, .14, 'bandpass', 1700, 1.2, .55 * v); noise(t + .012, .12, 'bandpass', 2100, 1.2, .35 * v); }
+function hat(t, open = false, v = 1) { noise(t, open ? .16 : .045, 'highpass', 7500, .7, (open ? .16 : .12) * v); }
+function bass(t, f, dur) { const o = ctx.createOscillator(), fl = ctx.createBiquadFilter(), g = ctx.createGain(); o.type = 'sawtooth'; o.frequency.value = f; fl.type = 'lowpass'; fl.frequency.setValueAtTime(900, t); fl.frequency.exponentialRampToValueAtTime(180, t + dur); env(g, t, .006, dur, .5); o.connect(fl).connect(g).connect(master); o.start(t); o.stop(t + dur + .1); }
+function pluck(t, f, v = 1) { const o = ctx.createOscillator(), g = ctx.createGain(); o.type = 'triangle'; o.frequency.value = f; env(g, t, .004, .22, .16 * v); o.connect(g).connect(master); o.start(t); o.stop(t + .3); }
+function pad(t, freqs, dur, v = 1) { freqs.forEach((f, i) => { const o = ctx.createOscillator(), fl = ctx.createBiquadFilter(), g = ctx.createGain(); o.type = 'sawtooth'; o.frequency.value = f; o.detune.value = (i - 1) * 7; fl.type = 'lowpass'; fl.frequency.value = 1100; g.gain.setValueAtTime(.0001, t); g.gain.linearRampToValueAtTime(.05 * v, t + Math.min(1.2, dur * .4)); g.gain.linearRampToValueAtTime(.0001, t + dur); o.connect(fl).connect(g).connect(master); o.start(t); o.stop(t + dur + .1); }); }
+function riser(t, dur) { const s = ctx.createBufferSource(); s.buffer = NB; s.loop = true; const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 2; f.frequency.setValueAtTime(300, t); f.frequency.exponentialRampToValueAtTime(7000, t + dur); const g = ctx.createGain(); g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(.35, t + dur); g.gain.linearRampToValueAtTime(.0001, t + dur + .02); s.connect(f).connect(g).connect(master); s.start(t); s.stop(t + dur + .1); }
+function impact(t, v = 1) { const o = ctx.createOscillator(), g = ctx.createGain(); o.frequency.setValueAtTime(90, t); o.frequency.exponentialRampToValueAtTime(30, t + .9); env(g, t, .004, 1.1, .9 * v); o.connect(g).connect(master); o.start(t); o.stop(t + 1.3); noise(t, .9, 'lowpass', 2500, .5, .5 * v); }
+const CH = [{ root: 55, tones: [220, 261.63, 329.63, 440], pad: [110, 130.81, 164.81] }, { root: 43.65, tones: [174.61, 220, 261.63, 349.23], pad: [87.31, 130.81, 174.61] }, { root: 65.41, tones: [261.63, 329.63, 392, 523.25], pad: [130.81, 164.81, 196] }, { root: 49, tones: [196, 246.94, 293.66, 392], pad: [98, 146.83, 196] }];
+const ARP = [0, 2, 1, 3, 2, 1, 3, 2];
+function schedule(t0, from) {
+  const at = b => t0 + b * BEAT; const ok = b => at(b) >= ctx.currentTime - .01 && b * BEAT >= from - .001;
+  for (let b = 0; b < BEATS; b++) {
+    const ch = CH[Math.floor(b / 8) % 4], bar8 = b % 8;
+    if (b % 8 === 0 && ok(b)) pad(at(b), ch.pad, 8 * BEAT, b < 8 || b >= 66 ? 1.4 : 1);
+    // kicks: soft intro, steady from 8, break 66-72
+    const kicks = b < 8 ? b % 4 === 0 : b >= 66 && b < 72 ? b % 2 === 0 && b > 67 : b >= 72 ? b % 2 === 0 && b < 78 : true;
+    if (kicks && ok(b)) kick(at(b), b < 8 ? .6 : 1);
+    if (b >= 10 && !(b >= 66 && b < 72) && b < 78 && b % 2 === 1 && ok(b)) clap(at(b), b < 16 ? .6 : 1);
+    if (b >= 16 && b < 66 || b >= 72 && b < 76) for (let h = 0; h < 2; h++) { const bb = b + h * .5; if (ok(bb)) hat(at(bb), h === 1, bb >= 54 ? 1.15 : 1); }
+    if (b >= 54 && b < 66) for (const q of [.25, .75]) if (ok(b + q)) hat(at(b + q), false, .8);
+    if (b >= 16 && b < 66 && ok(b)) { bass(at(b), ch.root, BEAT * .45); if (ok(b + .5)) bass(at(b + .5), ch.root * (bar8 % 4 === 3 ? 1.5 : 1), BEAT * .4); }
+    if ((b >= 16 && b < 66) || b >= 72 && b < 78) for (let h = 0; h < 2; h++) { const bb = b + h * .5, n = ARP[(b * 2 + h) % 8]; if (ok(bb)) pluck(at(bb), ch.tones[n] * (bb >= 34 && bb < 54 ? 1 : .5 * 2), bb >= 34 ? .9 : .7); }
+  }
+  [[6, 2], [12, 4], [32, 2], [37, 2], [42, 2], [47, 2], [52, 2], [69, 3]].forEach(([b, d]) => { if (ok(b)) riser(at(b), d * BEAT); });
+  [0, 8, 16, 34, 54, 66, 72].forEach(b => { if (ok(b)) impact(at(b), b === 16 || b === 72 ? 1 : .6); });
+  [54, 56, 58, 60].forEach(b => { if (ok(b)) kick(at(b), 1.2); });
+  [15.25, 15.5, 15.75, 33.5, 33.75, 71.5, 71.75].forEach(b => { if (ok(b)) clap(at(b), .7); });
+}
+function startAudio(from) {
+  if (!ctx) { ctx = new (window.AudioContext || window.webkitAudioContext)(); NB = noiseBuf(); }
+  stopAudio(); master = ctx.createGain(); master.gain.value = audioOn ? .8 : 0;
+  const comp = ctx.createDynamicsCompressor(); master.connect(comp); comp.connect(ctx.destination); nodes = [master, comp];
+  const t0 = ctx.currentTime + .1 - from; clockBase = t0; schedule(t0, from);
+}
+function stopAudio() { if (master) { try { master.gain.cancelScheduledValues(0); master.gain.value = 0; master.disconnect(); } catch (e) {} } master = null; }
+
+/* ---------- transport ---------- */
+let playing = false, pos = 0, last = 0, clockBase = 0, usingAudio = false;
+function now() { return usingAudio && ctx ? ctx.currentTime - clockBase : pos; }
+function loop(ts) {
+  if (playing) {
+    if (usingAudio && ctx) pos = ctx.currentTime - clockBase; else { pos += (ts - last) / 1000; }
+    if (pos >= TOTAL) { pos = TOTAL; playing = false; S('pp').textContent = '重播'; stopAudio(); }
+  }
+  last = ts; renderAt(pos); requestAnimationFrame(loop);
+}
+function play(from) { pos = from ?? pos; if (pos >= TOTAL - .05) pos = 0; playing = true; S('pp').textContent = '暂停'; if (usingAudio) startAudio(pos); }
+function pause() { playing = false; S('pp').textContent = '播放'; stopAudio(); }
+function seek(t) { pos = clamp(t, 0, TOTAL); if (playing && usingAudio) startAudio(pos); renderAt(pos); }
+S('goAudio').onclick = () => { usingAudio = true; S('start').remove(); S('ui').classList.remove('hide'); play(0); };
+S('goSilent').onclick = () => { usingAudio = false; S('start').remove(); S('ui').classList.remove('hide'); play(0); };
+S('pp').onclick = () => playing ? pause() : play(pos >= TOTAL - .05 ? 0 : pos);
+S('seek').oninput = e => seek(e.target.value / 1000 * TOTAL);
+S('mute').onclick = () => { audioOn = !audioOn; if (master) master.gain.value = audioOn ? .8 : 0; S('mute').textContent = audioOn ? '静音' : '取消静音'; };
+S('fs').onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); S('pp').click(); }
+  else if (e.code === 'ArrowRight') seek(pos + BEAT); else if (e.code === 'ArrowLeft') seek(pos - BEAT);
+  else if (e.key === 'f' || e.key === 'F') S('fs').click();
+});
+let hideT; addEventListener('mousemove', () => { S('ui').classList.remove('hide'); clearTimeout(hideT); hideT = setTimeout(() => { if (playing) S('ui').classList.add('hide'); }, 2200); });
+function fit() { const k = Math.min(innerWidth / 1920, innerHeight / 1080); S('stage').style.transform = `scale(${k})`; }
+addEventListener('resize', fit); fit();
+// preview hook: ?t=12.5 renders one frame without the start screen (used for review screenshots)
+const q = new URLSearchParams(location.search);
+if (q.has('t')) { S('start').remove(); S('ui').classList.remove('hide'); pos = +q.get('t'); renderAt(pos); } else { renderAt(0); }
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
