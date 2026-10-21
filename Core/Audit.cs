@@ -57,7 +57,7 @@ sealed class ScreenGrabber : IDisposable
     public bool Grab(byte[] buffer)
     {
         SetThreadDpiAwarenessContext(-4);
-        var ok = StretchBlt(memory, 0, 0, Width, Height, screen, 0, 0, sourceWidth, sourceHeight, 0x40CC0020);   // SRCCOPY | CAPTUREBLT
+        var ok = StretchBlt(memory, 0, 0, Width, Height, screen, 0, 0, sourceWidth, sourceHeight, 0x00CC0020);   // SRCCOPY only: CAPTUREBLT makes the mouse pointer on the recorded (host) screen flicker at every grab
         var cursor = new CursorInfo { Size = Marshal.SizeOf<CursorInfo>() };
         if (ok && GetCursorInfo(ref cursor) && (cursor.Flags & 1) != 0 && cursor.Handle != 0)
         {
