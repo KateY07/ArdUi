@@ -33,7 +33,7 @@ static class ConnectFlowTests
         Check(Kind(new IOException("客户端版本过旧，请升级到 ArdUi v5.pre1 或更高版本。")) == ConnectFailure.Outdated, "an outdated client is told to upgrade");
         Check(ClientVersion.Allowed("v5.pre1") && ClientVersion.Allowed("v5.pre12") && ClientVersion.Allowed("v6.pre1") && !ClientVersion.Allowed("v5.pre0"), "v5.pre1 and newer are allowed");
         Check(!ClientVersion.Allowed("v4.pre9") && !ClientVersion.Allowed("v3.pre17") && !ClientVersion.Allowed(null) && !ClientVersion.Allowed("") && !ClientVersion.Allowed("5.0.0-pre.1") && !ClientVersion.Allowed("v5.pre"), "older, missing and malformed versions are refused");
-        Check(Program.Version == "v5.2" && Program.WireVersion == "v5.pre2" && ClientVersion.Allowed(Program.WireVersion), "this build is v5.2 and announces itself in the form the version gate reads");
+        Check(Program.Version == "v5.3" && Program.WireVersion == "v5.pre3" && ClientVersion.Allowed(Program.WireVersion), "this build is v5.3 and announces itself in the form the version gate reads");
         return failures == 0 ? 0 : 1;
     }
 }

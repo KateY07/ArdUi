@@ -17,6 +17,9 @@ sealed partial class MainWindow
         return Card(new StackPanel { Spacing = 10, Children = { note, bar, auditUsage, auditRows, open } });
     }
 
+    readonly ToggleSwitch askEverySession = new();
+    bool syncingAsk;
+
     void RefreshAudit()
     {
         if (engine == null) return;

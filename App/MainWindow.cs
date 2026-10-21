@@ -164,6 +164,7 @@ sealed partial class MainWindow : Window
                 StartupTrace.Mark("directory client constructed");
                 directory.Confirm=async(pair,ct)=>await Dispatcher.UIThread.InvokeAsync(()=>ConfirmPair(pair,ct));
                 directory.ConfirmIncoming=async(pair,ct)=>await Dispatcher.UIThread.InvokeAsync(()=>ConfirmIncoming(pair,ct));
+                directory.ConfirmSession=async(pair,ct)=>await Dispatcher.UIThread.InvokeAsync(()=>ConfirmSession(pair,ct));
                 directory.Changed+=RequestRefresh;
                 directory.Notice+=message=>Dispatcher.UIThread.Post(()=>Say(message));
                 StartIsland();
@@ -762,6 +763,25 @@ sealed partial class MainWindow : Window
         row.Children.Add(new TextBlock{Text="默认只允许 FRD。“仅接受这一次”不保存授权，断开后对方需要重新申请；“接受并信任”会保存，之后可在 设置 → 被控与授权 中修改。",Foreground=Muted,FontSize=11,TextWrapping=TextWrapping.Wrap});
         row.Children.Add(new StackPanel{Orientation=Orientation.Horizontal,Spacing=8,Children={once,trust,no}});
         var pendingCard=Card(WithCloseIcon(row,()=>result.TrySetResult(Decision.Rejected)));
+        pendingCard.Background=Look.CardSolid;pendingCard.BorderBrush=Look.Line;pendingCard.Padding=new Thickness(20);pendingIncoming.Children.Add(pendingCard);UpdateApproval();
+        using var pendingCancel=ct.Register(()=>result.TrySetCanceled(ct));
+        try{return await result.Task;}finally{pendingIncoming.Children.Remove(pendingCard);UpdateApproval();}
+    }
+    // "Ask me before every session": even a trusted device is let in only after a yes from the person at this machine.
+    async Task<bool> ConfirmSession(Pairing pair,CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var result=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if(!previewMode)ShowFromTray();   // the prompt lives in this window, which may be hidden in the tray
+        var allow=new Button{Content="允许连接"};allow.Classes.Add("primary");
+        var deny=new Button{Content="拒绝"};
+        allow.Click+=(_,_)=>result.TrySetResult(true);
+        deny.Click+=(_,_)=>result.TrySetResult(false);
+        var row=new StackPanel{Spacing=10};
+        row.Children.Add(new TextBlock{Text=$"{pair.Code} 请求连接本机",FontSize=17,FontWeight=FontWeight.SemiBold,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,24,0)});
+        row.Children.Add(new TextBlock{Text="已信任的设备也需要你点“允许”后才能连接（可在 设置 → 被控与授权 中关闭）。",Foreground=Muted,TextWrapping=TextWrapping.Wrap});
+        row.Children.Add(new StackPanel{Orientation=Orientation.Horizontal,Spacing=8,Children={allow,deny}});
+        var pendingCard=Card(WithCloseIcon(row,()=>result.TrySetResult(false)));
         pendingCard.Background=Look.CardSolid;pendingCard.BorderBrush=Look.Line;pendingCard.Padding=new Thickness(20);pendingIncoming.Children.Add(pendingCard);UpdateApproval();
         using var pendingCancel=ct.Register(()=>result.TrySetCanceled(ct));
         try{return await result.Task;}finally{pendingIncoming.Children.Remove(pendingCard);UpdateApproval();}

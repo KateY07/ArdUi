@@ -914,5 +914,14 @@ static partial class Loc
         ("English", "English"),
         ("界面语言（更改后重新启动 ArdUi 生效）", "Interface language (takes effect after ArdUi restarts)"),
         ("已更改语言，重新启动 ArdUi 后生效。", "Language changed; it takes effect after ArdUi restarts."),
+        ("每次被控前都需要人工确认", "Ask me before every session"),
+        ("已开启：每次有设备连接本机前都会先询问你。", "Turned on: you will be asked before every device connects."),
+        ("已关闭：已信任的设备可以直接连接。", "Turned off: trusted devices connect directly."),
+        ("开启后，已信任的设备每次连接也要等你点“允许”；没有点允许就不会被控。", "When on, trusted devices also wait for your \"Allow\" every time; without it nothing is controlled."),
+        ("确认方式", "Confirmation"),
+        ("{0} 请求连接本机", "{0} wants to connect to this PC"),
+        ("已信任的设备也需要你点“允许”后才能连接（可在 设置 → 被控与授权 中关闭）。", "Trusted devices also need your \"Allow\" before they connect (you can turn this off in Settings → Hosting)."),
+        ("允许连接", "Allow"),
+        ("程序集版本格式无效：", "Invalid assembly version format: "),
     ];
 }

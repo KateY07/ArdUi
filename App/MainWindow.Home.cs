@@ -460,7 +460,15 @@ sealed partial class MainWindow
             return panel;
         }
         var devicesTab = new StackPanel { Spacing = 8, Children = { undoBar, devices } };
-        var accessTab = new StackPanel { Spacing = 8, Children = { incomingArea, Section("可访问本机的设备", controllers), Section("审计记录", BuildAuditCard()) } };
+        askEverySession.OnContent = "每次被控前都需要人工确认"; askEverySession.OffContent = "每次被控前都需要人工确认";
+        askEverySession.IsCheckedChanged += (_, _) =>
+        {
+            if (syncingAsk || directory == null) return;
+            try { directory.SetAlwaysAsk(askEverySession.IsChecked == true); Say(askEverySession.IsChecked == true ? "已开启：每次有设备连接本机前都会先询问你。" : "已关闭：已信任的设备可以直接连接。"); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Say(ex.Message); }
+        };
+        var askNote = new TextBlock { Text = "开启后，已信任的设备每次连接也要等你点“允许”；没有点允许就不会被控。", Foreground = Muted, FontSize = 12, TextWrapping = TextWrapping.Wrap };
+        var accessTab = new StackPanel { Spacing = 8, Children = { incomingArea, Section("确认方式", Card(new StackPanel { Spacing = 6, Children = { askEverySession, askNote } })), Section("可访问本机的设备", controllers), Section("审计记录", BuildAuditCard()) } };
         var logButton = Button("打开日志", OpenLogFile); var exportButton = Button("导出诊断包", () => { var path = Diagnostics.Export(Program.DataRoot, engine); Say("诊断包已导出：" + path); return Task.CompletedTask; });
         var copyEndpoint = Button("复制 EndpointId", async () => { await Clipboard!.SetTextAsync(engine?.Id ?? ""); Toast("已复制本机 EndpointId"); });
         logButton.Content = Look.IconText(Look.DocumentPath, "打开日志"); exportButton.Content = Look.IconText(Look.DownloadPath, "导出诊断包"); copyEndpoint.Content = Look.IconText(Look.CopyPath, "复制 EndpointId");
@@ -512,7 +520,7 @@ sealed partial class MainWindow
         var tabButtons = new List<Button>();
         void Select(int index)
         {
-            settingsBody.Content = pages[index].Body; if (index == 2) RefreshAudit();
+            settingsBody.Content = pages[index].Body; if (index == 2) { RefreshAudit(); syncingAsk = true; askEverySession.IsChecked = directory?.AlwaysAsk == true; syncingAsk = false; }
             for (var i = 0; i < tabButtons.Count; i++) { if (i == index) tabButtons[i].Classes.Add("primary"); else tabButtons[i].Classes.Remove("primary"); }
         }
         for (var i = 0; i < pages.Length; i++)

@@ -13,11 +13,14 @@ elseif($release.Success){$version='v'+$release.Groups[1].Value+'.'+$release.Grou
 else{throw 'ArdUi.csproj must contain a semantic version (5.2.0 for a release, 5.0.0-pre.1 for a pre-release).'}
 $packer=Join-Path (Split-Path $root -Parent) '.tools\onesetup\onesetup.exe'
 $frdCandidates=@(Get-ChildItem -LiteralPath 'D:\pub\FRD' -File -Filter 'v*.zip' -ErrorAction SilentlyContinue | ForEach-Object {
+    # v4.pre3 (pre-release) and v5.1 (release): a release is newer than any pre-release of the same major
     if($_.BaseName -match '^v(\d+)\.pre(\d+)$'){
-        [pscustomobject]@{Path=$_.FullName;Major=[int]$Matches[1];Pre=[int]$Matches[2]}
+        [pscustomobject]@{Path=$_.FullName;Major=[int]$Matches[1];Kind=0;Num=[int]$Matches[2]}
+    }elseif($_.BaseName -match '^v(\d+)\.(\d+)$'){
+        [pscustomobject]@{Path=$_.FullName;Major=[int]$Matches[1];Kind=1;Num=[int]$Matches[2]}
     }
 })
-$frdArchive=($frdCandidates | Sort-Object Major,Pre -Descending | Select-Object -First 1).Path
+$frdArchive=($frdCandidates | Sort-Object Major,Kind,Num -Descending | Select-Object -First 1).Path
 $outputRoot='D:\pub\ArdUi'
 $output=Join-Path $outputRoot ('ArdUi-'+$version+'_setup.exe')
 $sidecar=$output+'.sha256'
@@ -59,6 +62,11 @@ $installer=Join-Path $root 'install.ps1'
 $bytes=[IO.File]::ReadAllBytes($installer)
 if($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF){throw 'install.ps1 must be UTF-8 with BOM.'}
 Copy-Item -LiteralPath $installer,(Join-Path $root 'packaging\offline\install.bat') -Destination $stage
+# Newer onesetup builds understand '.launch' (a Launch button on the finish screen). Older ones would only print it, so the installer
+# emits it (and leaves the start to that button) only when the packer in use knows the directive.
+$launchSupported=((& $packer --help 2>&1 | Out-String) -match '\.launch')
+if($launchSupported){[IO.File]::WriteAllText((Join-Path $stage 'launch.on'),'1',[Text.Encoding]::ASCII);Write-Host 'onesetup supports .launch: the finish screen gets a Launch button.'}
+else{Write-Host 'onesetup has no .launch: the installer starts ArdUi itself.'}
 $notes=Join-Path $root "release-notes\$version.md"
 if(Test-Path -LiteralPath $notes){Copy-Item -LiteralPath $notes -Destination (Join-Path $stage 'RELEASE-NOTES.md')}
 [IO.File]::WriteAllText((Join-Path $stage 'RELEASE.txt'),@"

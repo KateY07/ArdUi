@@ -68,6 +68,7 @@ sealed record Pairing(string Code, string Endpoint, bool Incoming);
 sealed class AccessSettings
 {
     public bool Enabled { get; set; }
+    public bool AlwaysAsk { get; set; }   // every session needs a yes from the person at this machine, trusted devices included
     public string? EnrollmentSecret { get; set; }
     public Dictionary<string, ControllerGrant> Controllers { get; set; } = new();
     public Dictionary<string, string> Targets { get; set; } = new();

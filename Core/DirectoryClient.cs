@@ -36,6 +36,10 @@ sealed class DirectoryClient : IAsyncDisposable
     public string Code => code;
     public bool Online => online;
     public bool Enabled { get { lock (sync) return access.Enabled; } }
+    public bool AlwaysAsk { get { lock (sync) return access.AlwaysAsk; } }
+    public void SetAlwaysAsk(bool value) { lock (sync) { access.AlwaysAsk = value; Save(); } Changed?.Invoke(); }
+    // Asked before every session when AlwaysAsk is on: does the person at this machine let this controller in now?
+    public Func<Pairing, CancellationToken, Task<bool>>? ConfirmSession;
     public double SideWidth { get { lock(sync)return Math.Clamp(access.SideWidth,180,360); } }
     public string AccessPassword=>AccessPasswordFor(DateTimeOffset.UtcNow.ToUnixTimeSeconds()/60);
     public Func<Pairing, CancellationToken, Task<bool>>? Confirm { get; set; }
@@ -321,15 +325,29 @@ sealed class DirectoryClient : IAsyncDisposable
     public Func<Pairing, CancellationToken, Task<Decision>>? ConfirmIncoming;
     // Controllers accepted only this once: valid while their session lives, never saved.
     readonly Dictionary<string, ControllerGrant> temporary = new();
+    async Task<bool> AskEverySession(ServerTicket ticket, CancellationToken ct)
+    {
+        if (!AlwaysAsk) return true;
+        if (ConfirmSession == null) return false;
+        await confirmations.WaitAsync(ct);   // one prompt at a time, like the first-connection approval
+        try { return await ConfirmSession(new Pairing(ticket.ControllerCode, ticket.ControllerEndpoint, true), ct); }
+        finally { confirmations.Release(); }
+    }
     async Task<Authorization?> AuthorizePassword(ServerTicket ticket, PasswordRequest request, CancellationToken ct)
     {
         long revision;
+        Authorization? returning=null;
         lock(sync)
         {
             revision=revocations.GetValueOrDefault(ticket.ControllerEndpoint);
             if(!access.Enabled) return null;
-            if(!request.Enroll) return access.Controllers.TryGetValue(ticket.ControllerEndpoint,out var saved) ? new Authorization(saved.Receipt,Permissions.Parse(saved.Perms),false) : null;
+            if(!request.Enroll)
+            {
+                if(!access.Controllers.TryGetValue(ticket.ControllerEndpoint,out var saved)) return null;
+                returning=new Authorization(saved.Receipt,Permissions.Parse(saved.Perms),false);
+            }
         }
+        if(returning!=null) return await AskEverySession(ticket,ct) ? returning : null;
         lock (sync)
         {
             var now = DateTime.UtcNow;
@@ -353,7 +371,13 @@ sealed class DirectoryClient : IAsyncDisposable
         try
         {
             ct.ThrowIfCancellationRequested();
-            lock (sync) if (access.Enabled && access.Controllers.TryGetValue(ticket.ControllerEndpoint,out var known)) return new Authorization(known.Receipt,Permissions.Parse(known.Perms),false);
+            Authorization? knownAuth=null;
+            lock (sync) if (access.Enabled && access.Controllers.TryGetValue(ticket.ControllerEndpoint,out var known)) knownAuth=new Authorization(known.Receipt,Permissions.Parse(known.Perms),false);
+            if (knownAuth != null)
+            {
+                if (AlwaysAsk && !(ConfirmSession != null && await ConfirmSession(new Pairing(ticket.ControllerCode, ticket.ControllerEndpoint, true), ct))) return null;
+                return knownAuth;
+            }
             var decision = ConfirmIncoming == null ? Decision.Rejected : await ConfirmIncoming(new Pairing(ticket.ControllerCode, ticket.ControllerEndpoint, true), ct);
             if (!decision.Accepted) return null;
             ct.ThrowIfCancellationRequested();

@@ -56,6 +56,7 @@ $launcher=Join-Path $root 'ArdUi.cmd'
 # Autostart is a setting inside ArdUi (Settings > General); the installer only creates the shortcut when asked to.
 # A Start menu entry that runs the program itself (with its own icon), so ArdUi can be started from the Start menu like any app.
 # It points at the installed version and passes the data folder; every install refreshes it to the version just installed.
+$menuLink=$null
 if($env:ARDUI_INSTALL_NO_SHORTCUT -ne '1'){
     $menuLink=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)) 'ArdUi.lnk'
     $menuExe=Join-Path $destination 'ArdUi.exe'
@@ -86,8 +87,16 @@ if($env:ARDUI_INSTALL_NO_START -ne '1'){
         $_.ExecutablePath -and $_.ExecutablePath.StartsWith($versions,[StringComparison]::OrdinalIgnoreCase) -and
         -not $_.ExecutablePath.StartsWith($destination+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)
     } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    Step 94 '启动 ArdUi'
-    Start-Process -FilePath $launcher
+    $launchButton=($env:ONESETUP_SHELL -eq 'ui') -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'launch.on'))
+    if($launchButton){
+        # The installer window shows a Launch button (Enter also starts it) once everything succeeded; the Start menu entry carries the
+        # data folder and the icon, so start that when it exists.
+        $target=if($menuLink -and (Test-Path -LiteralPath $menuLink)){$menuLink}else{$launcher}
+        Write-Host ('.launch {0} | 启动 ArdUi' -f $target)
+    }else{
+        Step 94 '启动 ArdUi'
+        Start-Process -FilePath $launcher
+    }
 }
 Write-Host ".progress 100"
 Write-Host ".info 完成：ArdUi $version 已安装"
