@@ -63,7 +63,7 @@ if(Test-Path -LiteralPath $notes){Copy-Item -LiteralPath $notes -Destination (Jo
 ArdUi $version
 This self-extracting installer invokes install.bat after extracting to a temporary directory.
 It installs the complete payload into versions\$version, retains an existing data directory, and refreshes the startup shortcut.
-Requires preinstalled .NET 8 and .NET 10 x64 runtimes.
+Requires the preinstalled .NET 8 x64 runtime (FRD is Native AOT and needs none). FFmpeg is an optional FRD extension and is not included.
 "@,[Text.UTF8Encoding]::new($false))
 
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null

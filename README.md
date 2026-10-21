@@ -31,7 +31,7 @@ Built on [ARD](https://github.com/KateY07/ard2) (Iroh).
 
 ## Quick start
 
-Requires Windows 10/11 x64 and the [.NET 8 and .NET 10 desktop runtimes](https://dotnet.microsoft.com/download).
+Requires Windows 10/11 x64 and the [.NET 8 desktop runtime](https://dotnet.microsoft.com/download/dotnet/8.0). FRD is Native AOT and needs no runtime.
 
 1. **Install**: download the latest `ArdUi-vX.exe` from [Releases](https://github.com/KateY07/ArdUi/releases) and run it. It installs to `%LOCALAPPDATA%\ArdUi` and adds a Start menu entry.
 2. **Host** (the computer to be reached): switch on "Allow control". You get a device ID, and clicking shows a first-connection password for 10 seconds. Give both to the person connecting.
@@ -74,4 +74,4 @@ Source layout: [ARCHITECTURE.md](ARCHITECTURE.md). Release notes: [docs/releases
 
 ## Licenses and third-party components
 
-See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). FRD ships with the installer; the FFmpeg libraries it carries are distributed under their own (GPL) licence, whose text is in `ffmpeg\LICENSE.txt` in its install folder.
+See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). FRD ships with the installer. FFmpeg is **not** included: FRD uses the H.264 codec built into Windows by default, and FFmpeg (GPL build) is an optional extension you install yourself.

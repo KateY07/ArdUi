@@ -1,6 +1,6 @@
 # Third-party components
 
-ArdUi application logic is organized by responsibility as documented in `ARCHITECTURE.md`. The framework-dependent single-file UI contains its managed and native UI dependencies; `ard.exe` and the FRD runtime are downloaded and verified separately by the installer. FRD's own third-party notices and FFmpeg license are retained in its installation directory.
+ArdUi application logic is organized by responsibility as documented in `ARCHITECTURE.md`. The framework-dependent single-file UI contains its managed and native UI dependencies; `ard.exe` and the FRD runtime are downloaded and verified separately by the installer. FRD's own third-party notices are retained in its installation directory. FFmpeg is not part of the installer: it is an optional FRD extension that the user installs separately (a GPL build; its licence travels with that extension).
 
 | Component | Version | Source / license |
 | --- | --- | --- |

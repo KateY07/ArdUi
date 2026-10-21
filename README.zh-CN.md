@@ -24,7 +24,7 @@ ArdUi 基于 [ARD](https://github.com/KateY07/ard2)（Iroh）建立点对点的�
 
 ## 快速入门
 
-需要 Windows 10/11 x64，以及 [.NET 8 和 .NET 10 桌面运行时](https://dotnet.microsoft.com/download)。
+需要 Windows 10/11 x64 和 [.NET 8 桌面运行时](https://dotnet.microsoft.com/download/dotnet/8.0)；FRD 是 Native AOT，不需要运行时。
 
 1. **安装**：到 [Releases](https://github.com/KateY07/ArdUi/releases) 下载最新的 `ArdUi-vX.exe`，双击运行，按安装窗口提示完成。安装在 `%LOCALAPPDATA%\ArdUi`，开始菜单里会有 ArdUi。
 2. **被控端**（要被访问的电脑）：打开“允许被控”，得到 6 位编号；点击后显示 10 秒的首次密码。把编号和密码告诉对方。
@@ -67,4 +67,4 @@ powershell -File packaging\build-onesetup-release.ps1
 
 ## 许可与第三方组件
 
-第三方组件及其许可证见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。FRD 随安装包提供，它携带的 FFmpeg 库按其自带的许可证（GPL）分发，授权文本在其安装目录的 `ffmpeg\LICENSE.txt`。
+第三方组件及其许可证见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。FRD 随安装包提供。安装包**不含** FFmpeg：FRD 默认使用 Windows 自带的 H.264 编解码器，FFmpeg（GPL 构建）是需要时由你自己安装的可选扩展。

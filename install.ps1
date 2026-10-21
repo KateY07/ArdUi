@@ -16,6 +16,19 @@ $destination=Join-Path (Join-Path $root 'versions') $version
 
 New-Item -ItemType Directory -Force -Path $root,(Join-Path $root 'versions'),$destination | Out-Null
 Copy-Item -Path (Join-Path $payload '*') -Destination $destination -Recurse -Force
+# FFmpeg is an optional FRD extension that the user unpacks next to FRD.exe (frdfmpeg). A new version folder starts without it,
+# so carry the newest earlier copy over instead of making the user install it again.
+$ffmpegTarget=Join-Path $destination 'frdfmpeg'
+if(-not (Test-Path -LiteralPath $ffmpegTarget -PathType Container) -or -not (Get-ChildItem -LiteralPath $ffmpegTarget -Filter 'avcodec-*.dll' -ErrorAction SilentlyContinue)){
+    $earlier=Get-ChildItem -LiteralPath (Join-Path $root 'versions') -Directory -ErrorAction SilentlyContinue |
+        Where-Object {$_.FullName -ne $destination -and (Get-ChildItem -LiteralPath (Join-Path $_.FullName 'frdfmpeg') -Filter 'avcodec-*.dll' -ErrorAction SilentlyContinue)} |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if($earlier){
+        New-Item -ItemType Directory -Force -Path $ffmpegTarget | Out-Null
+        Copy-Item -Path (Join-Path $earlier.FullName 'frdfmpeg\*') -Destination $ffmpegTarget -Recurse -Force
+        Write-Host ".info FFmpeg extension carried over from $($earlier.Name)"
+    }
+}
 
 Step 45 '检查设备身份与配置'
 if(-not (Test-Path -LiteralPath $data -PathType Container)){
