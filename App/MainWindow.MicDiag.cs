@@ -53,7 +53,7 @@ sealed partial class MainWindow
         copy.Click += async (_, _) => { if (Clipboard != null) { await Clipboard.SetTextAsync(micText); Toast("诊断结果已复制"); } };
         Show(MicDiag.Privacy(), MicDiag.Devices()); copy.IsEnabled = false;
         var intro = new TextBlock { Text = "检查语音通话要用的麦克风和扬声器：列出 Windows 里的音频设备，检查隐私设置是否允许使用麦克风，并实际听 5 秒，看有没有声音、音量够不够、是否爆音或全是静音。声音只在本机处理，不会发送出去。", Foreground = Look.Muted, FontSize = 12, TextWrapping = TextWrapping.Wrap };
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { test, echo, tone, copy } };
+        var buttons = new WrapPanel { ItemSpacing = 8, LineSpacing = 8, Children = { test, echo, tone, copy } };
         return new StackPanel { Spacing = 10, Children = { Card(new StackPanel { Spacing = 10, Children = { intro, buttons, meterBox, micStatus } }), micResults } };
     }
 }

@@ -47,6 +47,7 @@ sealed class FrdProcess : IAsyncDisposable
         secret=token;
         var info=new ProcessStartInfo(exe){WorkingDirectory=Path.GetDirectoryName(exe),UseShellExecute=false,CreateNoWindow=true,
             RedirectStandardOutput=true,RedirectStandardError=true};
+        info.Environment["FRD_LANG"]=Loc.English?"en":"zh";   // FRD speaks the language ArdUi was set to
         foreach(var argument in arguments)info.ArgumentList.Add(argument);
         info.ArgumentList.Add("--token");info.ArgumentList.Add(token);
         try{process=Process.Start(info)??throw new IOException("FRD 启动失败。");}

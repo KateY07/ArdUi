@@ -347,8 +347,8 @@ sealed partial class MainWindow : Window
         var key=primary+"|"+(hasNote&&peer.ComputerName.Length!=0&&peer.ComputerName!=peer.Name?peer.ComputerName:"")+"|"+peer.Code;
         if(title.Tag as string==key)return;
         title.Tag=key;title.Inlines!.Clear();
-        title.Inlines.Add(new Avalonia.Controls.Documents.Run(primary));
-        void Quiet(string text)=>title.Inlines.Add(new Avalonia.Controls.Documents.Run("  "+text){FontWeight=FontWeight.Normal,FontSize=12,Foreground=Muted});
+        title.Inlines.Add(new Avalonia.Controls.Documents.Run{[Loc.KeepRunProperty]=true,Text=primary});
+        void Quiet(string text)=>title.Inlines.Add(new Avalonia.Controls.Documents.Run{[Loc.KeepRunProperty]=true,Text="  "+text,FontWeight=FontWeight.Normal,FontSize=12,Foreground=Muted});
         if(hasNote&&peer.ComputerName.Length!=0&&peer.ComputerName!=peer.Name)Quiet(peer.ComputerName);
         if(primary!=peer.Code)Quiet(peer.Code);
     }
@@ -424,7 +424,7 @@ sealed partial class MainWindow : Window
         view.Card.Padding=compact?new Thickness(14,3):new Thickness(14,6);
         var row=(Grid)((StackPanel)view.Card.Child!).Children[0];row.MinHeight=compact?34:52;
     }
-    static TextBlock GroupHeader(string name)=>new(){Text=name,FontSize=12,FontWeight=FontWeight.SemiBold,Foreground=Muted,Margin=new Thickness(2,10,0,0)};
+    static TextBlock GroupHeader(string name)=>new(){[Loc.KeepProperty]=name!="未分组",Text=name,FontSize=12,FontWeight=FontWeight.SemiBold,Foreground=Muted,Margin=new Thickness(2,10,0,0)};
     static string Ago(long unixSeconds)
     {
         var span=DateTimeOffset.UtcNow-DateTimeOffset.FromUnixTimeSeconds(unixSeconds);

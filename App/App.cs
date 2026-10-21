@@ -61,17 +61,18 @@ sealed class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            Loc.Init(Motion.Language); Loc.Install();
             StartupTrace.Mark("framework ready; creating main window");
             var window = new MainWindow();
             StartupTrace.Mark("main window constructed");
             desktop.MainWindow = window;
             if (desktop.Args?.Contains("--tray") == true) window.WindowState = WindowState.Minimized;   // autostart: begin in the tray
             // Closing or minimising the window must not end the app: it lives in the tray until "退出" is chosen.
-            var show = new NativeMenuItem("显示 ArdUi"); show.Click += (_, _) => window.ShowFromTray();
-            var exit = new NativeMenuItem("退出 ArdUi"); exit.Click += (_, _) => window.ExitApplication();
+            var show = new NativeMenuItem(Loc.T("显示 ArdUi")); show.Click += (_, _) => window.ShowFromTray();
+            var exit = new NativeMenuItem(Loc.T("退出 ArdUi")); exit.Click += (_, _) => window.ExitApplication();
             var tray = new TrayIcon { Icon = AppIcon.Create(), ToolTipText = "ArdUi " + Program.Version, Menu = new NativeMenu { Items = { show, exit } } };
             tray.Clicked += (_, _) => window.ShowFromTray();
-            window.ActivityChanged += text => Avalonia.Threading.Dispatcher.UIThread.Post(() => tray.ToolTipText = text);
+            window.ActivityChanged += text => Avalonia.Threading.Dispatcher.UIThread.Post(() => tray.ToolTipText = Loc.T(text));
             TrayIcon.SetIcons(this, new TrayIcons { tray });
             SingleInstance.Activated += () => Avalonia.Threading.Dispatcher.UIThread.Post(window.ShowFromTray);
             StartupTrace.Mark("tray icon created");

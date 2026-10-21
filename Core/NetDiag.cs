@@ -754,7 +754,7 @@ static class NetDiag
             {
                 using var http = Http();
                 using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(directory, "api/health"));
-                request.Headers.TryAddWithoutValidation("X-ArdUi-Client", Program.Version);
+                request.Headers.TryAddWithoutValidation("X-ArdUi-Client", Program.WireVersion);
                 using var response = await http.SendAsync(request, ct);
                 var body = await response.Content.ReadAsStringAsync(ct);
                 section.Add("ArdUi 目录服务器", $"{(int)response.StatusCode}，{watch.ElapsedMilliseconds} ms" + (body.Contains("minClient", StringComparison.Ordinal) ? "  ·  " + (System.Text.RegularExpressions.Regex.Match(body, "\"version\":\\s*\"([^\"]+)\"") is { Success: true } m ? "服务端 " + m.Groups[1].Value : "") : ""), response.IsSuccessStatusCode ? DiagLevel.Good : DiagLevel.Warn);

@@ -228,7 +228,7 @@ sealed partial class MainWindow
         switch (message.Kind)
         {
             case ChatKind.Text:
-                content.Children.Add(new TextBlock { Text = message.Text, Foreground = ink, TextWrapping = TextWrapping.Wrap, FontSize = 13 });
+                content.Children.Add(new TextBlock { [Loc.KeepProperty] = true, Text = message.Text, Foreground = ink, TextWrapping = TextWrapping.Wrap, FontSize = 13 });
                 break;
             case ChatKind.Image when TryBitmap(message.Path) is { } bitmap:
                 var picture = new Image { Source = bitmap, MaxWidth = 240, MaxHeight = 220, Stretch = Stretch.Uniform, Cursor = new Cursor(StandardCursorType.Hand) };
@@ -241,7 +241,7 @@ sealed partial class MainWindow
                 open.Click += (_, _) => OpenStored(message.Path);
                 var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto") };
                 row.Children.Add(Look.Icon(Look.FolderPath, 20, ink)); ((Control)row.Children[0]).Margin = new Thickness(0, 0, 10, 0);
-                var info = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Children = { new TextBlock { Text = message.FileName, Foreground = ink, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 190 }, new TextBlock { Text = SizeText(message.Size), FontSize = 11, Foreground = mine ? Brush.Parse("#F3D4C8") : Look.Muted } } };
+                var info = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Children = { new TextBlock { [Loc.KeepProperty] = true, Text = message.FileName, Foreground = ink, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 190 }, new TextBlock { Text = SizeText(message.Size), FontSize = 11, Foreground = mine ? Brush.Parse("#F3D4C8") : Look.Muted } } };
                 Grid.SetColumn(info, 1); row.Children.Add(info); Grid.SetColumn(open, 2); open.Margin = new Thickness(10, 0, 0, 0); row.Children.Add(open);
                 content.Children.Add(row);
                 break;

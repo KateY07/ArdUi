@@ -81,7 +81,7 @@ sealed partial class MainWindow
             Text = "用来判断两台设备能否直接连接（点对点）：本机有几个公网出口、是什么类型的 NAT、路由器是否开放 UPnP 端口映射，以及到公网要经过几层内网。检测会访问公共的 STUN 服务器、几个“查询公网 IP”的网页和 ArdUi 的 M；如果路由器提供 UPnP 或 NAT-PMP，会临时添加一条 UDP 映射（租约 60 秒），让 M 从外部发包验证后立即删除。",
             Foreground = Look.Muted, FontSize = 12, TextWrapping = TextWrapping.Wrap,
         };
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { start, copy, mapping } };
+        var buttons = new WrapPanel { ItemSpacing = 8, LineSpacing = 8, Children = { start, copy, mapping } };
         return new StackPanel { Spacing = 10, Children = { Card(new StackPanel { Spacing = 10, Children = { intro, buttons, netStatus }, }), netResults } };
     }
 

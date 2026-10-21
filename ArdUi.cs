@@ -10,8 +10,21 @@ static class Program
             var value=typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0]
                 ?? throw new InvalidOperationException("缺少程序集版本信息。");
             var match=Regex.Match(value,@"^(\d+)\.\d+\.\d+-pre\.(\d+)$");
-            if(!match.Success)throw new InvalidOperationException("程序集预发布版本格式无效："+value);
-            return "v"+match.Groups[1].Value+".pre"+match.Groups[2].Value;
+            if(match.Success)return "v"+match.Groups[1].Value+".pre"+match.Groups[2].Value;
+            var release=Regex.Match(value,@"^(\d+)\.(\d+)\.\d+$");
+            if(!release.Success)throw new InvalidOperationException("程序集版本格式无效："+value);
+            return "v"+release.Groups[1].Value+"."+release.Groups[2].Value;   // a release: v5.2
+        }
+    }
+    // What goes over the wire to the directory server and to other machines. The version gate (since v5.pre1) reads "v<major>.pre<n>", so a release
+    // v<major>.<minor> is announced as v<major>.pre<minor>: that is never older than the same major's earlier versions, and a server that
+    // only knows the pre-release form keeps accepting it.
+    public static string WireVersion
+    {
+        get
+        {
+            var match=Regex.Match(Version,@"^v(\d+)\.(\d+)$");
+            return match.Success?"v"+match.Groups[1].Value+".pre"+match.Groups[2].Value:Version;
         }
     }
     public static string DataRoot => Path.GetFullPath(Environment.GetEnvironmentVariable("ARDUI_DATA_ROOT") ?? Path.Combine(AppContext.BaseDirectory,"data"));
@@ -19,6 +32,7 @@ static class Program
     public static int Main(string[] args)
     {
         StartupTrace.Mark("Main entered");
+        if(Environment.GetEnvironmentVariable("ARDUI_LANG")!=null)Loc.Init((string?)null);   // render-only: preview the interface in another language
         var dataRootArg=Array.IndexOf(args,"--data-root");
         if(dataRootArg>=0&&dataRootArg+1<args.Length)Environment.SetEnvironmentVariable("ARDUI_DATA_ROOT",args[dataRootArg+1]);
         try
@@ -46,6 +60,8 @@ static class Program
                 return NetProbeLive.Mapping(args[1], args.Length > 2 ? args[2] : new Settings().Server).GetAwaiter().GetResult();
             if (args.Length >= 2 && args[0] == "--probe-live")
                 return NetProbeLive.Run(args[1], args.Length > 2 ? args[2] : new Settings().Server).GetAwaiter().GetResult();
+            if (args.Contains("--i18n-test"))
+                return LocTests.Run();
             if (args.Contains("--voice-test"))
                 return VoiceTests.Run().GetAwaiter().GetResult();
             if (args.Contains("--netprobe-test"))

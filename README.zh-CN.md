@@ -6,7 +6,7 @@
 
 **[网页介绍与演示](https://katey07.github.io/ArdUi/)** · **[下载](https://github.com/KateY07/ArdUi/releases)** · [自托管](#自托管) · [历史设计文档](docs/DESIGN-v2.md)
 
-当前版本：v5.pre1（预发布）。v5 起，服务端拒绝所有 v5.pre1 以下的旧客户端。
+当前版本：v5.2。v5 起，服务端拒绝所有 v5.pre1 以下的旧客户端。
 
 ## 简介
 
@@ -19,6 +19,7 @@ ArdUi 基于 [ARD](https://github.com/KateY07/ard2)（Iroh）建立点对点的�
 | 远程桌面 | 通过 [FRD](https://github.com/KateY07/frd) 查看和控制已登录的桌面，也可打开 RDP 或 SMB 文件共享。 |
 | 对话与文件传输 | 文字、图片、文件（最大 2 GB），显示速度与进度，可取消，传输时仍可聊天。 |
 | 审计录屏 | 对方使用屏幕时，在被控端本地录制（10 帧/秒，保存为分片 MP4），最多占用 10 GB，循环覆盖。使用 Windows 自带的 H.264 编码器，不依赖 FFmpeg。录屏默认开启、不可关闭，被控端首页会显示“录屏中”。 |
+| 中英文界面 | 界面支持中文和英文：自动（跟随 Windows 显示语言），或在 设置 → 通用 → 语言 中选择，重启后生效。你和对方输入的内容（对话、设备名）不会被翻译。 |
 | 语音通话 | 在对话窗口顶部呼叫已连接的设备：沿用同一条加密链路（直连或中继），Opus 24 kbps；支持响铃、接听、拒绝、静音、挂断，窗口和灵动岛里都能操作；被控端的审计日志会记录通话（时间、时长、结果，不录声音）。一方没有可用的麦克风或扬声器也能通话，双方都会收到提示。目前没有回声消除，请戴耳机。可在设置里关闭。 |
 | 麦克风诊断 | 设置 → 麦克风诊断：列出音频设备、检查 Windows 麦克风隐私开关、实测麦克风（帧数、音量、爆音、全静音）、录音回放和播放测试音。声音只在本机处理。 |
 | 网络诊断 | 设置 → 网络诊断：本机地址与公网出口（是否有多个出口或处在大内网）、NAT 类型、逐跳路径、UPnP / NAT-PMP，并给出能否点对点直连的结论。目录服务器（M）会参与实测：从两个端口看你的公网地址，收发并统计流量，向你监听的端口主动发包——以此证明 UPnP 映射或公网地址从外部真的可达。协议与防滥用措施见 [docs/probe-protocol.md](docs/probe-protocol.md)。 |
@@ -61,7 +62,7 @@ dotnet run --project ArdUi.csproj                      # 运行
 dotnet run --project ArdUi.csproj -- --self-test        # 基础自检
 ```
 
-内置测试（无需网络）：`--chat-test`、`--chat-ui-test`、`--perm-test`、`--connect-flow-test`、`--audit-test`、`--voice-test`。目录服务器的测试在 `tests/presence_test.py`。
+内置测试（无需网络）：`--chat-test`、`--chat-ui-test`、`--perm-test`、`--connect-flow-test`、`--audit-test`、`--voice-test`、`--i18n-test`。目录服务器的测试在 `tests/presence_test.py`。
 
 打包安装程序需要 [onesetup](https://github.com/KateY07/onesetup) v3.pre10（放在仓库上一级的 `.tools\onesetup\onesetup.exe`）、`ard.exe` 和 `D:\pub\FRD` 下的 FRD 发布包：
 

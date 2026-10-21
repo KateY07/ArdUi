@@ -6,7 +6,7 @@ High-performance remote access for Windows. Peer-to-peer and end-to-end encrypte
 
 **[Website](https://katey07.github.io/ArdUi/)** · **[Download](https://github.com/KateY07/ArdUi/releases)** · [Self-hosting](#self-hosting) · [Historical design notes (Chinese)](docs/DESIGN-v2.md)
 
-Current version: v5.pre1 (pre-release). From v5 the server refuses clients older than v5.pre1.
+Current version: v5.2. From v5 the server refuses clients older than v5.pre1.
 
 ## Why ArdUi
 
@@ -26,6 +26,7 @@ Built on [ARD](https://github.com/KateY07/ard2) (Iroh).
 | Remote desktop | View and control the signed-in desktop with FRD, or use RDP or an SMB file share. |
 | Chat and file transfer | Text, images and files up to 2 GB, with speed and progress, cancellable; chat keeps working during a transfer. |
 | Audit recording | While a device uses the screen it is recorded locally on the host (10 fps, fragmented MP4, up to 10 GB, oldest overwritten) with the H.264 encoder built into Windows. Always on and cannot be switched off; the host shows "recording". |
+| English and Chinese | The interface speaks English or Chinese: automatic (follows the Windows display language) or chosen in Settings → General → Language; it takes effect after a restart. What you and the other side type (chat, device names) is never translated. |
 | Voice calls | Call a connected device from the chat header: Opus at 24 kbps over the same encrypted link (peer-to-peer or relayed), ringing, answer / decline / mute / hang up from the window or the floating island, and a call record in the host's audit log (the sound itself is not recorded). A side without a working microphone or speaker can still join, and both sides are told. Use a headset (no echo cancellation yet). Can be switched off in Settings. |
 | Microphone diagnosis | Settings → 麦克风诊断: lists audio devices, checks Windows' microphone privacy switches, measures the microphone (frames, level, clipping, all-zero), records and plays back, and plays a test tone. Nothing leaves the machine. |
 | Network diagnosis | Settings → 网络诊断: this machine's addresses and exits (several public exits or a large intranet?), NAT type, hop-by-hop path, UPnP / NAT-PMP, and a verdict on whether a direct (peer-to-peer) connection is likely. The directory server (M) takes part: it sees your public address from two ports, echoes and pushes measured traffic, and sends an unsolicited packet to a port you listen on, which proves that a UPnP mapping or a public address really works from outside. Details and abuse protection: [docs/probe-protocol.md](docs/probe-protocol.md). |
@@ -68,7 +69,7 @@ dotnet run --project ArdUi.csproj                      # run
 dotnet run --project ArdUi.csproj -- --self-test        # basic self-check
 ```
 
-Built-in tests (no network needed): `--chat-test`, `--chat-ui-test`, `--perm-test`, `--connect-flow-test`, `--audit-test`, `--voice-test`. The directory server's tests are in `tests/presence_test.py`.
+Built-in tests (no network needed): `--chat-test`, `--chat-ui-test`, `--perm-test`, `--connect-flow-test`, `--audit-test`, `--voice-test`, `--i18n-test`. The directory server's tests are in `tests/presence_test.py`.
 
 Packaging the installer needs [onesetup](https://github.com/KateY07/onesetup) v3.pre10 (at `.tools\onesetup\onesetup.exe` one level above the repo), `ard.exe` and an FRD release zip in `D:\pub\FRD`:
 

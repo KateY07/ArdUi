@@ -7,8 +7,10 @@ $project=Join-Path $root 'ArdUi.csproj'
 $projectXml=[xml](Get-Content -LiteralPath $project -Raw)
 $projectVersion=[string]$projectXml.Project.PropertyGroup.Version
 $match=[regex]::Match($projectVersion,'^(\d+)\.\d+\.\d+-pre\.(\d+)$')
-if(-not $match.Success){throw 'ArdUi.csproj must contain a prerelease semantic version.'}
-$version='v'+$match.Groups[1].Value+'.pre'+$match.Groups[2].Value
+$release=[regex]::Match($projectVersion,'^(\d+)\.(\d+)\.\d+$')
+if($match.Success){$version='v'+$match.Groups[1].Value+'.pre'+$match.Groups[2].Value}
+elseif($release.Success){$version='v'+$release.Groups[1].Value+'.'+$release.Groups[2].Value}
+else{throw 'ArdUi.csproj must contain a semantic version (5.2.0 for a release, 5.0.0-pre.1 for a pre-release).'}
 $packer=Join-Path (Split-Path $root -Parent) '.tools\onesetup\onesetup.exe'
 $frdCandidates=@(Get-ChildItem -LiteralPath 'D:\pub\FRD' -File -Filter 'v*.zip' -ErrorAction SilentlyContinue | ForEach-Object {
     if($_.BaseName -match '^v(\d+)\.pre(\d+)$'){
