@@ -25,6 +25,29 @@ static class ChatUiTests
         model.SetConnected(0); Check(model.Visible, "unread keeps the island up after the device left");
         model.SetUnread(0); Check(!model.Visible, "island hides when nothing is left");
         model.SetConnected(1); model.SetSuppressed(true); Check(!model.Visible, "full screen hides the island");
+        // the person at the machine and a remote controller's input are told apart: the island answers only to the first
+        LocalInput.Reset();
+        Check(!LocalInput.RemoteDrivingAt(1000), "no input yet: nobody is driving remotely");
+        LocalInput.Observe(true, 1000); Check(LocalInput.RemoteDrivingAt(1200), "injected mouse input means a remote controller is driving");
+        LocalInput.Observe(false, 1300); Check(!LocalInput.RemoteDrivingAt(1400), "the person at the machine moving the mouse takes the island back at once");
+        LocalInput.Observe(true, 2000); Check(LocalInput.RemoteDrivingAt(2100) && !LocalInput.RemoteDrivingAt(4000), "and remote driving fades out when the input stops");
+        LocalInput.Reset();
+        // activation by a person or by software: the latest button or key event decides
+        LocalInput.Force(); LocalInput.Reset();
+        Check(LocalInput.ActivationByPersonAt(1000), "with no input at all, a click counts as the person's");
+        LocalInput.Press(true, 5000); Check(!LocalInput.ActivationByPersonAt(5100), "a click right after an injected one is a remote controller's");
+        LocalInput.Press(false, 5200); Check(LocalInput.ActivationByPersonAt(5300), "the person pressing a button takes the decision back");
+        LocalInput.Press(true, 6000); Check(LocalInput.ActivationByPersonAt(12000), "an injected event that is long past says nothing about a new click");
+        LocalInput.Reset();
+        // the island says when this PC is being controlled, and what that looks like is not the same as "connected"
+        var driven = new IslandModel(); driven.SetConnected(1); driven.SetControlled(["K4DD0B"]);
+        Check(driven.Visible && driven.Controlled.Count == 1, "being controlled shows on the island");
+        // FRD's card sits in the corner of the controlled screen: the island steps aside instead of hiding under it
+        var card = new IslandSpace.Box(1664, 804, 2048, 1104);
+        Check(IslandSpace.Aside(new IslandSpace.Box(1750, 910, 1896, 950), [card]) is var shift && shift < 0 && 1896 + shift <= card.Left - 12, "a pill under FRD's card moves left of it (" + shift + ")");
+        Check(IslandSpace.Aside(new IslandSpace.Box(1200, 910, 1400, 950), [card]) == 0, "a pill that is clear of the card stays where it is");
+        Check(IslandSpace.Aside(new IslandSpace.Box(1750, 910, 1896, 950), []) == 0, "and without a card nothing moves");
+        Check(IslandSpace.Aside(new IslandSpace.Box(1750, 200, 1896, 240), [card]) == 0, "a card below the pill does not matter");
     }
 
     public static int Run()

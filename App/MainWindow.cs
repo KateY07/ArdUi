@@ -89,6 +89,7 @@ sealed partial class MainWindow : Window
     public MainWindow(bool preview = false)
     {
         previewMode=preview;
+        if(!preview)LocalInput.Start();   // tells the person at this machine from a remote controller (see MainWindow.Person.cs)
         PropertyChanged+=(_,e)=>
         {
             if(e.Property==WindowStateProperty&&WindowState==WindowState.Minimized&&!previewMode&&!exiting)Dispatcher.UIThread.Post(HideToTray);
@@ -127,7 +128,7 @@ sealed partial class MainWindow : Window
         bar.DoubleTapped+=(_,e)=>{if(!e.Handled)WindowState=WindowState==WindowState.Maximized?WindowState.Normal:WindowState.Maximized;};
         // Share (invite) sits next to the "allow control" switch and only exists while control is allowed.
         identityCard=new Border{IsVisible=false};
-        allow.PropertyChanged+=async(_,e)=>{if(e.Property==Avalonia.Controls.Primitives.ToggleButton.IsCheckedProperty && ready)await Guard(SaveAccess);};
+        allow.PropertyChanged+=async(_,e)=>{if(e.Property==Avalonia.Controls.Primitives.ToggleButton.IsCheckedProperty && ready){if(allow.IsChecked==true&&!Person("开启被控")){ready=false;allow.IsChecked=false;ready=true;return;}await Guard(SaveAccess);}};
         controllers.Margin=new Thickness(2,2,2,2);
         devices.Children.Add(noDevices);
         var undoButton=Button("撤销",UndoRemove);undoButton.Content=Look.IconText(Look.UndoPath,"撤销");
@@ -177,7 +178,7 @@ sealed partial class MainWindow : Window
             if(!previewMode&&!exiting&&!closing&&e.CloseReason==WindowCloseReason.WindowClosing)
             {e.Cancel=true;HideToTray();return;}
             e.Cancel=true;if(closing)return;closing=true;IsEnabled=false;
-            try{island?.Shutdown();passwordTimer.Stop();undoTimer.Stop();if(directory!=null)await directory.DisposeAsync();if(engine!=null)await engine.DisposeAsync();}
+            try{island?.Shutdown();LocalInput.Stop();passwordTimer.Stop();undoTimer.Stop();if(directory!=null)await directory.DisposeAsync();if(engine!=null)await engine.DisposeAsync();}
             finally{closed=true;Close();}
         };
         if(preview)
@@ -556,7 +557,7 @@ sealed partial class MainWindow : Window
             var headText=new StackPanel{Children={new TextBlock{Text=pair.Value.Code,FontWeight=FontWeight.SemiBold,FontSize=14},new TextBlock{Text=endpointId[..8]+"…",Foreground=Muted,FontSize=11,FontFamily=new FontFamily("Consolas")}}};
             ToolTip.SetTip(headText,endpointId);head.Children.Add(headText);Grid.SetColumn(revoke,1);head.Children.Add(revoke);
             var picker=new PermissionPicker(Permissions.Parse(pair.Value.Perms),false);
-            picker.Changed+=async value=>await Guard(()=>directory.SetControllerPerms(endpointId,value));
+            picker.Changed+=async value=>{if(!Person("修改权限")){RequestRefresh();return;}await Guard(()=>directory.SetControllerPerms(endpointId,value));};
             controllers.Children.Add(Card(new StackPanel{Spacing=8,Children={head,picker}}));
         }
         if(controllers.Children.Count==0)controllers.Children.Add(new TextBlock{Text="尚无授权",Foreground=Muted});
@@ -592,11 +593,11 @@ sealed partial class MainWindow : Window
         inviteArc.Stroke=Look.Accent;
         var ring=new Grid{Width=64,Height=64,Children={new Ellipse{Stroke=Look.Ghost,StrokeThickness=6,Margin=new Thickness(3)},inviteArc,inviteSeconds}};
         inviteRefresh.Classes.Add("primary");
-        inviteRefresh.Click+=(_,_)=>{inviteMinute=DateTimeOffset.UtcNow.ToUnixTimeSeconds()/60;UpdatePassword();};
+        inviteRefresh.Click+=(_,_)=>{if(!Person("显示新密码"))return;inviteMinute=DateTimeOffset.UtcNow.ToUnixTimeSeconds()/60;UpdatePassword();};
         var passwordBlock=new StackPanel{Spacing=4,VerticalAlignment=VerticalAlignment.Center,Children={new TextBlock{Text="连接密码",Foreground=Muted,FontSize=12},invitePassword,inviteRefresh}};
         var passwordRow=new StackPanel{Orientation=Orientation.Horizontal,Spacing=14,Children={ring,passwordBlock}};
         endpoint.Width=double.NaN;endpoint.Height=double.NaN;endpoint.FontSize=12;endpoint.TextWrapping=TextWrapping.Wrap;endpoint.MinHeight=0;
-        var copy=Button("一键复制",async()=>{await Clipboard!.SetTextAsync(InviteText());Toast("已复制邀请信息");});copy.Content=Look.IconText(Look.CopyPath,"一键复制");copy.HorizontalAlignment=HorizontalAlignment.Left;
+        var copy=Button("一键复制",async()=>{if(!Person("复制邀请"))return;await Clipboard!.SetTextAsync(InviteText());Toast("已复制邀请信息");});copy.Content=Look.IconText(Look.CopyPath,"一键复制");copy.HorizontalAlignment=HorizontalAlignment.Left;
         var card=Card(WithCloseIcon(new StackPanel{Spacing=14,Children=
         {
             new TextBlock{Text="邀请设备",FontSize=17,FontWeight=FontWeight.SemiBold},
@@ -751,8 +752,8 @@ sealed partial class MainWindow : Window
         var once=new Button{Content="仅接受这一次"};once.Classes.Add("primary");
         var trust=new Button{Content="接受并信任"};
         var no=new Button{Content="拒绝"};
-        once.Click+=(_,_)=>result.TrySetResult(new Decision(true,true,picker.Value));
-        trust.Click+=(_,_)=>result.TrySetResult(new Decision(true,false,picker.Value));
+        once.Click+=(_,_)=>{if(Person("仅接受这一次"))result.TrySetResult(new Decision(true,true,picker.Value));};
+        trust.Click+=(_,_)=>{if(Person("接受并信任"))result.TrySetResult(new Decision(true,false,picker.Value));};
         no.Click+=(_,_)=>result.TrySetResult(Decision.Rejected);
         var row=new StackPanel{Spacing=10};
         row.Children.Add(new TextBlock{Text=$"{pair.Code} 请求获得本机控制权",FontSize=17,FontWeight=FontWeight.SemiBold,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,24,0)});
@@ -775,7 +776,7 @@ sealed partial class MainWindow : Window
         if(!previewMode)ShowFromTray();   // the prompt lives in this window, which may be hidden in the tray
         var allow=new Button{Content="允许连接"};allow.Classes.Add("primary");
         var deny=new Button{Content="拒绝"};
-        allow.Click+=(_,_)=>result.TrySetResult(true);
+        allow.Click+=(_,_)=>{if(Person("允许连接"))result.TrySetResult(true);};
         deny.Click+=(_,_)=>result.TrySetResult(false);
         var row=new StackPanel{Spacing=10};
         row.Children.Add(new TextBlock{Text=$"{pair.Code} 请求连接本机",FontSize=17,FontWeight=FontWeight.SemiBold,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,24,0)});
@@ -798,7 +799,7 @@ sealed partial class MainWindow : Window
         var buttons=new StackPanel { Orientation=Orientation.Horizontal,Spacing=12 };
         var reject=new Button { Content="拒绝 / 未核对",IsDefault=true }; reject.Click+=(_,_)=>dialog.Close(false);
         var approved=false;
-        var accept=new Button { Content="已独立核对一致，信任此设备" }; accept.Click+=(_,_)=>{approved=true;dialog.Close();};
+        var accept=new Button { Content="已独立核对一致，信任此设备" }; accept.Click+=(_,_)=>{if(!Person("信任此设备"))return;approved=true;dialog.Close();};
         buttons.Children.Add(reject);buttons.Children.Add(accept);content.Children.Add(buttons);dialog.Content=content;
         using var cancel=ct.Register(()=>Dispatcher.UIThread.Post(()=>dialog.Close(false)));
         var decision=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);

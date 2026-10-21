@@ -6,7 +6,7 @@ High-performance remote access for Windows. Peer-to-peer and end-to-end encrypte
 
 **[Website](https://katey07.github.io/ArdUi/)** · **[Download](https://github.com/KateY07/ArdUi/releases)** · [Self-hosting](#self-hosting) · [Historical design notes (Chinese)](docs/DESIGN-v2.md)
 
-Current version: v5.3. From v5 the server refuses clients older than v5.pre1.
+Current version: v5.4. From v5 the server refuses clients older than v5.pre1.
 
 ## Why ArdUi
 

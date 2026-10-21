@@ -60,6 +60,14 @@ static class Program
                 return NetProbeLive.Mapping(args[1], args.Length > 2 ? args[2] : new Settings().Server).GetAwaiter().GetResult();
             if (args.Length >= 2 && args[0] == "--probe-live")
                 return NetProbeLive.Run(args[1], args.Length > 2 ? args[2] : new Settings().Server).GetAwaiter().GetResult();
+            if (args.Contains("--input-test"))
+                return InputTests.Run();
+            if (args.Contains("--rtc-test"))
+                return RtcTests.Run().GetAwaiter().GetResult();
+            if (args.Contains("--rtc-host"))
+                return RtcTests.Host(args).GetAwaiter().GetResult();
+            if (args.Contains("--rtc-join"))
+                return RtcTests.Join(args).GetAwaiter().GetResult();
             if (args.Contains("--i18n-test"))
                 return LocTests.Run();
             if (args.Contains("--voice-test"))

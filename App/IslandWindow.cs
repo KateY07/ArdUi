@@ -13,12 +13,19 @@ sealed class IslandWindow : Window
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")] static extern nint SetWindowLongPtr(nint window, int index, nint value);
     [DllImport("user32.dll")] static extern bool GetCursorPos(out Point32 point);
     [DllImport("shell32.dll")] static extern int SHQueryUserNotificationState(out int state);
+    delegate bool EnumProc(nint window, nint parameter);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, nint parameter);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(nint window);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(nint window, out Rect32 rect);
+    [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode)] static extern int GetClassName(nint window, System.Text.StringBuilder text, int count);
+    [StructLayout(LayoutKind.Sequential)] struct Rect32 { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] struct Point32 { public int X, Y; }
 
     readonly Engine engine;
     readonly Func<string, string> labelOf;
     readonly Func<string, bool> chatIsOpen;
     readonly Action<string> openChat;
+    readonly Action showMain;
     readonly IslandModel model = new();
     readonly IslandView view;
     readonly DispatcherTimer tick = new() { Interval = TimeSpan.FromMilliseconds(120) }, hit = new() { Interval = TimeSpan.FromMilliseconds(30) };
@@ -30,17 +37,19 @@ sealed class IslandWindow : Window
     bool through = true, closing;
     int ticks;
     Point32 dragFrom; PixelPoint dragOrigin; bool dragged;
+    int shift;   // how far the island stands aside (to the left, in pixels) so that it does not sit under another window's card
     string[] live = [];
 
-    public IslandWindow(Engine engine, Func<string, string> labelOf, Func<string, bool> chatIsOpen, Action<string> openChat)
+    public IslandWindow(Engine engine, Func<string, string> labelOf, Func<string, bool> chatIsOpen, Action<string> openChat, Action showMain)
     {
-        this.engine = engine; this.labelOf = labelOf; this.chatIsOpen = chatIsOpen; this.openChat = openChat;
+        this.engine = engine; this.labelOf = labelOf; this.chatIsOpen = chatIsOpen; this.openChat = openChat; this.showMain = showMain;
         view = new IslandView(model);
         Width = view.Width; Height = view.Height; CanResize = false; ShowInTaskbar = false; Topmost = true; ShowActivated = false; Focusable = false;
         SystemDecorations = SystemDecorations.None; Background = Brushes.Transparent; TransparencyLevelHint = [WindowTransparencyLevel.Transparent];
         Content = view;
         model.SetEnabled(!Motion.NoIsland);
-        view.PillDown += () => { GetCursorPos(out dragFrom); dragOrigin = Position; dragged = false; };
+        view.PillDown += () => { GetCursorPos(out dragFrom); dragOrigin = Position; dragged = false; };   // where it stands now is the base from here on
+        view.PillDown += () => shift = 0;
         view.PillMove += Drag; view.PillUp += () => { if (!dragged) OnPillClicked(); else Remember(); };
         view.CancelClicked += t => t.Cancel();
         view.CallAccept += async () => { if (CallOf(model.CallPeer) is { } c) try { await c.Accept(); } catch (Exception ex) when (ex is IOException or InvalidOperationException) { Diagnostics.Log("call", ex.Message); } };
@@ -50,7 +59,7 @@ sealed class IslandWindow : Window
         tick.Tick += (_, _) => Tick(); hit.Tick += (_, _) => HitTest();
     }
 
-    public void Start() { tick.Start(); }
+    public void Start() { LocalInput.Start(); tick.Start(); }
     public void Enable(bool enabled) => model.SetEnabled(enabled);
 
     public void Shutdown() { closing = true; tick.Stop(); hit.Stop(); Close(); }
@@ -104,7 +113,7 @@ sealed class IslandWindow : Window
 
     void Remember()
     {
-        try { Motion.SetIslandPosition((Position.X, Position.Y)); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        try { Motion.SetIslandPosition((Position.X - shift, Position.Y)); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 
     // The window is larger than the pill. Only over the pill does it take the mouse; everywhere else clicks go to what is underneath.
@@ -112,7 +121,8 @@ sealed class IslandWindow : Window
     {
         if (handle == 0 || !GetCursorPos(out var cursor)) return;
         var local = this.PointToClient(new PixelPoint(cursor.X, cursor.Y));
-        SetThrough(!(view.Interactive && view.PillRect.Inflate(5).Contains(local)));
+        // the pill takes the mouse only for the person at the machine: a remote controller's pointer (injected input) passes through it
+        SetThrough(LocalInput.RemoteDriving || !(view.Interactive && view.PillRect.Inflate(5).Contains(local)));
     }
 
     void SetThrough(bool value)
@@ -160,9 +170,36 @@ sealed class IslandWindow : Window
         foreach (var pair in lingering.ToArray()) if (pair.Value <= DateTimeOffset.Now) { lingering.Remove(pair.Key); owners.Remove(pair.Key); }
         active.AddRange(lingering.Keys);
         model.SetConnected(live.Length); model.SetUnread(unread); model.SetTransfers(active);
-        if (ticks++ % 8 == 0) model.SetSuppressed(!Motion.IslandInFullscreen && FullScreenApp());
+        model.SetControlled(engine.Incoming.Values.Where(s => s.Live && s.ScreenInUse).Select(s => labelOf(s.PeerId)).Distinct().ToArray());
+        if (ticks % 8 == 0) model.SetSuppressed(!Motion.IslandInFullscreen && FullScreenApp());
+        if (ticks++ % 4 == 0 && IsVisible && !pressed()) StandAside();
         model.Tick();
         if (model.Visible && IsVisible) view.Apply();   // progress moves without a change of state
+    }
+
+    // FRD shows a card in the bottom right corner of the controlled screen (a topmost window). The island lives in the same corner: whoever is
+    // above would take the clicks, and the card is. So the island steps to the left of such a card, and returns when the card is gone.
+    readonly List<Rect32> cards = new();
+    bool pressed() => dragged;
+    void StandAside()
+    {
+        if (handle == 0 || view.PillRect.Width <= 0) return;
+        cards.Clear();
+        var name = new System.Text.StringBuilder(64);
+        EnumWindows((window, _) =>
+        {
+            if (window == handle || !IsWindowVisible(window)) return true;
+            name.Clear(); GetClassName(window, name, 64);
+            if (name.ToString() == "GlasspaneWindow" && GetWindowRect(window, out var rect) && rect.Left > -10000) cards.Add(rect);
+            return true;
+        }, 0);
+        var scale = RenderScaling;
+        var origin = view.PointToScreen(view.PillRect.TopLeft);
+        // where the pill would be without any shift
+        var pill = new IslandSpace.Box(origin.X - shift, origin.Y, origin.X - shift + (int)(view.PillRect.Width * scale), origin.Y + (int)(view.PillRect.Height * scale));
+        var wanted = IslandSpace.Aside(pill, cards.Select(c => new IslandSpace.Box(c.Left, c.Top, c.Right, c.Bottom)));
+        if (wanted == shift) return;
+        Position = new PixelPoint(Position.X - shift + wanted, Position.Y); shift = wanted;
     }
 
     // A full-screen app, a game or a presentation is in front: stay out of the way.
@@ -172,11 +209,16 @@ sealed class IslandWindow : Window
         catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { return false; }
     }
 
+    // A click goes where there is something to attend to: the call, the file, the unread message. With nothing of the kind (the island is just
+    // saying "connected" or "being controlled") it opens ArdUi itself, the same as the tray icon; it never opens a conversation for no reason.
     void OnPillClicked()
     {
+        if (LocalInput.RemoteDriving) return;   // not the person at the machine
         if (model.Call != CallState.Idle) { if (model.CallPeer != null) openChat(model.CallPeer); return; }
-        var peer = model.UnreadPeer is { } p && live.Contains(p) ? p : model.Transfer is { } t && owners.TryGetValue(t, out var owner) ? owner : live.FirstOrDefault();
-        if (peer == null) return;
+        string? peer = null;
+        if (model.Unread > 0) peer = model.UnreadPeer is { } p && live.Contains(p) ? p : live.FirstOrDefault();
+        else if (model.Transfer is { } t && owners.TryGetValue(t, out var owner)) peer = owner;
+        if (peer == null) { showMain(); return; }
         model.DismissBubble(); openChat(peer);
     }
 }

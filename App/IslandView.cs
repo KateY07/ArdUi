@@ -60,6 +60,7 @@ sealed class IslandView : Grid
     public bool Interactive => shown;
     public Rect PillRect => pill.TranslatePoint(default, this) is { } p ? new Rect(p, pill.Bounds.Size) : default;
 
+    static TextBlock Say(TextBlock block, string text) { block.Text = text; return block; }
     static TextBlock Label(double size, IBrush brush, bool bold) => new() { FontSize = size, Foreground = brush, FontWeight = bold ? FontWeight.SemiBold : FontWeight.Normal, VerticalAlignment = VerticalAlignment.Center };
 
     // ---- poses and motion -------------------------------------------------------------------------------------------
@@ -93,7 +94,7 @@ sealed class IslandView : Grid
     DoubleTransition WidthMotion() => new() { Property = WidthProperty, Duration = animated ? TimeSpan.FromMilliseconds(420) : TimeSpan.Zero, Easing = new QuinticEaseOut() };
 
     // Nothing to report: the island rests half-faded.
-    bool Calm => model.Call == CallState.Idle && model.Transfer == null && model.Unread == 0 && !model.BubbleVisible;
+    bool Calm => model.Call == CallState.Idle && model.Controlled.Count == 0 && model.Transfer == null && model.Unread == 0 && !model.BubbleVisible;
 
     // ---- content ------------------------------------------------------------------------------------------------
     public void Apply()
@@ -105,7 +106,7 @@ sealed class IslandView : Grid
             return;
         }
         var transfer = model.Transfer;
-        var sig = (model.Call == CallState.Idle ? "" : "call" + model.Call + model.CallMuted + model.CallLabel + model.CallNote) + (transfer == null ? "idle" : transfer.Id + transfer.State) + "|" + (model.Unread > 0) + "|" + (model.Connected > 0);
+        var sig = (model.Call == CallState.Idle ? "" : "call" + model.Call + model.CallMuted + model.CallLabel + model.CallNote) + (transfer == null ? "idle" : transfer.Id + transfer.State) + "|" + (model.Unread > 0) + "|" + (model.Connected > 0) + "|" + model.Controlled.Count;
         if (!shown)
         {
             signature = sig; Build(transfer, instant: true);
@@ -155,7 +156,13 @@ sealed class IslandView : Grid
         else
         {
             row.Children.Add(new Logo(24));
-            if (model.Connected > 0) row.Children.Add(new Ellipse { Width = 8, Height = 8, Fill = Green, VerticalAlignment = VerticalAlignment.Center });
+            if (model.Controlled.Count > 0)
+            {
+                // this PC is being controlled: a red dot and the words, so that it is never a surprise
+                row.Children.Add(new Ellipse { Width = 8, Height = 8, Fill = Red, VerticalAlignment = VerticalAlignment.Center });
+                row.Children.Add(Say(Label(12, Brushes.White, true), model.Controlled.Count == 1 ? "被控中" : "被控中 · " + model.Controlled.Count));
+            }
+            else if (model.Connected > 0) row.Children.Add(new Ellipse { Width = 8, Height = 8, Fill = Green, VerticalAlignment = VerticalAlignment.Center });
         }
         if (model.Unread > 0)
         {

@@ -33,6 +33,8 @@ sealed class Session : IAsyncDisposable
     public bool Once { get; set; }
     public bool OnceGranted => gateway?.Once == true;
     readonly Gateway? gateway;
+    // This PC's screen is in use through this session right now: an FRD host is up for it, or an RDP connection is open (the same fact that starts the audit recording).
+    public bool ScreenInUse => gateway?.ScreenActive == true;
     readonly string directory;
     readonly CancellationTokenSource stop = new();
     Task metrics = Task.CompletedTask;

@@ -120,7 +120,7 @@ sealed partial class MainWindow
         // the machine's own role: a quiet glass strip at the bottom, away from the window controls
         var share = new Button { Content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Children = { Look.Icon(Look.SharePath, 15, Look.Accent), new TextBlock { Text = "邀请", FontSize = 13, FontWeight = FontWeight.SemiBold, Foreground = Look.Accent, VerticalAlignment = VerticalAlignment.Center } } }, Padding = new Thickness(8, 4) };
         share.Classes.Add("quiet"); ToolTip.SetTip(share, "邀请设备：显示连接密码和设备 ID");
-        share.Click += (_, _) => { try { OpenInvite(); } catch (Exception ex) { Say(ex.Message); } };
+        share.Click += (_, _) => { if (!Person("邀请设备")) return; try { OpenInvite(); } catch (Exception ex) { Say(ex.Message); } };
         identityCard.Child = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Chrome.Divider(18), share } };
         allow.OnContent = allow.OffContent = "允许被控";
         var strip = Chrome.Capsule(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, Margin = new Thickness(14, 2), Children = { new TextBlock { Text = "本机", FontSize = 12, Foreground = Muted, VerticalAlignment = VerticalAlignment.Center }, allow, identityCard } });
@@ -464,6 +464,7 @@ sealed partial class MainWindow
         askEverySession.IsCheckedChanged += (_, _) =>
         {
             if (syncingAsk || directory == null) return;
+            if (askEverySession.IsChecked != true && !Person("关闭“每次被控前都需要人工确认”")) { syncingAsk = true; askEverySession.IsChecked = true; syncingAsk = false; return; }
             try { directory.SetAlwaysAsk(askEverySession.IsChecked == true); Say(askEverySession.IsChecked == true ? "已开启：每次有设备连接本机前都会先询问你。" : "已关闭：已信任的设备可以直接连接。"); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Say(ex.Message); }
         };

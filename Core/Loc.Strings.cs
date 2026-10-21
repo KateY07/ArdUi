@@ -923,5 +923,12 @@ static partial class Loc
         ("已信任的设备也需要你点“允许”后才能连接（可在 设置 → 被控与授权 中关闭）。", "Trusted devices also need your \"Allow\" before they connect (you can turn this off in Settings → Hosting)."),
         ("允许连接", "Allow"),
         ("程序集版本格式无效：", "Invalid assembly version format: "),
+        ("被控中", "Controlled"),
+        ("“{0}”需要被控端的人亲自操作：远程输入不能执行这个操作。", "\"{0}\" has to be done by the person at this PC: remote input cannot do it."),
+        ("修改权限", "Change permissions"),
+        ("开启被控", "Turn on hosting"),
+        ("复制邀请", "Copy the invitation"),
+        ("信任此设备", "Trust this device"),
+        ("关闭“每次被控前都需要人工确认”", "Turn off \"Ask me before every session\""),
     ];
 }

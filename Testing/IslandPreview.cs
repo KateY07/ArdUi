@@ -23,6 +23,7 @@ static class IslandPreview
             ("3 气泡消失后：未读红点和数量", m => { m.SetConnected(1); m.SetUnread(3, "p"); }),
             ("4 发送文件：进度环 + 速度 + 取消", m => { m.SetConnected(1); m.SetTransfers([Send(42_000_000)]); }),
             ("5 发送中又有新消息", m => { m.SetConnected(1); m.SetUnread(2, "p"); m.SetTransfers([Send(42_000_000)]); }),
+            ("7 被控中：红点和文字", m => { m.SetConnected(1); m.SetControlled(["K4DD0B"]); }),
             ("6 发送完成：对勾", m => { m.SetConnected(1); m.SetTransfers([Send(100_000_000, true)]); }),
         };
         var stack = new StackPanel { Spacing = 0 };
@@ -40,7 +41,7 @@ static class IslandPreview
             stack.Children.Add(new Border { Background = Brushes.White, Padding = new Thickness(14, 6), Child = new TextBlock { Text = title, FontWeight = FontWeight.SemiBold, FontSize = 13, Foreground = Look.Ink } });
             stack.Children.Add(screen);
         }
-        var window = new Window { Width = 560, Height = 6 * (150 + 30), FontFamily = new FontFamily("Segoe UI Variable Text, Microsoft YaHei UI"), FontSize = 13, Content = stack };
+        var window = new Window { Width = 560, Height = 7 * (150 + 30), FontFamily = new FontFamily("Segoe UI Variable Text, Microsoft YaHei UI"), FontSize = 13, Content = stack };
         window.Show();
         try
         {

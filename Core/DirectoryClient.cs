@@ -544,7 +544,7 @@ sealed class DirectoryClient : IAsyncDisposable
     }
     public async Task Pause(Peer peer)
     {
-        peer.AutoConnect=false;engine.State.Save();connects.Cancel(peer.Code);await engine.DropOutgoing(peer.Id);await StopReconnect(peer.Id);
+        peer.AutoConnect=false;engine.State.Save();connects.Cancel(peer.Code);await engine.Goodbye(peer.Id);await engine.DropOutgoing(peer.Id);await StopReconnect(peer.Id);
         engine.SetStatus(peer.Id,"已授权 · 已暂停");Changed?.Invoke();
     }
     public void ExportIdentity(string destination, string password)

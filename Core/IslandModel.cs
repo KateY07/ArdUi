@@ -15,6 +15,7 @@ sealed class IslandModel
     public bool Suppressed { get; private set; }   // full screen or a presentation: the island stays out of the way
     public bool Enabled { get; private set; } = true;
     public IReadOnlyList<ChatTransfer> Transfers { get; private set; } = [];
+    public IReadOnlyList<string> Controlled { get; private set; } = [];   // the devices that are controlling this PC right now
     public string? BubbleSender { get; private set; }
     public string? BubbleText { get; private set; }
     public string? BubblePeer { get; private set; }
@@ -43,6 +44,11 @@ sealed class IslandModel
     public void SetEnabled(bool value) { if (Enabled == value) return; Enabled = value; Changed?.Invoke(); }
     public void SetSuppressed(bool value) { if (Suppressed == value) return; Suppressed = value; Changed?.Invoke(); }
     public void SetConnected(int count) { if (Connected == count) return; Connected = count; Changed?.Invoke(); }
+    public void SetControlled(IReadOnlyList<string> labels)
+    {
+        if (Controlled.SequenceEqual(labels)) return;
+        Controlled = labels; Changed?.Invoke();
+    }
     public void SetUnread(int count, string? peer = null)
     {
         if (peer != null) UnreadPeer = peer;

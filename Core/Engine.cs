@@ -190,13 +190,19 @@ sealed class Engine : IAsyncDisposable
             catch(Exception ex){Diagnostics.Log("peer-ended",ex.Message);}
         });
     }
-    public async Task Disconnect(string id)
+    // Tells the device on the other end that this side is closing the session on purpose, so that it ends too instead of "recovering".
+    // Every way a person ends a session (disconnect, pause, remove, quit ArdUi) goes through here first.
+    public async Task Goodbye(string id)
     {
-        // Say goodbye first, so the other side knows it was on purpose and does not start recovering.
         var goodbyes=new List<Task>();
         if(Incoming.TryGetValue(id,out var hosted))goodbyes.Add(hosted.SayBye("host"));
         if(Outgoing.TryGetValue(id,out var controlling))goodbyes.Add(controlling.SayBye("controller"));
         await Task.WhenAll(goodbyes);
+    }
+    public Task GoodbyeAll()=>Task.WhenAll(Outgoing.Values.Select(s=>s.SayBye("controller")).Concat(Incoming.Values.Select(s=>s.SayBye("host"))));
+    public async Task Disconnect(string id)
+    {
+        await Goodbye(id);
         operations.Cancel("out:"+id);operations.Cancel("in:"+id);
         if(Outgoing.TryRemove(id,out var outgoing))await outgoing.DisposeAsync();
         if(Incoming.TryRemove(id,out var incoming))await incoming.DisposeAsync();
@@ -210,6 +216,7 @@ sealed class Engine : IAsyncDisposable
     }
     public async Task RemoveOutgoing(string id)
     {
+        await Goodbye(id);
         await DropOutgoing(id);
         if(hubs.TryRemove(id,out var hub))await hub.DisposeAsync();
     }
@@ -361,6 +368,7 @@ sealed class Engine : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        await GoodbyeAll();   // quitting ArdUi is on purpose too: the other side must not wait for this one to come back
         await operations.Close();
         await Audit.DisposeAsync();
             foreach(var session in Outgoing.Values.Concat(Incoming.Values)) await session.DisposeAsync();

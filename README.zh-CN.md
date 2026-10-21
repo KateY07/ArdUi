@@ -6,7 +6,7 @@
 
 **[网页介绍与演示](https://katey07.github.io/ArdUi/)** · **[下载](https://github.com/KateY07/ArdUi/releases)** · [自托管](#自托管) · [历史设计文档](docs/DESIGN-v2.md)
 
-当前版本：v5.3。v5 起，服务端拒绝所有 v5.pre1 以下的旧客户端。
+当前版本：v5.4。v5 起，服务端拒绝所有 v5.pre1 以下的旧客户端。
 
 ## 简介
 

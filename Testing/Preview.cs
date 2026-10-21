@@ -54,6 +54,20 @@ static class Preview
             while(!pending.IsCompleted&&limit.Elapsed<TimeSpan.FromSeconds(2)){Dispatcher.UIThread.RunJobs();Thread.Sleep(1);}
             if(!pending.IsCompleted||pending.IsCanceled)return false;return pending.GetAwaiter().GetResult();
         }
+        // a remote controller's click (injected input) is refused, the person's is not
+        LocalInput.Force(); LocalInput.Reset();
+        {
+            var guarded=(Task<bool>)method.Invoke(owner,[new Pairing("ABC123",new string('a',64),true),CancellationToken.None])!;
+            Dispatcher.UIThread.RunJobs();
+            var button=panel.GetVisualDescendants().OfType<Button>().Single(b=>b.Content as string=="允许连接");
+            LocalInput.Press(true,Environment.TickCount64);
+            button.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));Dispatcher.UIThread.RunJobs();
+            if(guarded.IsCompleted)throw new IOException("A remote (injected) click approved the session.");
+            LocalInput.Press(false,Environment.TickCount64+2);
+            button.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+            if(!Finish(guarded))throw new IOException("The person's own click did not approve the session.");
+        }
+        LocalInput.Reset();
         foreach(var allow in new[]{false,true})
         {
             var pending=(Task<bool>)method.Invoke(owner,[new Pairing("ABC123",new string('a',64),true),CancellationToken.None])!;

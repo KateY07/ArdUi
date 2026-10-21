@@ -26,3 +26,6 @@ __pycache__/
 promo/*.mp4
 promo/_audio.wav
 promo/__pycache__/
+
+# WebRTC link helper (built from rtc/, not committed)
+/rtc/ardrtc.exe

@@ -279,7 +279,7 @@ sealed partial class MainWindow
     void StartIsland()
     {
         if (engine == null || directory == null || island != null) return;
-        island = new IslandWindow(engine, LabelOf, id => openChatPeer == id && IsVisible && WindowState != WindowState.Minimized, OpenFromIsland);
+        island = new IslandWindow(engine, LabelOf, id => openChatPeer == id && IsVisible && WindowState != WindowState.Minimized, OpenFromIsland, ShowFromTray);
         island.Start();
     }
 
