@@ -25,6 +25,8 @@ sealed class DirectoryClient : IAsyncDisposable
     readonly ConcurrentDictionary<string,ReconnectJob> reconnects=new();
     readonly Dictionary<string, long> seen = new();
     readonly Queue<DateTime> attempts = new();
+    readonly Dictionary<string, Queue<DateTime>> attemptsBy = new();
+    internal const int PasswordTriesPerDevice = 5, PasswordTriesOverall = 30;   // per minute
     CancellationTokenSource incoming = new();
     // Who is online, learned from the trusted server only; nothing here opens a connection to a device.
     readonly ConcurrentDictionary<string,(PresenceEntry Entry,DateTimeOffset At)> presence=new();
@@ -78,6 +80,7 @@ sealed class DirectoryClient : IAsyncDisposable
         if (File.Exists(authorityPath) && File.ReadAllText(authorityPath) != server.AbsoluteUri)
             throw new InvalidDataException("可信服务器已改变。请先恢复原配置，或使用独立应用目录完成重新核对。");
         File.WriteAllText(authorityPath, server.AbsoluteUri);
+        LoadNetwork();
     }
     void Save()
     {
@@ -91,14 +94,9 @@ sealed class DirectoryClient : IAsyncDisposable
         try{return (BinaryPrimitives.ReadUInt32BigEndian(digest)%1_000_000).ToString("D6");}
         finally{CryptographicOperations.ZeroMemory(digest);}
     }
-    public SignedEnvelope ApproveTransit(string route,string controller,string candidate,string aSession,string bSession)
-    {
-        lock(sync)
-        {
-            if(!access.Enabled||!(access.Controllers.ContainsKey(controller)||temporary.ContainsKey(controller)&&engine.Incoming.ContainsKey(controller)))throw new IOException("当前已无被控授权。");
-            return Sign("/transit-approval/v2",new{route,a=controller,b=engine.Id,c=candidate,aSession,bSession,expires=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+90});
-        }
-    }
+    // Signs this device's half of a session's key exchange with the device key, for the session with `peer` (see OverlayIdentity).
+    public OverlayIdentity OverlayIdentity(string peer) =>
+        new(engine.Id, Wire.Endpoint(peer), data => NSec.Cryptography.SignatureAlgorithm.Ed25519.Sign(key, data));
     SignedEnvelope Sign(string route, object value)
     {
         var payload = Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(value, Wire.Json));
@@ -130,9 +128,54 @@ sealed class DirectoryClient : IAsyncDisposable
             string message;
             try { message = JsonDocument.Parse(text).RootElement.GetProperty("error").GetString()!; }
             catch { message = "可信服务器暂时不可用。"; }
+            if ((int)response.StatusCode == 426) throw new OutdatedClientException(message);
             throw new IOException(message);
         }
         return JsonSerializer.Deserialize<T>(text, Wire.Json) ?? throw new InvalidDataException("服务器响应为空。");
+    }
+    // The server no longer accepts this version (HTTP 426): nothing works until ArdUi is updated, so say that, not "network trouble".
+    public sealed class OutdatedClientException(string message) : IOException(message);
+    public string? Outdated { get; private set; }
+    public FerryMonitor? Ferries { get; private set; }
+    Task? ferryTask;
+    // ---- this network's relays: M says where its relay directory and address discovery are, and its key ------------------------
+    // Learned from the server (the one domain this client is configured with), kept in data\network.json so that a client that
+    // starts while the server is unreachable still knows them. Refreshed hourly.
+    string NetworkCache => Path.Combine(engine.State.Root, "network.json");
+    DateTimeOffset networkAt;
+    void LoadNetwork()
+    {
+        if (engine.Settings.StaticRelay || !File.Exists(NetworkCache)) return;
+        try { engine.Settings.Network = JsonSerializer.Deserialize<NetworkInfo>(File.ReadAllText(NetworkCache), Wire.Json)?.Checked(); }
+        catch (Exception ex) when (ex is IOException or JsonException or InvalidDataException) { Diagnostics.Log("network-cache", ex.Message); }
+    }
+    public async Task RefreshNetwork(CancellationToken ct)
+    {
+        if (engine.Settings.StaticRelay) return;
+        using var response = await http.GetAsync("/api/v1/network", ct);
+        var text = await response.Content.ReadAsStringAsync(ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            string message;
+            try { message = JsonDocument.Parse(text).RootElement.GetProperty("error").GetString()!; }
+            catch { message = "可信服务器没有提供中继信息。"; }
+            throw new IOException(message);
+        }
+        var network = (JsonSerializer.Deserialize<NetworkInfo>(text, Wire.Json) ?? throw new InvalidDataException("可信服务器返回的中继信息为空。")).Checked();
+        if (network != engine.Settings.Network)
+        {
+            engine.Settings.Network = network;
+            File.WriteAllText(NetworkCache + ".tmp", JsonSerializer.Serialize(network, Wire.Json));
+            File.Move(NetworkCache + ".tmp", NetworkCache, true);
+            engine.Events.Add("INFO", "服务器", "中继目录：" + network.RelayDirectory);
+        }
+        networkAt = DateTimeOffset.UtcNow;
+    }
+    // A session cannot start without knowing the relays; ask now if this client has never been told.
+    async Task EnsureNetwork(CancellationToken ct)
+    {
+        if (engine.Settings.StaticRelay || engine.Settings.Network != null) return;
+        await RefreshNetwork(ct);
     }
     public async Task Register(CancellationToken ct)
     {
@@ -232,7 +275,22 @@ sealed class DirectoryClient : IAsyncDisposable
                     await Register(stop.Token);
                     if (Enabled) await Call<JsonElement>("/api/v1/access", new { enabled = true }, stop.Token);
                 }
+                if (engine.Settings.Network == null || DateTimeOffset.UtcNow - networkAt >= TimeSpan.FromHours(1))
+                {
+                    // the cached value keeps working if this fails; a missing one is reported when a connection needs it
+                    try { await RefreshNetwork(stop.Token); }
+                    catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
+                    catch (Exception ex) when (ex is IOException or HttpRequestException or InvalidDataException or JsonException or TaskCanceledException)
+                    { networkAt = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(55); Diagnostics.Log("network-refresh", ex.Message); }
+                }
                 await Poll(stop.Token);
+                Outdated = null;
+                // once the network's relays are known: measure the ArdFerry nodes from here and report to M
+                if (ferryTask == null && engine.Settings.Network != null)
+                {
+                    Ferries = new FerryMonitor(engine, (route, value, ct) => Call<JsonElement>(route, value, ct));
+                    ferryTask = Task.Run(() => Ferries.Run(stop.Token));
+                }
                 // The status line keeps the last notice, so recovery must replace the earlier failure text.
                 if (announced) { Notice?.Invoke("网络已恢复"); engine.Events.Add("INFO", "服务器", "可信服务器连接已恢复"); }
                 online = true; announced = false; Changed?.Invoke();
@@ -246,6 +304,15 @@ sealed class DirectoryClient : IAsyncDisposable
                 }
             }
             catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
+            catch (OutdatedClientException ex)
+            {
+                // refused for being too old: tell the person once, plainly, and ask the server again only now and then
+                online = false;
+                if (Outdated == null) { Outdated = ex.Message; Notice?.Invoke(ex.Message); engine.Events.Add("ERROR", "服务器", "可信服务器拒绝了此版本：" + ex.Message); }
+                Changed?.Invoke();
+                try { await Task.Delay(TimeSpan.FromMinutes(5), stop.Token); } catch (OperationCanceledException) { break; }
+                continue;
+            }
             catch (Exception ex)
             { online = false; Changed?.Invoke(); if (!announced) { Notice?.Invoke("网络不稳定，正在重试…"); engine.Events.Add("ERROR", "服务器", "无法连接可信服务器，每 3 秒重试一次：" + ex.Message); } announced = true; }
             try { await Task.Delay(3000, stop.Token); } catch (OperationCanceledException) { break; }
@@ -294,6 +361,7 @@ sealed class DirectoryClient : IAsyncDisposable
                 throw new InvalidDataException("连接请求与设备签名不匹配。");
             if (!ClientVersion.Allowed(request.Client))
                 throw new InvalidDataException($"对方的 ArdUi 版本过旧（需要 {ClientVersion.Minimum} 或更高），已拒绝其接入。");
+            await EnsureNetwork(ct);
             var sessionId = await engine.AcceptServerSession(ticket, (request, token) => AuthorizePassword(ticket, request, token), ct);
             await Call<JsonElement>($"/api/v1/tickets/{ticket.Id}/ready",
                 new ServerOffer(sessionId, ticket.Id, ticket.ControllerEndpoint, engine.Id, ticket.ClientSessionId, ticket.Expires), ct);
@@ -333,6 +401,11 @@ sealed class DirectoryClient : IAsyncDisposable
         try { return await ConfirmSession(new Pairing(ticket.ControllerCode, ticket.ControllerEndpoint, true), ct); }
         finally { confirmations.Release(); }
     }
+    // After a prompt the answer may come late: the device must still be trusted, access still on, and no revocation since the request began.
+    bool StillGranted(string controller, long revision)
+    {
+        lock (sync) return access.Enabled && access.Controllers.ContainsKey(controller) && revocations.GetValueOrDefault(controller) == revision;
+    }
     async Task<Authorization?> AuthorizePassword(ServerTicket ticket, PasswordRequest request, CancellationToken ct)
     {
         long revision;
@@ -347,13 +420,18 @@ sealed class DirectoryClient : IAsyncDisposable
                 returning=new Authorization(saved.Receipt,Permissions.Parse(saved.Perms),false);
             }
         }
-        if(returning!=null) return await AskEverySession(ticket,ct) ? returning : null;
+        if(returning!=null) return await AskEverySession(ticket,ct) && StillGranted(ticket.ControllerEndpoint,revision) ? returning : null;
         lock (sync)
         {
+            // Password guesses are limited per device, so one device cannot use up the attempts of everyone else; a wider limit across all
+            // devices still bounds a guesser that keeps making new identities.
             var now = DateTime.UtcNow;
-            while (attempts.TryPeek(out var time) && time < now.AddMinutes(-1)) attempts.Dequeue();
-            if (!access.Enabled || attempts.Count >= 10 || !Regex.IsMatch(request.Password,@"\A[0-9]{6}\z")) return null;
-            attempts.Enqueue(now);
+            static void Expire(Queue<DateTime> queue, DateTime now) { while (queue.TryPeek(out var time) && time < now.AddMinutes(-1)) queue.Dequeue(); }
+            Expire(attempts, now);
+            foreach (var idle in attemptsBy.Where(p => { Expire(p.Value, now); return p.Value.Count == 0; }).Select(p => p.Key).ToArray()) attemptsBy.Remove(idle);
+            var mine = attemptsBy.TryGetValue(ticket.ControllerEndpoint, out var queue) ? queue : attemptsBy[ticket.ControllerEndpoint] = new();
+            if (!access.Enabled || mine.Count >= PasswordTriesPerDevice || attempts.Count >= PasswordTriesOverall || !Regex.IsMatch(request.Password,@"\A[0-9]{6}\z")) return null;
+            attempts.Enqueue(now); mine.Enqueue(now);
         }
         var supplied=Encoding.ASCII.GetBytes(request.Password);var valid=false;
         try
@@ -376,7 +454,7 @@ sealed class DirectoryClient : IAsyncDisposable
             if (knownAuth != null)
             {
                 if (AlwaysAsk && !(ConfirmSession != null && await ConfirmSession(new Pairing(ticket.ControllerCode, ticket.ControllerEndpoint, true), ct))) return null;
-                return knownAuth;
+                return StillGranted(ticket.ControllerEndpoint, revision) ? knownAuth : null;
             }
             var decision = ConfirmIncoming == null ? Decision.Rejected : await ConfirmIncoming(new Pairing(ticket.ControllerCode, ticket.ControllerEndpoint, true), ct);
             if (!decision.Accepted) return null;
@@ -385,7 +463,7 @@ sealed class DirectoryClient : IAsyncDisposable
             {
                 if (!access.Enabled||revocations.GetValueOrDefault(ticket.ControllerEndpoint)!=revision) return null;
                 var receipt = Sign("/grant/v1",new GrantReceipt(ticket.ControllerEndpoint,engine.Id,Guid.NewGuid().ToString("N")));
-                var grant = new ControllerGrant(ticket.ControllerCode, receipt, (int)decision.Perms);
+                var grant = new ControllerGrant(ticket.ControllerCode, receipt, Permissions.Store(decision.Perms));
                 foreach (var gone in temporary.Keys.Where(k => !engine.Incoming.ContainsKey(k)).ToArray()) temporary.Remove(gone);
                 if (decision.Once) temporary[ticket.ControllerEndpoint] = grant;
                 else { access.Controllers[ticket.ControllerEndpoint] = grant; Save(); Changed?.Invoke(); }
@@ -449,6 +527,7 @@ sealed class DirectoryClient : IAsyncDisposable
         password=password.Trim();
         if (code.Length == 0) await Register(ct);
         if (machine == Code) throw new InvalidOperationException("不能连接本机。");
+        await EnsureNetwork(ct);
         Report(machine,ConnectStage.Lookup);
         var target = await Call<MachineInfo>("/api/v1/lookup", new { code = machine }, ct);
         if (target.Code != machine) throw new InvalidDataException("机器编号不匹配。");
@@ -502,7 +581,7 @@ sealed class DirectoryClient : IAsyncDisposable
         lock(sync)
         {
             if(!access.Controllers.TryGetValue(endpoint,out var grant))throw new IOException("该设备已没有授权。");
-            access.Controllers[endpoint]=grant with{Perms=(int)perms};Save();
+            access.Controllers[endpoint]=grant with{Perms=Permissions.Store(perms)};Save();
         }
         var live=engine.Incoming.ContainsKey(endpoint);
         if(live){await engine.DropIncoming(endpoint);engine.SetStatus(endpoint,"权限已更改，对方需要重新连接");}
@@ -567,6 +646,7 @@ sealed class DirectoryClient : IAsyncDisposable
         await connects.Close();
         foreach(var job in reconnects.Values)job.Stop.Cancel();
         try { await loop; } catch { }
+        if (ferryTask != null) try { await ferryTask; } catch { }
         await engine.StopIncoming();
         try { await Task.WhenAll(jobs.Values); } catch { }
         try{await Task.WhenAll(reconnects.Values.Select(j=>j.Task));}catch{}

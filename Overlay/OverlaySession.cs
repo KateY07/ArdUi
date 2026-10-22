@@ -19,7 +19,8 @@ sealed class OverlaySession : IAsyncDisposable
     readonly SemaphoreSlim servingBandwidth=new(1);
     readonly SortedDictionary<long,PendingFrame> pending=new();
     readonly SortedDictionary<long,byte[]> reorder=new();
-    readonly SemaphoreSlim window=new(Window),incomingSignal=new(0,1),controlSlots=new(8),bandwidthGate=new(1);
+    internal const int ControlSlots=16;
+    readonly SemaphoreSlim window=new(Window),incomingSignal=new(0,1),controlSlots=new(ControlSlots),bandwidthGate=new(1);
     readonly Channel<(OverlayLink Link,byte[] Frame,bool Udp)> replies=Channel.CreateBounded<(OverlayLink,byte[],bool)>(128);
     readonly SemaphoreSlim ackSignal=new(0,1);
     readonly object incomingGate=new();
@@ -46,10 +47,10 @@ sealed class OverlaySession : IAsyncDisposable
     public bool Expired=>stop.IsCancellationRequested||missingSince!=0&&Environment.TickCount64-missingSince>180000;
     public string Selected=>selected;
     public bool RecoveringSelectedPath{get{lock(selectionGate)return healthFallback!=null;}}
-    public string Network=>selected=="base"?baseNetwork():"ArdTransit / "+selected[..Math.Min(6,selected.Length)];
+    public string Network=>selected=="base"?baseNetwork():"备用路径 / "+selected[..Math.Min(6,selected.Length)];
     public Func<string,JsonElement,CancellationToken,Task<object>>? Control;
     public Action? Changed;
-    public long Retransmits,Duplicates,UdpFragments,UdpDrops,Switches;
+    public long Retransmits,Duplicates,UdpFragments,UdpDrops,Switches,ControlsRefused;
     public CancellationToken Token=>stop.Token;
     sealed class Fragments(int count,long time)
     {public byte[][] Parts{get;}=new byte[count][];public long Time{get;}=time;public int Bytes;}
@@ -67,7 +68,7 @@ sealed class OverlaySession : IAsyncDisposable
         basePort=caller?port:0;targetPort=caller?0:port;cipher=new(secret,context,caller);
         if(caller)
         {
-            listener=new TcpListener(IPAddress.Loopback,0);listener.Start();facade=new UdpClient(new IPEndPoint(IPAddress.Loopback,Port));Wire.ConfigureUdp(facade);
+            (listener,facade)=Wire.LoopbackPair();Wire.ConfigureUdp(facade!);
             accept=Accept();datagramReader=ReadFacade();
         }
         orderedReceiver=ReceiveOrdered();replyWriter=WriteReplies();ackWriter=WriteAcks();maintenance=Maintain();health=MonitorHealth();
@@ -80,16 +81,19 @@ sealed class OverlaySession : IAsyncDisposable
         return key.DeriveRawSecretAgreement(other.PublicKey);
     }
     static byte[] Context(OverlayHello a,OverlayHello b,byte[] cap)=>SHA256.HashData(Encoding.UTF8.GetBytes($"ArdUi/3\n{a.Session}\n{a.Key}\n{b.Key}\n{Convert.ToHexString(cap)}"));
-    public static async Task<OverlaySession> Connect(int port,byte[] cap,Func<string> network,CancellationToken ct,int maxFlowCredits=FlowCreditBudget.Maximum)
+    // identity: the two devices' keys; every real session passes it (only in-process transport tests run without one).
+    public static async Task<OverlaySession> Connect(int port,byte[] cap,Func<string> network,CancellationToken ct,int maxFlowCredits=FlowCreditBudget.Maximum,OverlayIdentity? identity=null)
     {
         var tcp=await ConnectBase(port,cap,4,ct);
         try
         {
             using var key=ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
             var hello=new OverlayHello(Guid.NewGuid().ToString("N"),Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()),3,Math.Clamp(maxFlowCredits,FlowWindow,FlowCreditBudget.Maximum));
+            if(identity!=null)hello=identity.SignHello(hello,cap,null);
             await Wire.WriteJson(tcp.GetStream(),hello,ct);var reply=await Wire.ReadJson<OverlayHello>(tcp.GetStream(),ct);
             if(reply.Version!=3)throw new IOException("流隔离协议需要双方均升级到 ArdUi v3。");
             if(reply.Session!=hello.Session)throw new IOException("覆盖层会话编号不匹配。");
+            identity?.Check(reply,cap,hello.Key);
             var secret=Derive(key,reply.Key);OverlaySession session;
             try{session=new(hello.Session,true,port,cap,secret,Context(hello,reply,cap),network,reply.MaxFlowCredits);}finally{CryptographicOperations.ZeroMemory(secret);}
             await session.AttachClientBase(tcp);session.reconnect=session.ReconnectBase();
@@ -102,13 +106,15 @@ sealed class OverlaySession : IAsyncDisposable
         }
         catch{tcp.Dispose();throw;}
     }
-    public static async Task<OverlaySession> AcceptHello(TcpClient tcp,int port,byte[] cap,Func<string> network,CancellationToken ct)
+    public static async Task<OverlaySession> AcceptHello(TcpClient tcp,int port,byte[] cap,Func<string> network,CancellationToken ct,OverlayIdentity? identity=null)
     {
         var hello=await Wire.ReadJson<OverlayHello>(tcp.GetStream(),ct);
         if(hello.Version!=3)throw new IOException("流隔离协议需要双方均升级到 ArdUi v3。");
         if(!Regex.IsMatch(hello.Session,@"\A[0-9a-f]{32}\z"))throw new IOException("覆盖层编号无效。");
+        identity?.Check(hello,cap,null);   // before anything is derived or answered: only the authorised controller's device may open the session
         using var key=ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
         var reply=new OverlayHello(hello.Session,Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()),3,Math.Clamp(hello.MaxFlowCredits,FlowWindow,FlowCreditBudget.Maximum));var secret=Derive(key,hello.Key);
+        if(identity!=null)reply=identity.SignHello(reply,cap,hello.Key);
         try
         {
             var session=new OverlaySession(hello.Session,false,port,cap,secret,Context(hello,reply,cap),network,reply.MaxFlowCredits);
@@ -353,7 +359,8 @@ sealed class OverlaySession : IAsyncDisposable
             var message=JsonSerializer.Deserialize<OverlayControl>(body,Wire.Json)??throw new IOException("空控制消息。");
             if(kind==6)
             {if(controls.TryRemove(message.Id,out var waiter)){if(message.Error!=null)waiter.TrySetException(new IOException(message.Error));else waiter.TrySetResult(message.Data);}return;}
-            if(!controlSlots.Wait(0))throw new IOException("对端控制请求过多。");
+            // Too many requests at once: answer this one "busy" (the sender sees an error for that request) instead of ending the session.
+            if(!controlSlots.Wait(0)){Interlocked.Increment(ref ControlsRefused);_=Busy(message);return;}
             _=HandleControl(message);return;
         }
         if(kind==1)
@@ -369,6 +376,12 @@ sealed class OverlaySession : IAsyncDisposable
     }
     async Task ResetFlow(uint id)
     {try{await SendReliable(4,id,[]);}catch(Exception ex){Diagnostics.Log("flow-reset",ex.Message);}}
+    async Task Busy(OverlayControl message)
+    {
+        Diagnostics.Log("control-busy",message.Method);
+        try{await SendReliable(6,0,JsonSerializer.SerializeToUtf8Bytes(message with{Data=JsonSerializer.SerializeToElement(new{}),Error="对端正忙，请稍后重试。"},Wire.Json));}
+        catch(Exception ex){Diagnostics.Log("control-busy-reply",ex.Message);}
+    }
     async Task HandleControl(OverlayControl message)
     {
         var watch=Stopwatch.StartNew();
@@ -390,7 +403,7 @@ sealed class OverlaySession : IAsyncDisposable
         {
             Diagnostics.Log("control",message.Method+": "+ex.Message);
             if(!stop.IsCancellationRequested)
-                try{await SendReliable(6,0,JsonSerializer.SerializeToUtf8Bytes(message with{Data=JsonSerializer.SerializeToElement(new{}),Error=ex.Message},Wire.Json));}
+                try{await SendReliable(6,0,JsonSerializer.SerializeToUtf8Bytes(message with{Data=JsonSerializer.SerializeToElement(new{}),Error=ForPeer(ex.Message)},Wire.Json));}
                 catch(Exception sendError){Diagnostics.Log("control-reply",sendError.Message);}
         }
         finally
@@ -398,6 +411,15 @@ sealed class OverlaySession : IAsyncDisposable
             if(trace)Diagnostics.Log("control-handler-finished",$"{message.Method} id={message.Id} elapsed_ms={watch.Elapsed.TotalMilliseconds:F2}");
             controlSlots.Release();
         }
+    }
+    // An error goes back to the other device as text. It says what failed, never where things are on this machine: file paths, the account
+    // name and the computer name are taken out (the full text stays in this machine's diagnostic log).
+    internal static string ForPeer(string message)
+    {
+        var text=Regex.Replace(message,@"(?:[A-Za-z]:\\|\\\\)[^\s""'<>|，。：；、）)]*","[本机路径]");
+        foreach(var name in new[]{Environment.UserName,Environment.MachineName}.Where(n=>n.Length>=3))
+            text=Regex.Replace(text,Regex.Escape(name),"[本机]",RegexOptions.IgnoreCase);
+        return text.Length>500?text[..500]+"…":text;
     }
     public const int MaxControlBody=60000;
     public async Task<JsonElement> Request(string method,object value,CancellationToken ct)

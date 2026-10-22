@@ -31,10 +31,13 @@ static class SelfTest
             var hostChecks = 0; var callerChecks = 0;
             var prompt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var approval = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            hd.Confirm = (pair, token) =>
+            // the person at the host approves a new controller (with RDP, which the loopback echo service stands in for)
+            var granted = Permissions.Default | Perm.Rdp;
+            hd.ConfirmIncoming = async (pair, token) =>
             {
                 if (!pair.Incoming || pair.Endpoint != caller.Id) throw new Exception("Host fingerprint mismatch.");
-                Interlocked.Increment(ref hostChecks); prompt.TrySetResult(); return approval.Task.WaitAsync(token);
+                Interlocked.Increment(ref hostChecks); prompt.TrySetResult();
+                return await approval.Task.WaitAsync(token) ? new Decision(true, false, granted) : Decision.Rejected;
             };
             cd.Confirm = (pair, token) =>
             {
@@ -80,6 +83,20 @@ static class SelfTest
                 await response;
             }
             await VerifyFlow();Console.WriteLine("PASS: loopback TCP proxy through authenticated ARD to remote service.");
+            // the session's control channel runs over the device-signed overlay: a message goes through it
+            await caller.ChatFor(host.Id).SendText("ardui-signed-session",ct);
+            if(!host.ChatFor(caller.Id).Messages.Any(m=>m.Text=="ardui-signed-session"))throw new Exception("Message did not cross the signed session.");
+            Console.WriteLine("PASS: both devices signed the session's key exchange; a message crossed it.");
+            // a local process that finds the host's loopback gateway cannot be admitted a second time and gets no session token
+            using(var intruder=new TcpClient())
+            {
+                await intruder.ConnectAsync(IPAddress.Loopback,host.Incoming[caller.Id].LocalPort,ct);
+                var head=new byte[23];"AUI1"u8.CopyTo(head);head[20]=2;await intruder.GetStream().WriteAsync(head,ct);
+                await Wire.WriteJson(intruder.GetStream(),new PasswordRequest(false,""),ct);
+                var reply=await Wire.ReadJson<AdmissionReply>(intruder.GetStream(),ct);
+                if(reply.Accepted||reply.Token!=null)throw new Exception("A second admission handed out the session token.");
+            }
+            Console.WriteLine("PASS: a local process reaching the host gateway is refused a second admission and gets no token.");
             var first=caller.Outgoing[host.Id];var child=first.Process;var stablePort=first.Forward(port).Port;await child.DisposeAsync();
             using(var recovery=CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
@@ -98,7 +115,7 @@ static class SelfTest
             try { await cd.Connect(hd.Code,"",ct,enrolling:false); throw new Exception("Revoked caller admitted."); }
             catch (IOException) { }
             Console.WriteLine("PASS: revocation removes ACL and denies reconnect.");
-            hd.Confirm=(pair,token)=>Task.FromResult(pair.Incoming&&pair.Endpoint==caller.Id);
+            hd.ConfirmIncoming=(pair,token)=>Task.FromResult(pair.Incoming&&pair.Endpoint==caller.Id?new Decision(true,false,granted):Decision.Rejected);
             for(var round=1;round<=3;round++)
             {
                 Console.WriteLine($"TEST: repeated add round {round} connecting.");

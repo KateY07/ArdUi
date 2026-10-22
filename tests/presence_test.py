@@ -15,7 +15,7 @@ from pathlib import Path
 
 folder = tempfile.mkdtemp(prefix='ardui-presence-')
 os.environ['ARDUI_DATABASE'] = os.path.join(folder, 'devices.sqlite3')
-os.environ['ARDUI_TRANSIT_KEY'] = os.path.join(folder, 'transit-key')
+os.environ['ARDUI_NETWORK'] = os.path.join(folder, 'network.json')
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'server'))
 
 # Database created by the first release has no "name" column; the new code must migrate it in place.
@@ -44,7 +44,7 @@ class Device:
         return dict(endpoint=self.id, issuedAt=issued, nonce=nonce, payload=payload,
                     signature=base64.b64encode(self.key.sign(message)).decode())
 
-    def call(self, path, data, client='v5.pre1'):
+    def call(self, path, data, client='v5.pre5'):
         body = json.dumps(self.sign(path, data)).encode()
         environ = {'PATH_INFO': path, 'REQUEST_METHOD': 'POST', 'CONTENT_LENGTH': str(len(body)),
                    'wsgi.input': io.BytesIO(body), 'REMOTE_ADDR': '127.0.0.1', 'HTTP_X_ARDUI_CLIENT': client}
@@ -94,11 +94,11 @@ assert answer['peers'][host.id]['online'] is False, answer
 assert controller.call('/api/v1/presence', {'peers': 'x'})[0] == 400
 assert controller.call('/api/v1/presence', {'peers': [{'endpoint': host.id}]})[0] == 400
 assert controller.call('/api/v1/presence', {'peers': [], 'extra': 1})[0] == 400
-# Clients older than v5.pre1 are refused: no version header (every earlier release), an older one, or a malformed one.
-for header in ('', 'v4.pre9', 'v3.pre17', 'v5.pre0', 'v5.pre', '5.0.0-pre.1', 'x' * 40):
+# Clients older than v5.5 (v5.pre5) are refused: no version header (every earlier release), an older one, or a malformed one.
+for header in ('', 'v4.pre9', 'v3.pre17', 'v5.pre0', 'v5.pre1', 'v5.pre4', 'v5.pre', '5.0.0-pre.1', 'x' * 40):
     status, answer = controller.call('/api/v1/poll', {'enabled': True}, client=header)
     assert status == 426 and '版本过旧' in answer['error'], (header, status, answer)
-for header in ('v5.pre1', 'v5.pre2', 'v5.pre10', 'v6.pre1'):
+for header in ('v5.pre5', 'v5.pre6', 'v5.pre10', 'v6.pre1'):
     assert controller.call('/api/v1/register', {}, client=header)[0] == 200, header
 # The refusal comes before anything is checked or consumed: an unsigned body with an old header is 426, not 401.
 environ = {'PATH_INFO': '/api/v1/poll', 'REQUEST_METHOD': 'POST', 'CONTENT_LENGTH': '2', 'wsgi.input': io.BytesIO(b'{}'), 'REMOTE_ADDR': '127.0.0.1'}
@@ -109,11 +109,49 @@ assert seen['status'] == 426, seen
 health = {}
 environ = {'PATH_INFO': '/api/health', 'REQUEST_METHOD': 'GET', 'REMOTE_ADDR': '127.0.0.1'}
 body = b''.join(arduiserver.application(environ, lambda status, headers: health.update(status=int(status.split()[0]))))
-assert health['status'] == 200 and json.loads(body)['minClient'] == 'v5.pre1' and json.loads(body)['version'] == 'v5.pre1', body
+assert health['status'] == 200 and json.loads(body)['minClient'] == 'v5.pre5' and json.loads(body)['version'] == 'v5.5', body
 # The connection request carries the controller's version, signed with the rest of the request.
 req = {'code': 'AAAAAA', 'sessionId': 'a' * 64, 'targetEndpoint': 'b' * 64, 'requestId': 'c' * 32, 'expires': int(time.time()) + 200}
 assert controller.call('/api/v1/connect', dict(req))[0] == 400, 'a request without the version is invalid'
 assert controller.call('/api/v1/connect', dict(req, client='v4.pre9'))[0] == 426, 'an old version in the request is refused'
-assert controller.call('/api/v1/connect', dict(req, client='v5.pre1'))[0] != 400, 'a request with the version passes validation'
-print('PASS: client version gate (v5.pre1)')
+assert controller.call('/api/v1/connect', dict(req, client='v5.pre5'))[0] != 400, 'a request with the version passes validation'
+print('PASS: client version gate (v5.5)')
+# What clients learn about this network: M's relay directory, address discovery and key, from the operator's file.
+def network(client='v5.pre5'):
+    seen = {}
+    environ = {'PATH_INFO': '/api/v1/network', 'REQUEST_METHOD': 'GET', 'REMOTE_ADDR': '127.0.0.1', 'HTTP_X_ARDUI_CLIENT': client}
+    body = b''.join(arduiserver.application(environ, lambda status, headers: seen.update(status=int(status.split()[0]))))
+    return seen['status'], json.loads(body)
+assert network()[0] == 503, 'a network without relay configuration says so'
+good = {'relayDirectory': 'https://m.example:8080/directory', 'master': 'https://m.example:7842/', 'masterKey': 'spki:3059'}
+Path(arduiserver.NETWORK_FILE).write_text(json.dumps(good), encoding='utf-8')
+assert network() == (200, good), network()
+assert network(client='')[0] == 200, 'ArdFerry nodes (no ArdUi version) read it too'
+for bad in ({**good, 'masterKey': 'nope'}, {**good, 'master': 'http://m.example:7842/'}, {**good, 'extra': 1}, ['x']):
+    Path(arduiserver.NETWORK_FILE).write_text(json.dumps(bad), encoding='utf-8')
+    assert network()[0] == 503, bad
+print('PASS: /api/v1/network serves the operator-written relay configuration, validated')
 print('PASS: name migration, computer name via poll, grant-gated presence, offline, malformed requests')
+
+# ArdFerry quality as clients see it: signed reports, validated, aggregated; the public view carries no addresses.
+arduiserver.M_STATUS = 'https://127.0.0.1:9/status'   # no M here: the page still works and says so
+good_entry = dict(node='5a91d1d9407087b0', probes=3, ok=3, rttMs=101.5, sessions=1, sessionRttMs=120.0, mbps=8.5)
+status, answer = controller.call('/api/v1/ferry-report', {'ferries': [good_entry]})
+assert status == 200 and answer['next'] == arduiserver.REPORT_SECONDS, (status, answer)
+assert host.call('/api/v1/ferry-report', {'ferries': [dict(good_entry, rttMs=99.0, sessions=0, sessionRttMs=None, mbps=None)]})[0] == 200
+for bad in ({'ferries': [dict(good_entry, ok=4)]}, {'ferries': [dict(good_entry, extra=1)]}, {'ferries': 'x'},
+            {'ferries': [dict(good_entry, node='a b')]}, {'ferries': [good_entry] * 17}, {'ferries': [dict(good_entry, mbps=-1)]}):
+    assert controller.call('/api/v1/ferry-report', bad)[0] == 400, bad
+assert Device().call('/api/v1/ferry-report', {'ferries': [good_entry]})[0] == 403, 'only registered devices report'
+view = arduiserver.ferry_view(admin=False)
+node = view['nodes'][0]
+assert node['node'] == good_entry['node'] and view['note'], view
+c = node['clients']
+assert (c['devices_now'], c['sessions_now'], c['devices_24h']) == (2, 1, 2) and view['devices_now'] == 2, c
+assert c['client_rtt_ms_median'] == 100.2 and c['session_rtt_ms_median'] == 120.0 and c['client_success_rate_24h'] == 1.0, c
+assert 'address' not in json.dumps(view) and '203.0.113' not in json.dumps(view)
+page = arduiserver.ferry_page(view)
+assert 'ArdFerry' in page and good_entry['node'] in page and '"session_mbps_median": 8.5' in page and '</script>' in page
+for _ in range(3): controller.call('/api/v1/ferry-report', {'ferries': [good_entry]})
+assert controller.call('/api/v1/ferry-report', {'ferries': [good_entry]})[0] == 429, 'a device cannot report faster than allowed'
+print('PASS: ArdFerry reports from clients: validated, rate limited, aggregated, public view without addresses')

@@ -1,5 +1,6 @@
 namespace ArdUi;
 
+// How good one path of a session is (latency, jitter, loss, bandwidth), from the overlay's own probes.
 sealed record PathQuality(int Samples,int Received,double MedianMs,double P90Ms,double JitterMs,double Loss,double? Mbps)
 {
     public double Score=>P90Ms+2*JitterMs+1000*Loss;
@@ -27,9 +28,3 @@ sealed record PathQuality(int Samples,int Received,double MedianMs,double P90Ms,
             (baseline.Mbps is >0&&Mbps>=baseline.Mbps*1.5&&P90Ms<=baseline.P90Ms+5&&Loss<=baseline.Loss);
     }
 }
-sealed record TransitCandidate(string Endpoint,int Capacity,int Active,int Mbps,long Seen);
-sealed record TransitCandidates(TransitCandidate[] Candidates);
-sealed record TransitTicket(string Route,string A,string B,string C,string ASession,string BSession,long Expires,int Mbps);
-sealed record TransitOffer(string Route,string ARelaySession,string BRelaySession,string AToken,string BToken);
-sealed record TransitReply(string Status,SignedEnvelope Ticket,SignedEnvelope? Offer);
-sealed record TransitActivation(SignedEnvelope Ticket,SignedEnvelope Offer);

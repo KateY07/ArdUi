@@ -36,10 +36,6 @@ static class FrdTest
                 Console.WriteLine($"PASS: {name}: real FRD captured/received/rendered {result.GetProperty("ReceivedFrames")} frames via encrypted native UDP; no keyboard or clipboard actions.");
             }
             await View("frd-base");
-            var candidates=(await ad.Call<TransitCandidates>("/api/v2/transit/candidates",new{target=host.Id},ct)).Candidates;
-            Check(candidates.Length>0&&await session.Transit!.ProbeCandidate(candidates[0],true,ct),"FRD test candidate unavailable.");
-            Check(session.Overlay!.Selected!="base","Candidate route not selected.");
-            await View("frd-transit");
             var revoked=await session.OpenFrd(ct,30,Path.Combine(root,"frd-revoked.json"));
             await Task.Delay(2000,ct);Console.WriteLine("TEST: revoking the controller while FRD is running.");await bd.Revoke(caller.Id);
             Check(incoming.Token.IsCancellationRequested&&!incoming.FrdLive&&!host.Incoming.ContainsKey(caller.Id),"Revocation left the controlled FRD session running.");

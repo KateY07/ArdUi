@@ -21,7 +21,33 @@ static class Wire
         if (!Regex.IsMatch(value, @"\A[A-Z0-9]{6}\z")) throw new InvalidDataException("机器编号应为 6 位大写字母或数字。");
         return value;
     }
-    public static int Port() { var l = new TcpListener(IPAddress.Loopback, 0); l.Start(); var p = ((IPEndPoint)l.LocalEndpoint).Port; l.Stop(); return p; }
+    // A loopback TCP listener and a UDP socket on the same port number. Windows reserves blocks of UDP ports (Hyper-V, WSL, Docker,
+    // VPNs: `netsh int ipv4 show excludedportrange protocol=udp`, often 100 in a row) and hands out ports roughly in sequence, so a free
+    // TCP port is often unusable for UDP many times over (and TCP has reserved blocks too). So: the UDP port the system picks (never a
+    // reserved one) for TCP as well, and once that fails, random ports of the dynamic range, where reserved blocks are a small part.
+    public static (TcpListener Tcp, UdpClient? Udp) LoopbackPair(bool udp = true)
+    {
+        if (!udp) { var only = new TcpListener(IPAddress.Loopback, 0); only.Start(); return (only, null); }
+        for (var attempt = 0; ; attempt++)
+        {
+            UdpClient? datagrams = null;
+            try
+            {
+                datagrams = new UdpClient(new IPEndPoint(IPAddress.Loopback, attempt == 0 ? 0 : Random.Shared.Next(49152, 65536)));
+                var listener = new TcpListener(IPAddress.Loopback, ((IPEndPoint)datagrams.Client.LocalEndPoint!).Port);
+                listener.Start(); return (listener, datagrams);
+            }
+            catch (SocketException ex) when (attempt < 64 && ex.SocketErrorCode is SocketError.AccessDenied or SocketError.AddressAlreadyInUse)
+            { datagrams?.Dispose(); }
+            catch { datagrams?.Dispose(); throw; }
+        }
+    }
+    // A port number free for both TCP and UDP right now, for a child process (ard, FRD) that binds both itself.
+    public static int Port()
+    {
+        var (tcp, udp) = LoopbackPair();
+        var port = ((IPEndPoint)tcp.LocalEndpoint).Port; udp!.Dispose(); tcp.Stop(); return port;
+    }
     public static void ConfigureUdp(UdpClient udp)
     {
         udp.Client.ReceiveBufferSize=1<<20;

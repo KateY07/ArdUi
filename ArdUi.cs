@@ -53,7 +53,7 @@ static class Program
             if (args.Length == 2 && args[0] == "--make-icon")
             { AppIcon.WriteIco(args[1]); return 0; }
             if (args.Length >= 1 && args[0] == "--netdiag")
-            { using var output = Console.OpenStandardOutput(); output.Write(System.Text.Encoding.UTF8.GetBytes(NetDiag.Run(new NetDiagOptions { DirectoryUrl = new Settings().Server, RelayHostPort = new Uri(new Settings().Relay).Authority, Probe = args.Length > 1 ? (_ => NetProbeLive.Ticket(args[1], new Settings().Server)) : null, ProbeFallbackHost = new Uri(new Settings().Server).Host }).GetAwaiter().GetResult().ToText())); return 0; }
+            { using var output = Console.OpenStandardOutput(); output.Write(System.Text.Encoding.UTF8.GetBytes(NetDiag.Run(new NetDiagOptions { DirectoryUrl = new Settings().Server, Probe = args.Length > 1 ? (_ => NetProbeLive.Ticket(args[1], new Settings().Server)) : null, ProbeFallbackHost = new Uri(new Settings().Server).Host }).GetAwaiter().GetResult().ToText())); return 0; }
             if (args.Length >= 2 && args[0] == "--render-netdiag")
                 return NetDiagPreview.Render(args[1], args.Length > 2 ? args[2] : null);
             if (args.Length >= 2 && args[0] == "--mapping-live")
@@ -80,6 +80,8 @@ static class Program
                 return ChatUiTests.Run();
             if (args.Contains("--chat-test"))
                 return ChatTests.Run().GetAwaiter().GetResult();
+            if (args.Contains("--security-test"))
+                return SecurityTests.Run().GetAwaiter().GetResult();
             if (args.Contains("--perm-test"))
                 return PermissionTests.Run().GetAwaiter().GetResult();
             if (args.Contains("--connect-flow-test"))
@@ -88,8 +90,8 @@ static class Program
                 return SelfTest.RunAsync().GetAwaiter().GetResult();
             if (args.Contains("--prototype-test"))
                 return SelfTest.Prototype().GetAwaiter().GetResult();
-            if (args.Contains("--transit-test"))
-                return TransitTest.Run(args).GetAwaiter().GetResult();
+            if (args.Contains("--overlay-test"))
+                return OverlayTest.Run(args).GetAwaiter().GetResult();
             if (args.Contains("--frd-test"))
                 return FrdTest.Run(args).GetAwaiter().GetResult();
             if (args.Length == 2 && args[0] == "--render-preview")

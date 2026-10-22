@@ -1,7 +1,29 @@
 namespace ArdUi;
 
-sealed record OverlayHello(string Session, string Key, int Version=0, int MaxFlowCredits=16);
+sealed record OverlayHello(string Session, string Key, int Version=0, int MaxFlowCredits=16, string? Signature=null);
 sealed record OverlayControl(string Id, string Method, JsonElement Data, string? Error = null);
+
+// Who this side is and who the other side must be, by their long-term device keys (EndpointId), and how this side signs.
+// The session token alone only says "someone who got the token": a local process can reach the loopback gateway and be admitted like the
+// ARD tunnel. Signing each side's key-exchange half with the device key binds the encrypted session to the two devices themselves.
+sealed record OverlayIdentity(string Self, string Peer, Func<byte[], byte[]> Sign)
+{
+    // The controller signs its half; the host signs its half together with the controller's, so the reply answers this hello only.
+    static byte[] Statement(string role, OverlayHello hello, string? answered, byte[] cap, string signer, string verifier) =>
+        Encoding.UTF8.GetBytes($"ArdUi overlay/1\n{role}\n{hello.Session}\n{hello.Key}\n{answered}\n{hello.MaxFlowCredits}\n{Convert.ToHexString(cap)}\n{signer}\n{verifier}");
+    public OverlayHello SignHello(OverlayHello hello, byte[] cap, string? answered) =>
+        hello with { Signature = Convert.ToBase64String(Sign(Statement(answered == null ? "controller" : "host", hello, answered, cap, Self, Peer))) };
+    public void Check(OverlayHello hello, byte[] cap, string? answered)
+    {
+        if (string.IsNullOrEmpty(hello.Signature)) throw new IOException("对方的 ArdUi 版本过旧（会话没有设备签名），请把两端都更新到 v5.5 或更高。");
+        byte[] signature;
+        try { signature = Convert.FromBase64String(hello.Signature); } catch (FormatException) { throw new CryptographicException("会话设备签名无效，连接已阻止。"); }
+        var key = NSec.Cryptography.PublicKey.Import(NSec.Cryptography.SignatureAlgorithm.Ed25519, Convert.FromHexString(Wire.Endpoint(Peer)), NSec.Cryptography.KeyBlobFormat.RawPublicKey);
+        var statement = Statement(answered == null ? "controller" : "host", hello, answered, cap, Peer, Self);
+        if (!NSec.Cryptography.SignatureAlgorithm.Ed25519.Verify(key, statement, signature))
+            throw new CryptographicException("会话不是由已授权设备建立的（设备签名不符），连接已阻止。");
+    }
+}
 
 sealed class OverlayCipher : IDisposable
 {

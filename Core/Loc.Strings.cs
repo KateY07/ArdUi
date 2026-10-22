@@ -930,5 +930,16 @@ static partial class Loc
         ("复制邀请", "Copy the invitation"),
         ("信任此设备", "Trust this device"),
         ("关闭“每次被控前都需要人工确认”", "Turn off \"Ask me before every session\""),
+        ("版本过旧，请升级 ArdUi", "This version is too old: please update ArdUi"),
+        ("客户端版本过旧，请升级到 ArdUi {0} 或更高版本。", "This ArdUi is too old: please update to ArdUi {0} or later."),
+        ("对端正忙，请稍后重试。", "The other side is busy; please try again shortly."),
+        ("被控端未允许{0}。", "The controlled machine does not allow {0}."),
+        ("对话", "chat"),
+        ("通话", "calls"),
+        ("文字对话", "Chat"),
+        ("文件与图片", "Files and images"),
+        ("双方互发消息", "Messages both ways"),
+        ("双方互传文件，保存到本机", "Files both ways, saved on this computer"),
+        ("双方都可以发起", "Either side can call"),
     ];
 }

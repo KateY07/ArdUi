@@ -10,7 +10,7 @@ static class NetDiagPreview
         {
             UseSsdp = false,
             Probe = dataRoot == null ? null : _ => NetProbeLive.Ticket(dataRoot, new Settings().Server), ProbeFallbackHost = new Uri(new Settings().Server).Host,
-            DirectoryUrl = new Settings().Server, RelayHostPort = new Uri(new Settings().Relay).Authority,
+            DirectoryUrl = new Settings().Server, RelayHostPort = "f.visnova.cn:8080",
         })).GetAwaiter().GetResult();   // off the UI thread: its context would deadlock the wait
         var stack = new StackPanel { Spacing = 8, Margin = new Thickness(14), Background = Look.Bg };
         foreach (var section in report.Sections) stack.Children.Add(MainWindow.DiagCard(section));

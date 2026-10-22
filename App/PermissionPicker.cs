@@ -1,17 +1,19 @@
 namespace ArdUi;
 
-// Chooses what a controlling device may use: FRD, RDP, file sharing. Large chips (with a note) for the approval card,
-// small pills for the list of authorised devices.
+// Chooses what a controlling device may use: FRD, RDP, the conversation, files and calls. Large chips (with a note) for the approval
+// card, small pills for the list of authorised devices.
 sealed class PermissionPicker : Border
 {
     const string Tick = "M5,12.5 L10,17 L19,7.5";
     static readonly IBrush OnFill = new SolidColorBrush(Color.FromArgb(255, 252, 236, 228));
     readonly bool large, allowNone;
-    readonly (Perm Flag, string Title, string Note)[] items =
+    readonly (Perm Flag, string Title, string Short, string Note)[] items =
     [
-        (Perm.Frd, "远程桌面（FRD）", "推荐：加密、可调画质"),
-        (Perm.Rdp, "RDP 远程桌面", "Windows 原生，端口 3389"),
-        (Perm.Files, "文件共享", "SMB，端口 445"),
+        (Perm.Frd, "远程桌面（FRD）", "FRD", "推荐：加密、可调画质"),
+        (Perm.Rdp, "RDP 远程桌面", "RDP", "Windows 原生，端口 3389"),
+        (Perm.Chat, "文字对话", "对话", "双方互发消息"),
+        (Perm.Files, "文件与图片", "文件", "双方互传文件，保存到本机"),
+        (Perm.Voice, "语音通话", "通话", "双方都可以发起"),
     ];
     Perm value;
     public event Action<Perm>? Changed;
@@ -25,15 +27,20 @@ sealed class PermissionPicker : Border
 
     void Build()
     {
-        var panel = new StackPanel { Orientation = large ? Orientation.Vertical : Orientation.Horizontal, Spacing = large ? 6 : 6 };
-        foreach (var item in items) panel.Children.Add(Chip(item.Flag, item.Title, item.Note));
+        // five small pills wrap on a narrow card instead of running off its edge
+        Panel panel = large ? new StackPanel { Spacing = 6 } : new WrapPanel { Orientation = Orientation.Horizontal };
+        foreach (var item in items)
+        {
+            var chip = Chip(item.Flag, large ? item.Title : item.Short, item.Note);
+            if (!large) chip.Margin = new Thickness(0, 0, 6, 6);
+            panel.Children.Add(chip);
+        }
         Child = panel;
     }
 
-    Control Chip(Perm flag, string title, string note)
+    Control Chip(Perm flag, string label, string note)
     {
         var on = value.HasFlag(flag);
-        var label = large ? title : title switch { "远程桌面（FRD）" => "FRD", "RDP 远程桌面" => "RDP", _ => "文件" };
         Control mark = large
             ? on ? new Border { Width = 20, Height = 20, CornerRadius = new CornerRadius(10), Background = Look.Accent, Child = Look.Icon(Tick, 11, Brushes.White, 2.4) }
                  : new Border { Width = 20, Height = 20, CornerRadius = new CornerRadius(10), BorderBrush = Look.Idle, BorderThickness = new Thickness(1.4) }

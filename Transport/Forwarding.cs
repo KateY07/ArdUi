@@ -6,7 +6,6 @@ sealed class ForwardHub : IAsyncDisposable
     readonly Dictionary<int,LocalForwarder> forwards=new();
     Session? current;
     int disposed;
-    public Dictionary<string,string> Mappings { get; }=new();
     public Session? Current { get { lock(sync)return current; } }
     public void Attach(Session session)
     {
@@ -40,8 +39,6 @@ sealed class ForwardHub : IAsyncDisposable
     {
         if(Interlocked.Exchange(ref disposed,1)!=0)return;
         LocalForwarder[] bridges;lock(sync){current=null;bridges=forwards.Values.ToArray();forwards.Clear();}
-        KeyValuePair<string,string>[] mappings;lock(Mappings){mappings=Mappings.ToArray();Mappings.Clear();}
-        foreach(var mapping in mappings)await WindowsShares.Remove(mapping.Key,mapping.Value);
         foreach(var bridge in bridges)await bridge.DisposeAsync();
     }
 }
@@ -63,8 +60,7 @@ sealed class LocalForwarder : IAsyncDisposable
     public LocalForwarder(ForwardHub hub,int target,bool udpEnabled)
     {
         this.hub=hub;this.target=target;
-        listener=new TcpListener(IPAddress.Loopback,0);listener.Start();
-        if(udpEnabled)udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,Port));
+        (listener,udp)=Wire.LoopbackPair(udpEnabled);
         if(udp!=null)Wire.ConfigureUdp(udp);
         accept=Accept();receive=udp == null ? Task.CompletedTask : ReceiveUdp();
     }

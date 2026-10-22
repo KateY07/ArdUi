@@ -17,24 +17,28 @@ static class PermissionTests
 
     static void PortMapping()
     {
-        var settings = new Settings(); // 3389 + 445 over TCP, 3389 over UDP
-        Check(Permissions.TcpPorts(settings, Perm.Frd).Length == 0 && Permissions.UdpPorts(settings, Perm.Frd).Length == 0, "FRD only opens no RDP / SMB port");
+        var settings = new Settings(); // 3389 over TCP and UDP
+        Check(Permissions.TcpPorts(settings, Perm.Frd).Length == 0 && Permissions.UdpPorts(settings, Perm.Frd).Length == 0, "FRD only opens no RDP port");
         Check(Permissions.TcpPorts(settings, Perm.Rdp).SequenceEqual([3389]) && Permissions.UdpPorts(settings, Perm.Rdp).SequenceEqual([3389]), "RDP opens 3389 tcp+udp");
-        Check(Permissions.TcpPorts(settings, Perm.Files).SequenceEqual([445]) && Permissions.UdpPorts(settings, Perm.Files).Length == 0, "files opens 445 only");
-        Check(Permissions.TcpPorts(settings, Perm.All).Length == 2, "all opens everything configured");
-        Check(Permissions.Default == Perm.Frd, "default permission is FRD only");
-        Check(Permissions.Parse(99) == (Perm)(99 & 7), "unknown bits are dropped");
+        var old = new Settings { TcpPorts = [3389, 445], UdpPorts = [3389] };   // a config.json from before SMB was removed
+        Check(Permissions.TcpPorts(old, Perm.All).SequenceEqual([3389]), "the SMB port stays closed even when an old config still lists it");
+        Check(Permissions.Default == (Perm.Frd | Perm.Chat | Perm.Files | Perm.Voice), "default: FRD and the conversation, files, calls; not RDP");
+        Check(Permissions.Parse(Permissions.Store(Perm.Frd)) == Perm.Frd, "a stored FRD-only grant stays FRD only");
+        Check(Permissions.Parse(Permissions.Store(Perm.Frd | Perm.Voice)) == (Perm.Frd | Perm.Voice), "stored values round-trip");
+        Check(Permissions.Parse(1) == (Perm.Frd | Perm.Chat | Perm.Files | Perm.Voice), "an older FRD-only grant keeps the conversation it always had");
+        Check(Permissions.Parse(4) == (Perm.Chat | Perm.Files | Perm.Voice), "the retired SMB bit grants nothing");
+        Check(Permissions.Parse(0x1FF) == Perm.All, "unknown bits are dropped");
         Check(Permissions.Describe(Perm.Frd | Perm.Files) == "FRD / 文件", "description lists what is allowed");
     }
 
     static void JsonCompatibility()
     {
         var legacyGrant = JsonSerializer.Deserialize<ControllerGrant>("{\"code\":\"ABC123\",\"receipt\":{\"endpoint\":\"e\",\"issuedAt\":1,\"nonce\":\"n\",\"payload\":\"p\",\"signature\":\"s\"}}", Wire.Json)!;
-        Check(legacyGrant.Perms == (int)Perm.All, "a grant stored before permissions existed keeps all permissions");
-        var restricted = JsonSerializer.Deserialize<ControllerGrant>(JsonSerializer.Serialize(legacyGrant with { Perms = (int)Perm.Frd }, Wire.Json), Wire.Json)!;
-        Check(restricted.Perms == (int)Perm.Frd, "permissions survive a save and load");
+        Check(Permissions.Parse(legacyGrant.Perms) == Perm.All, "a grant stored before permissions existed keeps all permissions");
+        var restricted = JsonSerializer.Deserialize<ControllerGrant>(JsonSerializer.Serialize(legacyGrant with { Perms = Permissions.Store(Perm.Frd) }, Wire.Json), Wire.Json)!;
+        Check(Permissions.Parse(restricted.Perms) == Perm.Frd, "permissions survive a save and load");
         var legacyReply = JsonSerializer.Deserialize<AdmissionReply>("{\"accepted\":true,\"token\":\"00112233445566778899aabbccddeeff\",\"tcpPorts\":[3389],\"udpPorts\":[]}", Wire.Json)!;
-        Check(legacyReply.Perms == (int)Perm.All && !legacyReply.Once, "an old host's reply means everything, not once");
+        Check(Permissions.Parse(legacyReply.Perms) == Perm.All && !legacyReply.Once, "an old host's reply means everything, not once");
     }
 
     static void TemporaryPeers()
@@ -66,28 +70,42 @@ static class PermissionTests
         _ = Task.Run(async () => { try { while (true) { var c = await echo.AcceptTcpClientAsync(); _ = Task.Run(async () => { using (c) { var b = new byte[16]; var n = await c.GetStream().ReadAsync(b); await c.GetStream().WriteAsync(b.AsMemory(0, n)); } }); } } catch { } });
         var grant = new SignedEnvelope("e", 1, "n", "p", "s");
 
-        async Task<(AdmissionReply Reply, byte Port)> Probe(Perm perms, bool once)
+        async Task<AdmissionReply> Admit(int port)
         {
-            var cap = RandomNumberGenerator.GetBytes(16);
-            await using var gateway = new Gateway(new Settings { TcpPorts = [echoPort], UdpPorts = [] }, cap, (_, _) => Task.FromResult<Authorization?>(new Authorization(grant, perms, once)));
-            // admission
-            using var admit = new TcpClient(); await admit.ConnectAsync(IPAddress.Loopback, gateway.Port);
+            using var admit = new TcpClient(); await admit.ConnectAsync(IPAddress.Loopback, port);
             var head = new byte[23]; "AUI1"u8.CopyTo(head); head[20] = 2;
             await admit.GetStream().WriteAsync(head);
             await Wire.WriteJson(admit.GetStream(), new PasswordRequest(true, "123456"), CancellationToken.None);
-            var reply = await Wire.ReadJson<AdmissionReply>(admit.GetStream(), CancellationToken.None);
+            return await Wire.ReadJson<AdmissionReply>(admit.GetStream(), CancellationToken.None);
+        }
+        async Task<(AdmissionReply Reply, byte Port, AdmissionReply Second)> Probe(Perm perms, bool once)
+        {
+            var cap = RandomNumberGenerator.GetBytes(16);
+            await using var gateway = new Gateway(new Settings { TcpPorts = [echoPort], UdpPorts = [] }, cap, (_, _) => Task.FromResult<Authorization?>(new Authorization(grant, perms, once)));
+            var reply = await Admit(gateway.Port);
+            var second = await Admit(gateway.Port);   // e.g. another local process reaching the loopback gateway
             // a forward to the echo port, as the controller would open it
             using var forward = new TcpClient(); await forward.ConnectAsync(IPAddress.Loopback, gateway.Port);
             var open = new byte[23]; "AUI1"u8.CopyTo(open); cap.CopyTo(open, 4); open[20] = 1;
             System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(open.AsSpan(21), (ushort)echoPort);
             await forward.GetStream().WriteAsync(open);
             var answer = new byte[1]; await forward.GetStream().ReadExactlyAsync(answer);
-            return (reply, answer[0]);
+            return (reply, answer[0], second);
         }
 
         var frd = await Probe(Perm.Frd, false);
-        Check(frd.Reply.Accepted && frd.Reply.Perms == (int)Perm.Frd && frd.Reply.TcpPorts.Length == 0, "FRD-only admission reports no ports");
+        Check(frd.Reply.Accepted && Permissions.Parse(frd.Reply.Perms) == Perm.Frd && frd.Reply.TcpPorts.Length == 0, "FRD-only admission reports no ports");
         Check(frd.Port == 2, "FRD-only controller cannot open the RDP port");
+        Check(!frd.Second.Accepted && frd.Second.Token == null, "a second admission on the same session is refused and gets no token");
+
+        // a refused attempt does not use the session's admission up
+        var tries = 0;
+        var cap2 = RandomNumberGenerator.GetBytes(16);
+        await using (var gateway = new Gateway(new Settings { TcpPorts = [echoPort], UdpPorts = [] }, cap2, (_, _) => Task.FromResult<Authorization?>(++tries == 1 ? null : new Authorization(grant, Perm.Frd, false))))
+        {
+            var refused = await Admit(gateway.Port); var accepted = await Admit(gateway.Port);
+            Check(!refused.Accepted && accepted.Accepted && accepted.Token != null, "after a refused admission the real one still gets in");
+        }
         var rdp = await Probe(Perm.Frd | Perm.Rdp, false);
         Check(rdp.Reply.TcpPorts.SequenceEqual([echoPort]) && rdp.Port == 0, "with RDP allowed the port opens");
         var once = await Probe(Perm.Frd, true);

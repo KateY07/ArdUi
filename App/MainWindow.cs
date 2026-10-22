@@ -278,7 +278,7 @@ sealed partial class MainWindow : Window
                 allow.IsChecked=true;identityCard.IsVisible=true;
                 if(Environment.GetEnvironmentVariable("ARDUI_PREVIEW_INVITE")=="1")OpenInvite();
                 controllers.Children.Clear();
-                foreach(var (code,perms) in new[]{("7TLM4P",Perm.Frd),("Q8X2ND",Perm.All),("K4DD0B",Perm.Frd|Perm.Files)})
+                foreach(var (code,perms) in new[]{("7TLM4P",Perm.Frd),("Q8X2ND",Perm.All),("K4DD0B",Perm.Frd|Perm.Chat)})
                 {
                     var revoke=new Button{Content="撤销",MinHeight=26,Padding=new Thickness(10,3),VerticalAlignment=VerticalAlignment.Center};
                     var head=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto")};
@@ -356,17 +356,18 @@ sealed partial class MainWindow : Window
     }
     void UpdateChatButton(DeviceDisplay view,Peer peer,bool live)
     {
-        view.Chat.IsVisible=live;
-        if(!live||engine==null)return;
+        // the conversation needs the host's permission for messages or files (the same permissions apply to both sides of the session)
+        var session=engine==null?null:engine.Outgoing.TryGetValue(peer.Id,out var outgoing)?outgoing:engine.Incoming.GetValueOrDefault(peer.Id);
+        view.Chat.IsVisible=live&&(session==null||(session.Perms&(Perm.Chat|Perm.Files))!=Perm.None);
+        if(!view.Chat.IsVisible||engine==null)return;
         var unread=engine.ChatFor(peer.Id).Unread>0;
         if((bool)(view.Chat.Tag??false)!=unread){view.Chat.Tag=unread;view.Chat.Content=ChatBadge(unread);}
         WatchChat(peer.Id,PeerLabel(peer).Split(" · ")[0]);
     }
-    // FRD and file sharing appear only when the controlled machine allowed them.
+    // FRD appears only when the controlled machine allowed it.
     static void ShowLaunchers(DeviceDisplay view,bool live,Perm perms)
     {
         view.Launchers[0].IsVisible=live&&perms.HasFlag(Perm.Frd);
-        view.Launchers[1].IsVisible=live&&perms.HasFlag(Perm.Files);
     }
     // Status text of a device row. For a live session the path kind (IPv6 / IPv4 / Relay) is highlighted, then speed and latency.
     static string StatusOf(TextBlock t)=>t.Tag as string??t.Text??"";
@@ -568,7 +569,9 @@ sealed partial class MainWindow : Window
             if(!directory.Enabled)CloseInvite();
             // The invitation worked: a new device was authorised while the overlay was open.
             if(inviteOverlay.IsVisible&&(directory.Controllers.Length>inviteControllers||engine.Incoming.Count>inviteIncoming)){CloseInvite();Say("邀请成功：新设备已获得授权。");}
-            netDot.Fill=directory.Online?Online:Relay;netText.Text=directory.Online?"在线":"正在连接网络…";
+            netDot.Fill=directory.Online?Online:directory.Outdated!=null?Look.Accent:Relay;
+            netText.Text=directory.Online?"在线":directory.Outdated!=null?"版本过旧，请升级 ArdUi":"正在连接网络…";
+            ToolTip.SetTip(netText,directory.Outdated);
             RefreshHost();
             UpdatePassword();UpdateConnecting();
             Title="ArdUi "+Program.Version+(directory.Enabled&&directory.Code.Length!=0?" · "+directory.Code:"");
@@ -679,14 +682,6 @@ sealed partial class MainWindow : Window
             Say("FRD 已启动，正在通过加密连接建立桌面。");
         }));
         launchers.Add(frd);
-        launchers.Add(Add("文件",()=>Connecting(peer,async () =>
-        {
-            await directory!.Connect(peer.Code,"",enrolling:false);
-            if(!engine!.Outgoing[peer.Id].Perms.HasFlag(Perm.Files))throw new IOException("被控端未允许文件共享。");
-            var share=await ShareDetails();
-            var path=await WindowsShares.Map(engine!.Outgoing[peer.Id],share,CancellationToken.None);
-            await Launch("explorer.exe",path);
-        })));
         // the conversation with this device (only while connected); a red dot marks unread messages
         var chat=new Button{Width=36,Height=30,MinHeight=30,Padding=new Thickness(0),IsVisible=false,Tag=false};chat.Content=ChatBadge(false);ToolTip.SetTip(chat,"对话：文字、图片、文件");
         chat.Click+=(_,_)=>OpenChat(peer.Id,PeerLabel(peer).Split(" · ")[0]);actions.Children.Add(chat);
@@ -719,7 +714,7 @@ sealed partial class MainWindow : Window
         actions.Children.Add(more);Grid.SetColumn(actions,2);row.Children.Add(actions);
         var stack=new StackPanel{Spacing=0,Children={row,moreRow}};var card=Card(stack);card.Padding=new Thickness(14,6);
         card.PointerEntered+=(_,_)=>card.Background=Look.CardHover;card.PointerExited+=(_,_)=>card.Background=Look.Card;
-        Look.IconOnly(launchers[0],Look.MonitorPath,"远程桌面（FRD）；两端需安装支持 FRD 的新版 ArdUi");Look.IconOnly(launchers[1],Look.FolderPath,"打开文件共享");
+        Look.IconOnly(launchers[0],Look.MonitorPath,"远程桌面（FRD）；两端需安装支持 FRD 的新版 ArdUi");
         foreach(var launcher in launchers)launcher.IsVisible=false;
         return new DeviceDisplay(card,indicator,title,state,connect,launchers.ToArray(),pause,actions,chat);
     }
@@ -795,7 +790,7 @@ sealed partial class MainWindow : Window
         content.Children.Add(Label((pair.Incoming ? "设备请求访问本机：" : "即将连接设备：")+pair.Code,18));
         content.Children.Add(new TextBlock { Text="请通过电话、当面等独立渠道，与对方 ArdUi 中显示的完整 EndpointId 逐字核对。机器编号由服务器提供，不能代替公钥核对。",TextWrapping=TextWrapping.Wrap });
         content.Children.Add(new TextBox { Text=pair.Endpoint,IsReadOnly=true,TextWrapping=TextWrapping.Wrap,FontFamily=new FontFamily("Consolas"),FontSize=15 });
-        content.Children.Add(new TextBlock { Text=pair.Incoming ? "访问密码已验证正确。只有确认后，才会允许这台设备访问 RDP / SMB。" : "确认后才会通过经过身份验证的加密连接发送访问密码。",TextWrapping=TextWrapping.Wrap });
+        content.Children.Add(new TextBlock { Text=pair.Incoming ? "访问密码已验证正确。只有确认后，才会允许这台设备访问本机。" : "确认后才会通过经过身份验证的加密连接发送访问密码。",TextWrapping=TextWrapping.Wrap });
         var buttons=new StackPanel { Orientation=Orientation.Horizontal,Spacing=12 };
         var reject=new Button { Content="拒绝 / 未核对",IsDefault=true }; reject.Click+=(_,_)=>dialog.Close(false);
         var approved=false;
@@ -820,14 +815,6 @@ sealed partial class MainWindow : Window
         var dialog=new Window {Title=title,Width=430,Height=210,CanResize=false,WindowStartupLocation=WindowStartupLocation.CenterOwner};
         var input=new TextBox {Text=initial,MaxLength=80};var button=new Button{Content="保存"};button.Click+=(_,_)=>dialog.Close(input.Text ?? "");
         dialog.Content=new StackPanel{Margin=new Thickness(24),Spacing=16,Children={input,button}};
-        return await dialog.ShowDialog<string?>(this) ?? throw new OperationCanceledException();
-    }
-    async Task<string> ShareDetails()
-    {
-        var dialog=new Window{Title="打开 SMB 文件共享",Width=460,Height=220,CanResize=false,WindowStartupLocation=WindowStartupLocation.CenterOwner};
-        var share=new TextBox{Watermark="共享名，例如 Documents",MaxLength=80};
-        var open=new Button{Content="打开共享"};open.Click+=(_,_)=>dialog.Close(share.Text??"");
-        dialog.Content=new StackPanel{Margin=new Thickness(24),Spacing=14,Children={share,new TextBlock{Text="ArdUi 仅透明转发 TCP 445。Windows 会使用当前账户、已有 SMB 凭据或其原生凭据机制完成访问。",TextWrapping=TextWrapping.Wrap},open}};
         return await dialog.ShowDialog<string?>(this) ?? throw new OperationCanceledException();
     }
     static Task Launch(string file,string argument)

@@ -68,6 +68,8 @@ sealed class ChatChannel
     // A control request travels as ONE frame of the session's link, and the receiving side drops the whole link when a frame is over
     // 64 KB. A chunk is therefore small enough that its base64 JSON stays well under that (36 KB raw -> about 49 KB on the wire).
     public const int MaxText = 8000, Chunk = 36 * 1024, MaxIncoming = 3, Window = 6, MaxReorder = 16;
+    public const long MaxPerSession = 10L * 1024 * 1024 * 1024;   // all files one session may send to this machine
+    long receivedThisSession;
     static readonly string[] ImageExtensions = [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"];
 
     readonly string folder;
@@ -116,6 +118,15 @@ sealed class ChatChannel
         return clean;
     }
     public static bool LooksLikeImage(string name) => ImageExtensions.Contains(System.IO.Path.GetExtension(name).ToLowerInvariant());
+
+    // A received file carries the "downloaded from the Internet" mark (Mark of the Web), as a browser download would: opening a program or
+    // a script from it brings up the Windows SmartScreen / security warning instead of running it silently.
+    internal static void MarkFromInternet(string path)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try { File.WriteAllText(path + ":Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=about:internet\r\n"); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException) { Diagnostics.Log("chat-motw", ex.Message); }   // e.g. a FAT drive has no streams
+    }
 
     string Unique(string name)
     {
@@ -248,13 +259,17 @@ sealed class ChatChannel
         lock (gate)
         {
             if (incoming.Count >= MaxIncoming || incoming.ContainsKey(id) || transfers.ContainsKey(id)) throw new IOException("正在接收的文件过多。");
+            // what one session may put on this disk, counting every file it announced (finished or not)
+            if (receivedThisSession + size > MaxPerSession) throw new IOException($"本次连接接收的文件已达上限（{MaxPerSession / 1024 / 1024 / 1024} GB），请重新连接后再发送。");
             Directory.CreateDirectory(folder);
             var free = new DriveInfo(System.IO.Path.GetPathRoot(System.IO.Path.GetFullPath(folder))!).AvailableFreeSpace;
-            if (free < size + 256L * 1024 * 1024) throw new IOException("接收方磁盘空间不足。");
+            var promised = incoming.Values.Sum(f => f.Size - f.Written);   // still to come for the files already arriving
+            if (free < size + promised + 1024L * 1024 * 1024) throw new IOException("接收方磁盘空间不足。");
             var path = Unique(name);
             transfer = new ChatTransfer(id, name, kind, size, true, () => RejectIncoming(id));
             file = new Incoming { Path = path, Name = name, Kind = kind, Size = size, Transfer = transfer, Stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None), Sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256) };
-            incoming[id] = file; transfers[id] = transfer;
+            MarkFromInternet(path);
+            incoming[id] = file; transfers[id] = transfer; receivedThisSession += size;
         }
         TransferStarted?.Invoke(transfer);
         return new { ok = true };
@@ -347,7 +362,11 @@ sealed class ChatChannel
     public void Close()
     {
         string[] ids; CancellationTokenSource[] sending;
-        lock (gate) { ids = incoming.Keys.ToArray(); sending = outgoing.Values.ToArray(); }
+        lock (gate)
+        {
+            ids = incoming.Keys.ToArray(); sending = outgoing.Values.ToArray(); receivedThisSession = 0; turnedDown.Clear();
+            foreach (var over in transfers.Where(p => p.Value.State != TransferState.Active).Select(p => p.Key).ToArray()) transfers.Remove(over);
+        }
         foreach (var id in ids) Abort(id, TransferState.Failed, "连接已断开");
         foreach (var cts in sending) { try { cts.Cancel(); } catch (ObjectDisposedException) { } }
     }

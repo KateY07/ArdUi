@@ -7,6 +7,6 @@
     <Compile Include="../../Transport/Gateway.cs" Link="Gateway.cs" />
     <Compile Include="../../Transport/ArdPathState.cs" Link="ArdPathState.cs" />
     <Compile Include="../../Overlay/*.cs" Link="%(Filename)%(Extension)" />
-    <Compile Include="../../TransitClient/TransitModels.cs" Link="TransitModels.cs" />
+    <Compile Include="../../Overlay/PathQuality.cs" Link="PathQuality.cs" />
   </ItemGroup>
 </Project>

@@ -38,6 +38,7 @@ sealed class Engine : IAsyncDisposable
         try { return new Engine(state,settings,await Ard.Identity(state.IdentityDirectory,CancellationToken.None)); }
         catch { state.Dispose(); throw; }
     }
+    static readonly Regex RelayName = new(@"relay=https://(s-[0-9a-f]{40}\.ard-relay\.invalid)/", RegexOptions.Compiled);
     // A status that did not change must not wake the UI: ard prints thousands of lines per second at trace level.
     void Update(string id,string message) { if(Status.TryGetValue(id,out var old)&&old==message)return; Status[id]=message; Changed?.Invoke(); }
     public void SetStatus(string id,string message)=>Update(id,message);
@@ -71,6 +72,7 @@ sealed class Engine : IAsyncDisposable
         session.Process.Output += line =>
         {
             FileLog.Write("ard " + session.PeerId[..8], line);
+            if (RelayName.Match(line) is { Success: true } relay) session.RelayName = relay.Groups[1].Value;
             if (line.Contains(" WARN ", StringComparison.Ordinal) || line.Contains(" ERROR ", StringComparison.Ordinal)) Events.AddFromArd(line);
             if (line.Contains("CONNECTED", StringComparison.Ordinal) || line.Contains("network path selected", StringComparison.Ordinal) || line.Contains("READY:", StringComparison.Ordinal))
             {
@@ -131,13 +133,10 @@ sealed class Engine : IAsyncDisposable
     });
     void ConfigureOverlay(Session session)
     {
-        if(session.Overlay==null||DirectoryApi==null||session.Transit!=null)return;
-        session.Transit=new TransitCoordinator(this,DirectoryApi,session);
+        if(session.Overlay==null||DirectoryApi==null||session.Controls!=null)return;   // once per session
         session.Notice+=message=>{Update(session.PeerId,message);Notice?.Invoke(message);};
-        session.ConfigureFrd(Settings.FrdPath);
-        session.ConfigureChat(ChatFor(session.PeerId));
-        session.ConfigureBye();
-        var call=CallFor(session.PeerId);session.ConfigureCall(call);
+        var call=CallFor(session.PeerId);
+        session.ConfigureControls(Settings.FrdPath,ChatFor(session.PeerId),call);
         _=session.Completion.ContinueWith(_=>call.Close(session),TaskScheduler.Default);
         session.PeerEnded+=reason=>OnPeerEnded(session,reason);
         var conversation = ChatFor(session.PeerId); _ = session.Completion.ContinueWith(_ => conversation.Close(), TaskScheduler.Default);
@@ -269,6 +268,8 @@ sealed class Engine : IAsyncDisposable
         }
         throw new IOException("ARD 网络预检连续失败。",last);
     }
+    // Every session's key exchange is signed with this device's key and must be signed by the peer's (see OverlayIdentity).
+    OverlayIdentity Identity(string peer)=>DirectoryApi?.OverlayIdentity(peer)??throw new InvalidOperationException("尚未连接可信服务器，无法建立会话。");
     public async Task<string> AcceptServerSession(ServerTicket ticket, Func<PasswordRequest, CancellationToken, Task<Authorization?>> verifyPassword, CancellationToken ct)
     {
         using var operation=await operations.Enter("in:"+ticket.ControllerEndpoint,ct);ct=operation.Token;
@@ -286,7 +287,7 @@ sealed class Engine : IAsyncDisposable
                 return await verifyPassword(password, linked.Token);
             });
             child = await StartArdWithRetry(peer.Id,dir,true,gateway.Port,ticket.ClientSessionId,"relay online",ct);
-            session = new Session(peer.Id, peer.Address, gateway.Port, capability, Settings.TcpPorts, Settings.UdpPorts, child, dir, gateway);
+            session = new Session(peer.Id, peer.Address, gateway.Port, capability, Settings.TcpPorts, Settings.UdpPorts, child, dir, Identity(peer.Id), gateway);
             session.OverlayReady+=()=>ConfigureOverlay(session);
             var attached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var auditStarted = 0;
@@ -347,7 +348,7 @@ sealed class Engine : IAsyncDisposable
             if (grant.ControllerEndpoint != Id || grant.TargetEndpoint != target.Endpoint) throw new IOException("授权未绑定当前设备。");
             operation.Commit(()=>peer=State.GetOrAdd(target.Endpoint,target.Code,admission.Grant,admission.Once));
             var hub=hubs.GetOrAdd(peer.Id,_=>new ForwardHub());
-            session = new Session(peer.Id, peer.Address, port, Convert.FromHexString(admission.Token), admission.TcpPorts, admission.UdpPorts, child, dir, hub:hub);
+            session = new Session(peer.Id, peer.Address, port, Convert.FromHexString(admission.Token), admission.TcpPorts, admission.UdpPorts, child, dir, Identity(peer.Id), hub:hub);
             session.Perms=Permissions.Parse(admission.Perms);session.Once=admission.Once;
             await session.EnableOverlay(ct);ConfigureOverlay(session);
             using (await session.OpenTcp(0, ct)) { }

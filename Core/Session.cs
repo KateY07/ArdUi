@@ -12,7 +12,6 @@ sealed class Session : IAsyncDisposable
     public bool Host { get; }
     public Child Process { get; set; }
     public OverlaySession? Overlay { get; set; }
-    public TransitCoordinator? Transit { get; set; }
     public event Action? OverlayReady;
     readonly string[] ardArguments;
     readonly TaskCompletionSource completed=new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -21,6 +20,8 @@ sealed class Session : IAsyncDisposable
     public CancellationToken Token => stop.Token;
     public bool Live => disposed == 0 && (Overlay!=null?!Overlay.Token.IsCancellationRequested&&(!Overlay.Expired||Process.ProgressAge<90000):!Process.Exited.IsCompleted);
     public string Network => Overlay?.Network??Process.Network;
+    // The ArdFerry ard last named in its log (relay=https://s-….ard-relay.invalid/), for FerryMonitor's report.
+    public string? RelayName { get; set; }
     public double? TcpRtt { get; set; }
     public double? UdpRtt { get; set; }
     public double? BandwidthMbps { get; set; }
@@ -56,27 +57,27 @@ sealed class Session : IAsyncDisposable
         return OpenTcpCore(port,true,ct);
     }
     public ChatChannel? Chat { get; private set; }
-    // The conversation rides on the same control channel as FRD: requests named chat-* go to the channel.
-    public void ConfigureChat(ChatChannel chat)
+    // What the other side may ask of this one over the control channel, with the side that answers and the permission it needs. The
+    // permissions are the ones the host granted for this session, on both sides: a host that does not allow files neither takes nor sends them.
+    internal ControlRegistry? Controls { get; private set; }
+    public void ConfigureControls(string frd, ChatChannel chat, CallChannel call)
     {
-        Chat = chat;
-        var other = Overlay!.Control;
-        Overlay.Control = (method, data, ct) => method.StartsWith("chat-", StringComparison.Ordinal) ? chat.Handle(method, data, ct) :
-            other != null ? other(method, data, ct) : throw new IOException("未知控制请求。");
-    }
-    public void ConfigureFrd(string path)
-    {
-        frdPath=path;
-        var other=Overlay!.Control;
-        Overlay.Control=(method,data,ct)=>method.StartsWith("frd-",StringComparison.Ordinal)?HandleFrd(method,data,ct):
-            other!=null?other(method,data,ct):throw new IOException("未知控制请求。");
-    }
-    // Voice calls: the control methods call-offer / call-answer / call-end, and the media ports (the host listens, the controller sends).
-    public void ConfigureCall(CallChannel call)
-    {
-        var other=Overlay!.Control;var link=new SessionCallLink(this);
-        Overlay.Control=(method,data,ct)=>method.StartsWith("call-",StringComparison.Ordinal)?call.Handle(link,method,data,ct):
-            other!=null?other(method,data,ct):throw new IOException("未知控制请求。");
+        frdPath = frd; Chat = chat;
+        var link = new SessionCallLink(this);
+        var registry = new ControlRegistry(Host, () => Perms)
+            .Add("bye", ControlRole.Either, Perm.None, (_, data, _) => HandleBye(data))
+            .Add("frd-start", ControlRole.Host, Perm.Frd, HandleFrd)
+            .Add("frd-stop", ControlRole.Host, Perm.None, HandleFrd)
+            .Add("chat-text", ControlRole.Either, Perm.Chat, chat.Handle)
+            .Add("chat-file-begin", ControlRole.Either, Perm.Files, chat.Handle)
+            .Add("chat-file-chunk", ControlRole.Either, Perm.Files, chat.Handle)
+            .Add("chat-file-end", ControlRole.Either, Perm.Files, chat.Handle)
+            .Add("chat-file-cancel", ControlRole.Either, Perm.None, chat.Handle)   // stopping a transfer is always allowed
+            .Add("call-offer", ControlRole.Either, Perm.Voice, (method, data, ct) => call.Handle(link, method, data, ct))
+            .Add("call-answer", ControlRole.Either, Perm.Voice, (method, data, ct) => call.Handle(link, method, data, ct))
+            .Add("call-end", ControlRole.Either, Perm.None, (method, data, ct) => call.Handle(link, method, data, ct));
+        Controls = registry;
+        Overlay!.Control = registry.Dispatch;
     }
     internal CallMedia OpenVoiceHost()
     {
@@ -92,12 +93,6 @@ sealed class Session : IAsyncDisposable
     }
     // The other side ends the session on purpose ("bye"): this side must not try to recover it.
     public event Action<string>? PeerEnded;
-    public void ConfigureBye()
-    {
-        var other=Overlay!.Control;
-        Overlay.Control=(method,data,ct)=>method=="bye"?HandleBye(data):
-            other!=null?other(method,data,ct):throw new IOException("未知控制请求。");
-    }
     Task<object> HandleBye(JsonElement data)
     {
         var reason=data.ValueKind==JsonValueKind.Object&&data.TryGetProperty("reason",out var value)?value.GetString()??"":"";
@@ -120,7 +115,7 @@ sealed class Session : IAsyncDisposable
         {
             if(method=="frd-start")
             {
-                if(!gateway.FrdAllowed)throw new IOException("被控端未允许 FRD。");
+                if(!gateway.FrdAllowed)throw new IOException("被控端未允许 FRD。");   // (the registry checked it too; the gateway is the authority)
                 if(frdHost!=null&&!frdHost.Live){await frdHost.DisposeAsync();frdHost=null;}
                 frdHost??=await FrdHosted.Start(FrdRuntime.Resolve(frdPath),gateway,Token,ct,ReportFrdError);
                 return frdHost.Offer;
@@ -161,24 +156,26 @@ sealed class Session : IAsyncDisposable
     }
     public LocalForwarder Forward(int target)=>Hub?.Forward(target)??throw new IOException("被控会话不提供本地转发入口。");
     int disposed;
+    readonly OverlayIdentity identity;
     public Session(string peer, string address, int port, byte[] capability, int[] tcpPorts, int[] udpPorts,
-        Child process, string directory, Gateway? gateway = null, ForwardHub? hub = null)
+        Child process, string directory, OverlayIdentity identity, Gateway? gateway = null, ForwardHub? hub = null)
     {
+        if (identity.Peer != peer) throw new InvalidOperationException("会话签名身份与对端不一致。");
         PeerId = peer; Address = address; basePort = port; Capability = capability;
-        TcpPorts = tcpPorts; UdpPorts = udpPorts; Process = process; this.directory = directory;
+        TcpPorts = tcpPorts; UdpPorts = udpPorts; Process = process; this.directory = directory; this.identity = identity;
         this.gateway = gateway; Hub=hub; Host = gateway != null;
         ardArguments=process.Process.StartInfo.ArgumentList.ToArray();
         if(gateway!=null)gateway.AttachOverlay=AcceptOverlay;
     }
     public async Task EnableOverlay(CancellationToken ct)
-    {Overlay=await OverlaySession.Connect(basePort,Capability,()=>Process.Network,ct);OverlayReady?.Invoke();}
+    {Overlay=await OverlaySession.Connect(basePort,Capability,()=>Process.Network,ct,identity:identity);OverlayReady?.Invoke();}
     async Task AcceptOverlay(TcpClient tcp,byte command,CancellationToken ct)
     {
         using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct);timeout.CancelAfter(TimeSpan.FromSeconds(10));
         if(command==4)
         {
             if(Overlay!=null)throw new IOException("覆盖层已建立，必须使用恢复入口。");
-            Overlay=await OverlaySession.AcceptHello(tcp,basePort,Capability,()=>Process.Network,timeout.Token);gateway!.Overlay=Overlay;OverlayReady?.Invoke();
+            Overlay=await OverlaySession.AcceptHello(tcp,basePort,Capability,()=>Process.Network,timeout.Token,identity);gateway!.Overlay=Overlay;OverlayReady?.Invoke();
         }
         else
         {
@@ -288,7 +285,6 @@ sealed class Session : IAsyncDisposable
             }
             finally{frdGate.Release();}
         });
-        if(Transit!=null)await Cleanup("候选中继",Transit.DisposeAsync);
         if(Overlay!=null)await Cleanup("加密覆盖层",Overlay.DisposeAsync);
         await Cleanup("网络测量",async()=>await metrics);
         await Cleanup("ARD 进程",Process.DisposeAsync);

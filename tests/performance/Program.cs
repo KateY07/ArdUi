@@ -7,7 +7,7 @@ static class Program
     public static async Task<int> Main(string[] args)
     {
         if(args.Contains("--cipher-stress"))return await CipherStress.Run();
-        if(args.Contains("--transit-test"))return await TransitTest.Run(args);
+        if(args.Contains("--overlay-test"))return await OverlayTest.Run(args);
         string Opt(string key,string fallback){var i=Array.IndexOf(args,key);return i<0?fallback:args[i+1];}
         if(args.Contains("--help")){Console.WriteLine("--mode raw|ard|overlay|full|all or comma list, e.g. full,ard,raw; --seconds 8 --samples 1000 --output result.json; isolated ARDUI_TEST_* environment required for ard/full");return 0;}
         var seconds=int.Parse(Opt("--seconds","8"));var samples=int.Parse(Opt("--samples","1000"));

@@ -13,7 +13,6 @@ from pathlib import Path
 
 folder = tempfile.mkdtemp(prefix='ardui-probe-')
 os.environ['ARDUI_DATABASE'] = os.path.join(folder, 'devices.sqlite3')
-os.environ['ARDUI_TRANSIT_KEY'] = os.path.join(folder, 'transit-key')
 os.environ['ARDUI_PROBE_KEY'] = os.path.join(folder, 'probe-key')
 os.environ['ARDUI_PROBE_ALLOW_PRIVATE'] = '1'     # the tests talk over loopback
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'server'))

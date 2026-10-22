@@ -10,7 +10,7 @@ echo "== presence_test.py"
 python3 /src/tests/presence_test.py
 
 echo "== gunicorn + /api/health"
-export ARDUI_DATABASE=/tmp/devices.sqlite3 ARDUI_TRANSIT_KEY=/tmp/transit-key
+export ARDUI_DATABASE=/tmp/devices.sqlite3
 cd /src/server
 gunicorn --bind 127.0.0.1:8091 --workers 1 --threads 8 --timeout 30 arduiserver:application >/tmp/gunicorn.log 2>&1 &
 pid=$!

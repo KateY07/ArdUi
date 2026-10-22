@@ -39,7 +39,7 @@ sealed class Gateway : IAsyncDisposable
     }
     readonly SemaphoreSlim tcpSlots = new(128);
     readonly Task acceptTask, udpTask;
-    int serial,stopped;
+    int serial,stopped,admission;
     public int Port { get; }
     public event Action? Attached;
     public Func<TcpClient,byte,CancellationToken,Task>? AttachOverlay;
@@ -61,11 +61,9 @@ sealed class Gateway : IAsyncDisposable
     public Gateway(Settings settings, byte[] token, Func<PasswordRequest, CancellationToken, Task<Authorization?>>? authenticate = null)
     {
         this.settings = settings; this.token = token; this.authenticate = authenticate;
-        tcpAllowed = settings.TcpPorts; udpAllowed = settings.UdpPorts;
-        listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
+        tcpAllowed = settings.TcpPorts.Where(p => p != Permissions.RetiredFilesPort).ToArray(); udpAllowed = settings.UdpPorts.Where(p => p != Permissions.RetiredFilesPort).ToArray();
+        UdpClient? pair; (listener, pair) = Wire.LoopbackPair(); udp = pair!;
         Port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        try { udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, Port)); }
-        catch { listener.Stop(); throw; }
         Wire.ConfigureUdp(udp);
         acceptTask = Accept(); udpTask = Receive();
     }
@@ -102,14 +100,23 @@ sealed class Gateway : IAsyncDisposable
                 {
                     handshake.CancelAfter(TimeSpan.FromMinutes(5));
                     var request = await Wire.ReadJson<PasswordRequest>(stream, handshake.Token);
-                    var authorization = await authenticate(request, handshake.Token);
+                    // One admission per session, and one at a time. The gateway listens on loopback, so any local process can reach it, not
+                    // only the ARD tunnel; a second admission must not hand out the session token again or change what the session may do.
+                    if (Interlocked.CompareExchange(ref admission, 1, 0) != 0)
+                    {
+                        await Wire.WriteJson(stream, new AdmissionReply(false, "本次连接已完成准入。", null, [], [], null, 0, false), handshake.Token);
+                        return;
+                    }
+                    Authorization? authorization = null;
+                    try { authorization = await authenticate(request, handshake.Token); }
+                    finally { if (authorization == null) Volatile.Write(ref admission, 0); }   // a refused attempt does not use the session up
                     var accepted = authorization != null;
                     if (authorization != null) { Apply(authorization.Perms); Once = authorization.Once; }
                     await Wire.WriteJson(stream, new AdmissionReply(accepted,
                         accepted ? null : ConnectFlow.RejectedText,
                         accepted ? Convert.ToHexString(token) : null,
                         accepted ? tcpAllowed : [], accepted ? udpAllowed : [], authorization?.Grant,
-                        accepted ? (int)perms : 0, accepted && Once), handshake.Token);
+                        accepted ? Permissions.Store(perms) : 0, accepted && Once), handshake.Token);
                     if (accepted) Attached?.Invoke();
                     return;
                 }
@@ -132,7 +139,7 @@ sealed class Gateway : IAsyncDisposable
                 client.NoDelay = true;
                 await stream.WriteAsync(new byte[] { 0 }, handshake.Token);
                 handshake.CancelAfter(Timeout.InfiniteTimeSpan);
-                var rdp = port != Permissions.FilesPort && !frdTcp.ContainsKey(port);   // anything that is neither files nor FRD is a desktop
+                var rdp = !frdTcp.ContainsKey(port);   // anything that is not FRD is a desktop (RDP)
                 if (rdp) { Interlocked.Increment(ref rdpBridges); UpdateActivity(); }
                 try { await Wire.Bridge(client, target, stop.Token); }
                 finally { if (rdp) { Interlocked.Decrement(ref rdpBridges); UpdateActivity(); } }

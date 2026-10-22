@@ -1,4 +1,4 @@
-"""Isolated real ARD + directory + Python ArdTransit + C# client regression."""
+"""Isolated real ARD relay + directory + C# client regression (--prototype or --frd)."""
 import argparse
 import datetime
 import hashlib
@@ -21,9 +21,8 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dll', default='bin/Release/net8.0-windows/ArdUi.dll')
     parser.add_argument('--prototype', action='store_true', help='Run consent, revoke and repeated enrollment regression')
-    parser.add_argument('--frd', action='store_true', help='Run real FRD desktop over the encrypted ARD and candidate paths')
+    parser.add_argument('--frd', action='store_true', help='Run real FRD desktop over the encrypted ARD path')
     parser.add_argument('--frd-exe', help='Explicit FRD binary delivered for black-box integration; alternatively set ARDUI_FRD_PATH')
-    parser.add_argument('--transit-exe', help='Use a packaged ArdTransit executable instead of Python source')
     parser.add_argument('--ard', help='Use an isolated experimental ARD executable; requires --ard-sha256')
     parser.add_argument('--ard-sha256', help='Expected SHA-256 of the experimental --ard executable')
     args=parser.parse_args()
@@ -48,7 +47,7 @@ def main():
     server_port,relay_port=port(),port()
     relay_url=f'http://127.0.0.2:{relay_port}'
     base=f'http://127.0.0.1:{server_port}'
-    env=dict(os.environ,ARDUI_DATABASE=str(root/'directory.sqlite3'),ARDUI_TRANSIT_KEY=str(root/'directory-key'),ARDUI_PORT=str(server_port))
+    env=dict(os.environ,ARDUI_DATABASE=str(root/'directory.sqlite3'),ARDUI_PORT=str(server_port))
     if frd_exe:
         env['ARDUI_FRD_PATH']=str(frd_exe)
         env['ARDUI_DATA_ROOT']=str(root/'isolated-ui-data')
@@ -77,19 +76,16 @@ def main():
         for _ in range(50):
             try:
                 with urllib.request.urlopen(base+'/api/health',timeout=1) as response:
-                    if json.load(response)['version']=='v2.pre1': break
+                    if json.load(response)['ok']: break
             except OSError as ex:
                 if children[-1].poll() is not None: raise RuntimeError('test directory exited') from ex
                 time.sleep(.1)
-        transit=[str((repo/args.transit_exe).resolve())] if args.transit_exe else [sys.executable,'transit/ardtransit.py']
-        c=start('transit',transit+['--ard',str(ard),'--server',base,
-             '--relay',relay_url,'--relay-key',relay_key,'--data',str(root/'c'),'--diagnostics',str(root/'transit-diagnostics.zip'),'--test-local-directory'])
         env.update(ARDUI_ARD_PATH=str(ard),ARDUI_TEST_ROOT=str(root),ARDUI_TEST_SERVER=base,ARDUI_TEST_RELAY=relay_url,
-                   ARDUI_TEST_RELAY_KEY=relay_key,ARDUI_TEST_TRANSIT_PID=str(c.pid))
+                   ARDUI_TEST_RELAY_KEY=relay_key)
         print('Fixture:',root,flush=True)
         app=(repo/args.dll).resolve()
         command=([str(app)] if app.suffix=='.exe' else ['dotnet',str(app)])
-        command+=['--frd-test'] if args.frd else ['--prototype-test'] if args.prototype else ['--transit-test','--integration-only']
+        command+=['--frd-test'] if args.frd else ['--prototype-test']
         with open(root/'client.log','wb') as output:
             result=subprocess.run(command,cwd=repo,env=env,stdout=output,stderr=subprocess.STDOUT,timeout=230,**creation)
         print((root/'client.log').read_text(encoding='utf-8',errors='replace'),flush=True)

@@ -44,7 +44,7 @@ def main():
     server_port,relay_port=free_port(),free_port()
     relay_url=f'http://127.0.0.2:{relay_port}'
     server_url=f'http://127.0.0.1:{server_port}'
-    env=dict(os.environ,ARDUI_DATABASE=str(root/'directory.sqlite3'),ARDUI_TRANSIT_KEY=str(root/'directory-key'),
+    env=dict(os.environ,ARDUI_DATABASE=str(root/'directory.sqlite3'),
         ARDUI_PORT=str(server_port),ARDUI_ARD_PATH=str(ard),ARDUI_DATA_ROOT=str(root/'app'),
         ARDUI_TEST_ROOT=str(root),ARDUI_TEST_SERVER=server_url,ARDUI_TEST_RELAY=relay_url,
         ARDUI_BENCH_VARIANT=args.variant,ARDUI_BENCH_ARD_SHA256=expected,ARD_BENCH_COPY_KIB=str(args.copy_kib))

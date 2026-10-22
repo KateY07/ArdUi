@@ -39,7 +39,7 @@ sealed partial class MainWindow
             try
             {
                 var settings = engine?.Settings ?? new Settings();
-                var report = await Task.Run(() => NetDiag.Run(new NetDiagOptions { DirectoryUrl = settings.Server, RelayHostPort = new Uri(settings.Relay).Authority, Probe = ProbeSource(), ProbeFallbackHost = new Uri(settings.Server).Host }, run.Token));
+                var report = await Task.Run(() => NetDiag.Run(new NetDiagOptions { DirectoryUrl = settings.Server, RelayHostPort = settings.Network is { } network ? new Uri(network.RelayDirectory).Authority : null, Probe = ProbeSource(), ProbeFallbackHost = new Uri(settings.Server).Host }, run.Token));
                 if (run.IsCancellationRequested) return;
                 netReport = report; Diagnostics.LastNetwork = report;
                 foreach (var section in report.Sections) netResults.Children.Add(DiagCard(section));

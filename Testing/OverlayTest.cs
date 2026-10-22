@@ -1,11 +1,11 @@
 namespace ArdUi;
 
-static class TransitTest
+// `ArdUi.exe --overlay-test`: the encrypted overlay on its own (crypto, multiplexing, switching between paths through a simulated relay).
+static class OverlayTest
 {
     static void Check(bool ok,string message){if(!ok)throw new Exception(message);}
     public static async Task<int> Run(string[] args)
     {
-        if(args.Contains("--integration-only")){await Integration(args);return 0;}
         using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(60));var ct=timeout.Token;
         var baseline=PathQuality.From([40,41,42,42,43,44,45,46],20);
         Check(PathQuality.From([20,21,22,22,23,24,25,26],20).BetterThan(baseline),"significant RTT improvement rejected");
@@ -65,8 +65,8 @@ static class TransitTest
             Check(c.Decrypt(a.Encrypt(plain,false),false)==null,"C decrypted payload");
         }
         Console.WriteLine("PASS: directional AEAD, UDP replay rejection, tamper rejection, wrong-key rejection.");
-        var echo=new TcpListener(IPAddress.Loopback,0);echo.Start();var echoPort=((IPEndPoint)echo.LocalEndpoint).Port;
-        using var echoUdp=new UdpClient(new IPEndPoint(IPAddress.Loopback,echoPort));
+        var (echo,echoPair)=Wire.LoopbackPair();var echoPort=((IPEndPoint)echo.LocalEndpoint).Port;
+        using var echoUdp=echoPair!;
         var echoTasks=new ConcurrentBag<Task>();
         var accept=Task.Run(async()=>
         {
@@ -199,7 +199,6 @@ static class TransitTest
                 foreach(var entry in archive.Entries){using var reader=new StreamReader(entry.Open());var text=reader.ReadToEnd();Check(!text.Contains(Convert.ToHexString(cap),StringComparison.OrdinalIgnoreCase),"diagnostic capability leak");}
             }
             Console.WriteLine("PASS: TCP half-close and redacted diagnostic ZIP.");
-            if(args.Contains("--integration"))await Integration(args);
             return 0;
         }
         catch
@@ -208,97 +207,6 @@ static class TransitTest
         {
             if(host!=null)await host.DisposeAsync();timeout.Cancel();echo.Stop();echoUdp.Dispose();
             await Task.WhenAll(accept,udpEcho);await Task.WhenAll(echoTasks);
-        }
-    }
-    static async Task Integration(string[] args)
-    {
-        var root=Environment.GetEnvironmentVariable("ARDUI_TEST_ROOT")??throw new IOException("Run tests/integration_v2.py to start the isolated fixture.");
-        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(180));var ct=timeout.Token;
-        var echo=new TcpListener(IPAddress.Loopback,0);echo.Start();var port=((IPEndPoint)echo.LocalEndpoint).Port;
-        using var udpEcho=new UdpClient(new IPEndPoint(IPAddress.Loopback,port));Wire.ConfigureUdp(udpEcho);
-        var sockets=new ConcurrentBag<TcpClient>();var workers=new ConcurrentBag<Task>();
-        var accept=Task.Run(async()=>
-        {
-            try
-            {
-                while(!ct.IsCancellationRequested)
-                {
-                    var socket=await echo.AcceptTcpClientAsync(ct);socket.NoDelay=true;sockets.Add(socket);
-                    workers.Add(Task.Run(async()=>
-                    {try{var data=new byte[32768];int n;while((n=await socket.GetStream().ReadAsync(data,ct))>0)await socket.GetStream().WriteAsync(data.AsMemory(0,n),ct);}
-                     catch(Exception ex){Diagnostics.Log("integration-echo",ex.Message);}}));
-                }
-            }
-            catch(Exception ex){Diagnostics.Log("integration-accept",ex.Message);}
-        });
-        var datagrams=Task.Run(async()=>
-        {
-            try{while(!ct.IsCancellationRequested){var p=await udpEcho.ReceiveAsync(ct);await udpEcho.SendAsync(p.Buffer,p.RemoteEndPoint,ct);}}
-            catch(Exception ex){Diagnostics.Log("integration-udp",ex.Message);}
-        });
-        var settings=new Settings{StaticRelay=true,Relay=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY")!,RelayKey=Environment.GetEnvironmentVariable("ARDUI_TEST_RELAY_KEY")!,TcpPorts=[port],UdpPorts=[port]};
-        var server=Environment.GetEnvironmentVariable("ARDUI_TEST_SERVER")!;
-        var a=Path.Combine(root,"a");var b=Path.Combine(root,"b");IdentityStore.Prepare(a);IdentityStore.Prepare(b);
-        await using var caller=await Engine.Create(a,settings);await using var host=await Engine.Create(b,settings);
-        await using var ad=new DirectoryClient(caller,server);await using var bd=new DirectoryClient(host,server);
-        ad.Confirm=(_,_)=>Task.FromResult(true);bd.Confirm=(_,_)=>Task.FromResult(true);
-        ad.Notice+=message=>Console.WriteLine("A: "+message);bd.Notice+=message=>Console.WriteLine("B: "+message);
-        try
-        {
-            await ad.Register(ct);await bd.Register(ct);await bd.SetAccess(true,ct);ad.Start();bd.Start();
-            await ad.Connect(bd.Code,bd.AccessPassword,ct);var session=caller.Outgoing[host.Id];
-            Check(session.Overlay!=null&&host.Incoming[caller.Id].Overlay!=null,"v2 authenticated overlay missing");
-            Console.WriteLine("PASS: two real ARD clients, signed identities, enrollment and inner E2E handshake.");
-            var stablePort=session.Forward(port).Port;
-            using var tcp=new TcpClient{NoDelay=true};await tcp.ConnectAsync(IPAddress.Loopback,stablePort,ct);
-            var business=tcp.GetStream();
-            async Task Exchange(int size=262144)
-            {
-                var payload=RandomNumberGenerator.GetBytes(size);var reply=Wire.Read(business,size,ct);
-                await business.WriteAsync(payload,ct);Check((await reply.WaitAsync(TimeSpan.FromSeconds(20),ct)).SequenceEqual(payload),"real ARD business stream corruption");
-            }
-            using var udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));Wire.ConfigureUdp(udp);udp.Connect(IPAddress.Loopback,stablePort);
-            async Task Udp()
-            {
-                for(var i=0;i<3;i++)
-                {
-                    var payload=RandomNumberGenerator.GetBytes(Wire.MaxUdp);await udp.SendAsync(payload,ct);
-                    using var attempt=CancellationTokenSource.CreateLinkedTokenSource(ct);attempt.CancelAfter(TimeSpan.FromSeconds(3));
-                    try{var reply=await udp.ReceiveAsync(attempt.Token);Check(reply.Buffer.SequenceEqual(payload),"native RDP-sized UDP corruption");return;}
-                    catch(OperationCanceledException)when(!ct.IsCancellationRequested){Diagnostics.Log("integration-udp-retry",i.ToString());}
-                }
-                throw new IOException("Native UDP failed three probes.");
-            }
-            await Exchange();await Udp();Console.WriteLine("PASS: TCP and native RDP-sized UDP through the real base ARD path.");
-            TransitCandidate[] candidates=[];
-            for(var i=0;i<20&&candidates.Length==0;i++)
-            {candidates=(await ad.Call<TransitCandidates>("/api/v2/transit/candidates",new{target=host.Id},ct)).Candidates;if(candidates.Length==0)await Task.Delay(500,ct);}
-            Check(candidates.Length>0,"ArdTransit was not registered");
-            Check(await session.Transit!.ProbeCandidate(candidates[0],true,ct),"candidate rejected");
-            var route=session.Overlay!.Selected;Check(route!="base","C was not selected");
-            Check(session.Overlay.Link(route)!.Network.StartsWith("P2P",StringComparison.Ordinal),"A-C not Direct");
-            Check(host.Incoming[caller.Id].Overlay!.Link(route)!.Network.StartsWith("P2P",StringComparison.Ordinal),"B-C not Direct");
-            Console.WriteLine("PASS: independent Python C, NJ signed ticket, C signed temporary identities, both real ARD legs Direct.");
-            await Exchange(1048576);await Udp();Console.WriteLine("PASS: same business TCP socket and native UDP switched to C (explicit test selection because localhost base is faster).");
-            using(var c=Process.GetProcessById(int.Parse(Environment.GetEnvironmentVariable("ARDUI_TEST_TRANSIT_PID")!)))
-            {c.Kill(true);await c.WaitForExitAsync(ct);}
-            await Exchange(1048576);await Udp();Check(session.Overlay.Selected=="base","real C failure did not fall back");
-            Console.WriteLine("PASS: killed C and its ARD children; same TCP stream survived automatic fallback with intact 1 MiB payload.");
-            var old=session.Process;var recovery=Stopwatch.StartNew();await old.DisposeAsync();
-            for(var i=0;i<300&&(ReferenceEquals(old,session.Process)||session.Overlay.Link("base")?.Live!=true);i++)await Task.Delay(100,ct);
-            Check(!ReferenceEquals(old,session.Process),"base ARD was not restarted");
-            Check(session.Overlay.Link("base")?.Live==true,"base transport did not resume within 30 seconds");
-            await Exchange();await Udp();Check(session.Forward(port).Port==stablePort,"local port changed");
-            Console.WriteLine($"PASS: killed base ARD process; overlay and original business socket resumed on the same local port in {recovery.Elapsed.TotalSeconds:F1}s.");
-            await bd.Revoke(caller.Id);Check(host.Incoming.Count==0&&bd.Controllers.Length==0,"revoke did not destroy all host routes");
-            Console.WriteLine("PASS: revocation destroys host overlay, transit paths and business sockets.");
-            Console.WriteLine("Diagnostics: "+Diagnostics.Export(root,caller));
-        }
-        catch{Console.Error.WriteLine("Diagnostics: "+Diagnostics.Export(root,caller));throw;}
-        finally
-        {
-            timeout.Cancel();echo.Stop();udpEcho.Dispose();foreach(var socket in sockets)socket.Dispose();
-            await Task.WhenAll(accept,datagrams);await Task.WhenAll(workers);
         }
     }
     sealed class TestRelay : IAsyncDisposable
