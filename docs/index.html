@@ -283,13 +283,13 @@ footer .wrap{display:flex;gap:16px;flex-wrap:wrap;justify-content:space-between}
   <section id="selfhost">
     <div class="eyebrow">Self-hosting</div>
     <h2>Keep everything in your hands</h2>
-    <p class="sub">By default ArdUi uses a public directory service. To run your own, deploy the directory server on a Linux machine with a domain name.</p>
+    <p class="sub">By default ArdUi uses a public directory service. To run your own, deploy the directory server on a Linux machine with a domain name, or just its public IP address.</p>
     <div class="two">
       <div class="reveal">
         <div class="term"><div class="top"><i></i><i></i><i></i><em>One-command install</em></div>
 <pre><button class="copy" type="button">Copy</button><span class="c"># Linux with systemd, root, a domain pointing here, ports 80/443 open</span>
 curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | sudo bash -s -- <span class="k">--domain</span> <span class="s">ardui.example.com</span></pre></div>
-        <p class="tcap">It installs a Python environment, the directory service and Caddy with automatic HTTPS. Preview first with <code>--dry-run</code>; behind your own proxy use <code>--http-only</code>; remove with <code>--uninstall</code> (data is kept). <a href="https://github.com/KateY07/ArdUi/blob/main/selfhost.sh">Read the script</a>.</p>
+        <p class="tcap">It installs a Python environment, the directory service and Caddy with automatic HTTPS. No domain? Pass the public IP (<code>--domain 203.0.113.7</code>) for a short-lived Let's Encrypt IP certificate that Caddy renews. Preview first with <code>--dry-run</code>; behind your own proxy use <code>--http-only</code>; remove with <code>--uninstall</code> (data is kept). <a href="https://github.com/KateY07/ArdUi/blob/main/selfhost.sh">Read the script</a>.</p>
       </div>
       <div class="reveal">
         <div class="term"><div class="top"><i></i><i></i><i></i><em>Point the clients at it</em></div>
@@ -300,7 +300,7 @@ curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | su
         <p class="tcap">The script prints this at the end. Edit the config on every computer and restart ArdUi. Check the server: <code>https://your-domain/api/health</code> should return <code>"ok": true</code>.</p>
       </div>
     </div>
-    <div class="glass note reveal" style="margin-top:20px"><b>Scope:</b> the script deploys the <b>device directory service</b> (IDs, presence, connection coordination). Relay nodes and the relay directory (M) still default to the public ones; to run your own see the <a href="https://github.com/KateY07/ard2/tree/main/native_relay">relay node guide</a>, which is a manual process for now. Verified: the full run without HTTPS (<code>--http-only</code>) in a VM and on a real systemd server. The Caddy/HTTPS step has not yet been tried on a fresh server with a public domain. Servers in mainland China usually cannot reach GitHub: see the README for the <code>--file</code> option.</div>
+    <div class="glass note reveal" style="margin-top:20px"><b>Scope:</b> the script deploys the <b>trusted service</b>: the device directory (IDs, presence, connection coordination) and the network probe. Relay nodes and the relay directory (M) still default to the public ones; to run your own see the <a href="https://github.com/KateY07/ard2/tree/main/native_relay">relay node guide</a>, which is a manual process for now. Verified: the whole script, Caddy included, in an offline systemd container with hardened services; a real Let's Encrypt IP certificate on a public server with ArdUi clients running end to end against it. Not yet tried: a real certificate for a domain name on a fresh server. Servers in mainland China usually cannot reach GitHub: see the README for the <code>--file</code> and <code>--wheels</code> options.</div>
     <div class="glass scroll reveal" style="margin-top:16px">
       <table>
         <tr><th>Component</th><th>Role</th><th>Self-hosting</th></tr>

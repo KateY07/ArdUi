@@ -12,7 +12,7 @@ import tempfile
 import time
 from http import HTTPStatus
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey, Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives import serialization
 
 DB = os.environ.get('ARDUI_DATABASE', '/var/lib/arduiserver/devices.sqlite3')
@@ -20,45 +20,40 @@ CODE = re.compile(r'[A-Z0-9]{6}\Z')
 ENDPOINT = re.compile(r'[0-9a-f]{64}\Z')
 TICKET = re.compile(r'[0-9a-f]{32}\Z')
 COMPUTER_NAME = re.compile(r'[^\x00-\x1f\x7f]{1,64}\Z')
-SIGNING_KEY = os.environ.get('ARDUI_TRANSIT_KEY', DB + '.transit-key')
-VERSION = 'v5.pre1'
+VERSION = 'v5.5'
 # Network probe (see probe_udp.py): this server only mints short-lived tokens, each bound to the caller's IP address.
 PROBE_KEY = os.environ.get('ARDUI_PROBE_KEY', DB + '.probe-key')
 PROBE_HOST = os.environ.get('ARDUI_PROBE_HOST', '')
 PROBE_PORT = int(os.environ.get('ARDUI_PROBE_PORT', '7843'))
 # Clients older than this are refused with 426 (the header is "v<major>.pre<n>", sent by ArdUi since v5.pre1; older clients send none).
-MIN_CLIENT = (5, 1)
+# v5.5 (v5.pre5) learns the relay directory from this server (/api/v1/network) and signs every session with the device keys;
+# older clients are not supported. ARDUI_MIN_CLIENT=v<major>.pre<n> overrides it (e.g. while a release is rolling out).
 CLIENT = re.compile(r'v(\d{1,3})\.pre(\d{1,3})\Z')
+_min = CLIENT.fullmatch(os.environ.get('ARDUI_MIN_CLIENT', 'v5.pre5'))
+MIN_CLIENT = (int(_min.group(1)), int(_min.group(2))) if _min else (5, 5)
+MIN_TEXT = 'v%d.%d' % MIN_CLIENT
+# What this network's clients need besides this server: where M's relay directory and address discovery are, and M's key.
+# Written by the operator (selfhost.sh / deploy.sh); see ROLES.md.
+NETWORK_FILE = os.environ.get('ARDUI_NETWORK', '/etc/ardui/network.json')
 
 def check_client(environ):
     match = CLIENT.fullmatch(environ.get('HTTP_X_ARDUI_CLIENT', ''))
     if match is None or (int(match.group(1)), int(match.group(2))) < MIN_CLIENT:
-        raise ApiError(426, '客户端版本过旧，请升级到 ArdUi v5.pre1 或更高版本。')
+        raise ApiError(426, f'客户端版本过旧，请升级到 ArdUi {MIN_TEXT} 或更高版本。')
 
-def transit_signer():
-    folder = os.path.dirname(os.path.abspath(SIGNING_KEY))
-    os.makedirs(folder, exist_ok=True)
-    if not os.path.exists(SIGNING_KEY):
-        fd, pending = tempfile.mkstemp(prefix='.transit-key-', dir=folder)
-        try:
-            with os.fdopen(fd, 'wb') as out:
-                out.write(secrets.token_bytes(32))
-                out.flush()
-                os.fsync(out.fileno())
-            try: os.link(pending, SIGNING_KEY)
-            except FileExistsError: print('Transit signing identity already initialized by another worker.', flush=True)
-        finally: os.unlink(pending)
-    with open(SIGNING_KEY, 'rb') as source:
-        return Ed25519PrivateKey.from_private_bytes(source.read())
-
-def signed_transit(value):
-    key = transit_signer()
-    payload = base64.b64encode(json.dumps(value, separators=(',', ':')).encode()).decode()
-    endpoint = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
-    issued, nonce = int(time.time()), secrets.token_hex(16)
-    message = f'ArdUiServer/1\n/transit-ticket/v2\n{endpoint}\n{issued}\n{nonce}\n{payload}'.encode()
-    return dict(endpoint=endpoint, issuedAt=issued, nonce=nonce, payload=payload,
-                signature=base64.b64encode(key.sign(message)).decode())
+def network():
+    try:
+        with open(NETWORK_FILE, encoding='utf-8') as source:
+            value = json.load(source)
+    except FileNotFoundError:
+        raise ApiError(503, '此网络尚未配置中继目录。')
+    except (OSError, ValueError):
+        raise ApiError(503, '此网络的中继配置无效。')
+    if (not isinstance(value, dict) or set(value) != {'relayDirectory', 'master', 'masterKey'} or
+            not all(isinstance(value[k], str) and value[k].startswith('https://') and len(value[k]) <= 300 for k in ('relayDirectory', 'master')) or
+            not isinstance(value['masterKey'], str) or not re.fullmatch(r'spki:[0-9a-f]{2,512}', value['masterKey'])):
+        raise ApiError(503, '此网络的中继配置无效。')
+    return value
 
 def check_grant(value, controller, target):
     try:
@@ -69,18 +64,6 @@ def check_grant(value, controller, target):
         if grant['controllerEndpoint'] != controller or grant['targetEndpoint'] != target: raise ValueError('grant pair')
     except (ValueError, KeyError, TypeError, InvalidSignature):
         raise ApiError(403, '转发需要被控端签名的永久授权。')
-
-def check_approval(value, expected, now):
-    try:
-        target=expected['b']
-        if value['endpoint']!=target or type(value['issuedAt']) is not int or abs(now-value['issuedAt'])>120: raise ValueError('approval signer or time')
-        message=f"ArdUiServer/1\n/transit-approval/v2\n{target}\n{value['issuedAt']}\n{value['nonce']}\n{value['payload']}".encode()
-        Ed25519PublicKey.from_public_bytes(bytes.fromhex(target)).verify(base64.b64decode(value['signature'],validate=True),message)
-        approval=json.loads(base64.b64decode(value['payload'],validate=True))
-        if any(approval[k]!=v for k,v in expected.items()): raise ValueError('approval binding')
-        if type(approval['expires']) is not int or not now<approval['expires']<=now+120: raise ValueError('approval expiry')
-    except (ValueError,KeyError,TypeError,InvalidSignature):
-        raise ApiError(403,'需要被控端为本次候选和双方临时身份签名批准。')
 
 class ApiError(Exception):
     def __init__(self, status, message): self.status, self.message = status, message
@@ -115,14 +98,13 @@ def initialize():
           PRIMARY KEY(endpoint,nonce));
         CREATE TABLE IF NOT EXISTS limits(name TEXT, window INTEGER, count INTEGER,
           PRIMARY KEY(name,window));
-        CREATE TABLE IF NOT EXISTS transit_nodes(
-          endpoint TEXT PRIMARY KEY REFERENCES devices(endpoint), seen INTEGER NOT NULL,
-          capacity INTEGER NOT NULL, active INTEGER NOT NULL, mbps INTEGER NOT NULL, metrics TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS transit_routes(
-          id TEXT PRIMARY KEY, a TEXT NOT NULL, b TEXT NOT NULL, c TEXT NOT NULL,
-          expires INTEGER NOT NULL, lease_a INTEGER NOT NULL, lease_b INTEGER NOT NULL,
-          status TEXT NOT NULL, ticket TEXT NOT NULL, offer TEXT);
-        CREATE INDEX IF NOT EXISTS transit_owner ON transit_routes(c,status);
+        DROP TABLE IF EXISTS transit_routes;
+        DROP TABLE IF EXISTS transit_nodes;
+        CREATE TABLE IF NOT EXISTS ferry_reports(
+          minute INTEGER NOT NULL, node TEXT NOT NULL, device TEXT NOT NULL,
+          probes INTEGER NOT NULL, ok INTEGER NOT NULL, rtt REAL, sessions INTEGER NOT NULL, session_rtt REAL, mbps REAL,
+          PRIMARY KEY(minute,node,device));
+        CREATE INDEX IF NOT EXISTS ferry_reports_minute ON ferry_reports(minute);
         ''')
         # Computer name shown to controllers that hold a signed grant; added after the first release.
         if 'name' not in {row[1] for row in db.execute('PRAGMA table_info(devices)')}:
@@ -201,10 +183,263 @@ def registered(db, endpoint):
     if row is None: raise ApiError(403, '请先注册本机。')
     return row
 
+# ---- ArdFerry quality, as the clients see it ----------------------------------------------------------------------------------
+# ArdFerry nodes are untrusted and report nothing about themselves; the clients that use them report what they measured, a few
+# hundred bytes every REPORT_SECONDS (the server can raise it to lighten its load). Kept per minute for a day, shown only in summary.
+REPORT_SECONDS = int(os.environ.get('ARDUI_FERRY_REPORT_SECONDS', '30'))
+FERRY_NAME = re.compile(r'[A-Za-z0-9_-]{1,64}\Z')
+M_STATUS = os.environ.get('ARDUI_M_STATUS', 'https://127.0.0.1:8080/status')
+ADMIN_TOKEN = os.environ.get('ARDUI_ADMIN_TOKEN', '')
+
+def number(value, low, high, integer=False):
+    if value is None and not integer: return None
+    if isinstance(value, bool) or not isinstance(value, int if integer else (int, float)) or not low <= value <= high:
+        raise ApiError(400, 'ArdFerry 报告格式无效。')
+    return value
+
+def ferry_report(endpoint, data, now):
+    ferries = data.get('ferries')
+    if set(data) != {'ferries'} or not isinstance(ferries, list) or len(ferries) > 16:
+        raise ApiError(400, 'ArdFerry 报告格式无效。')
+    rows = []
+    for entry in ferries:
+        if not isinstance(entry, dict) or set(entry) != {'node', 'probes', 'ok', 'rttMs', 'sessions', 'sessionRttMs', 'mbps'}:
+            raise ApiError(400, 'ArdFerry 报告格式无效。')
+        node = text(entry, 'node', FERRY_NAME)
+        probes = number(entry['probes'], 0, 1000, True); ok = number(entry['ok'], 0, probes, True)
+        rows.append((now // 60, node, endpoint, probes, ok, number(entry['rttMs'], 0, 60000), number(entry['sessions'], 0, 100, True),
+                     number(entry['sessionRttMs'], 0, 60000), number(entry['mbps'], 0, 100000)))
+    limit('ferry-report:' + endpoint, 4, 60)   # every 30 s, plus a report when a relayed session ends
+    with database() as db:
+        registered(db, endpoint)
+        db.execute('DELETE FROM ferry_reports WHERE minute < ?', (now // 60 - 24 * 60,))
+        db.executemany('INSERT OR REPLACE INTO ferry_reports VALUES(?,?,?,?,?,?,?,?,?)', rows)
+    return {'ok': True, 'next': REPORT_SECONDS}
+
+def median(values):
+    values = sorted(v for v in values if v is not None)
+    if not values: return None
+    middle = len(values) // 2
+    return round(values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2, 1)
+
+# Where an ArdFerry roughly is, for the map: looked up on this server in DB-IP's free database (CC BY 4.0; no address leaves the
+# server). Public: country and region, the point rounded to whole degrees, so a node at someone's home does not give away the city.
+GEOIP = os.environ.get('ARDUI_GEOIP', os.path.join(os.path.dirname(os.path.abspath(DB)), 'dbip-city-lite.mmdb'))
+_geo = {'reader': None, 'mtime': None}
+
+CN_REGIONS = {'Beijing': '北京', 'Tianjin': '天津', 'Hebei': '河北', 'Shanxi': '山西', 'Inner Mongolia': '内蒙古', 'Liaoning': '辽宁',
+              'Jilin': '吉林', 'Heilongjiang': '黑龙江', 'Shanghai': '上海', 'Jiangsu': '江苏', 'Zhejiang': '浙江', 'Anhui': '安徽',
+              'Fujian': '福建', 'Jiangxi': '江西', 'Shandong': '山东', 'Henan': '河南', 'Hubei': '湖北', 'Hunan': '湖南',
+              'Guangdong': '广东', 'Guangxi': '广西', 'Hainan': '海南', 'Chongqing': '重庆', 'Sichuan': '四川', 'Guizhou': '贵州',
+              'Yunnan': '云南', 'Tibet': '西藏', 'Shaanxi': '陕西', 'Gansu': '甘肃', 'Qinghai': '青海', 'Ningxia': '宁夏',
+              'Xinjiang': '新疆', 'Taiwan': '台湾', 'Hong Kong': '香港', 'Macao': '澳门', 'Macau': '澳门'}
+
+def geo_reader():
+    try:
+        mtime = os.path.getmtime(GEOIP)
+    except OSError:
+        return None
+    if _geo['mtime'] != mtime:   # picked up again when the monthly file is replaced
+        try:
+            import maxminddb
+            _geo['reader'], _geo['mtime'] = maxminddb.open_database(GEOIP), mtime
+        except Exception:
+            _geo['reader'], _geo['mtime'] = None, mtime
+    return _geo['reader']
+
+def locate(address, admin):
+    import ipaddress
+    reader = geo_reader()
+    try:
+        ip = ipaddress.ip_address(address.strip('[]'))
+    except ValueError:
+        return None
+    if reader is None or not ip.is_global:
+        return None
+    record = reader.get(str(ip)) or {}
+    name = lambda part: (part or {}).get('names', {}).get('zh-CN') or (part or {}).get('names', {}).get('en')
+    point = record.get('location') or {}
+    if point.get('latitude') is None:
+        return None
+    regions = record.get('subdivisions') or []
+    region = name(regions[0]) if regions else None
+    if (record.get('country') or {}).get('iso_code') in ('CN', 'TW', 'HK', 'MO'):
+        region = CN_REGIONS.get(region, region)   # DB-IP names Chinese provinces in English only
+    found = dict(country=name(record.get('country')), region=region,
+                 lat=round(point['latitude']), lon=round(point['longitude']))
+    if admin:
+        found.update(city=name(record.get('city')), lat=point['latitude'], lon=point['longitude'])
+    return found
+
+def node_location(node, admin):
+    # the address M sees the node at, else the hosts of its published entrances (IPv4 first)
+    import urllib.parse
+    hosts = [node.get('address')] + [urllib.parse.urlsplit(u).hostname for f in ('ipv4', 'ipv6')
+                                     for u in (node.get('families', {}).get(f, {}).get('urls') or [])]
+    for host in hosts:
+        if host and (found := locate(host, admin)):
+            return found
+    return None
+
+def ferry_view(admin=False):
+    """M's own measurements of each ArdFerry next to what the clients measured. The public view carries no addresses or errors."""
+    import ssl, urllib.request
+    measured, note = [], None
+    try:
+        context = ssl.create_default_context(); context.check_hostname = False; context.verify_mode = ssl.CERT_NONE   # this host only
+        with urllib.request.urlopen(M_STATUS, timeout=3, context=context) as response:
+            measured = json.loads(response.read(1 << 20))['nodes']
+    except Exception:
+        note = 'M 的测量暂时取不到。'
+    now = int(time.time())
+    with database() as db:
+        day = db.execute('SELECT * FROM ferry_reports WHERE minute >= ?', (now // 60 - 24 * 60,)).fetchall()
+    recent = [r for r in day if r['minute'] >= now // 60 - 2]
+    clients = {}
+    for row in day:
+        c = clients.setdefault(row['node'], dict(devices_24h=set(), probes_24h=0, ok_24h=0, rtt=[], session_rtt=[], mbps=[]))
+        c['devices_24h'].add(row['device']); c['probes_24h'] += row['probes']; c['ok_24h'] += row['ok']
+        c['rtt'].append(row['rtt']); c['session_rtt'].append(row['session_rtt']); c['mbps'].append(row['mbps'])
+    latest = {}
+    for row in recent:   # each device's latest report in the last two minutes says how many of its sessions run over the node now
+        key = (row['node'], row['device'])
+        if key not in latest or row['minute'] > latest[key]['minute']: latest[key] = row
+    nodes = {n['node']: dict(n, clients=None) for n in measured}
+    for name, c in clients.items():
+        now_rows = [r for (node, _), r in latest.items() if node == name]
+        summary = dict(devices_now=len(now_rows), sessions_now=sum(r['sessions'] for r in now_rows), devices_24h=len(c['devices_24h']),
+                       client_rtt_ms_median=median(c['rtt']),
+                       client_success_rate_24h=round(c['ok_24h'] / c['probes_24h'], 4) if c['probes_24h'] else None,
+                       session_rtt_ms_median=median(c['session_rtt']), session_mbps_median=median(c['mbps']))
+        nodes.setdefault(name, dict(node=name, families={}))['clients'] = summary
+    result = []
+    for node in sorted(nodes.values(), key=lambda n: n['node']):
+        node['location'] = node_location(node, admin)
+        if not admin:
+            node = {k: v for k, v in node.items() if k not in ('address', 'first_seen')}
+            node['families'] = {f: {k: v for k, v in fam.items() if k not in ('urls', 'last_error')} for f, fam in node.get('families', {}).items()}
+        result.append(node)
+    devices_now = len({device for (_, device) in latest})   # one device reports on every node: count it once
+    return dict(nodes=result, devices_now=devices_now, report_seconds=REPORT_SECONDS, note=note, generated_at=now,
+                located=any(n.get('location') for n in result))
+
+FERRY_PAGE = r'''<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ArdFerry 状态</title>
+<style>
+:root{--landdot:#d5d9e0;--bg:#f6f7f9;--card:#fff;--ink:#16181d;--muted:#6b7280;--line:#e6e8ec;--good:#16a34a;--warn:#d97706;--bad:#dc2626;--accent:#ea580c;--track:#eef0f3;--shadow:0 1px 2px rgba(16,24,40,.04),0 4px 16px rgba(16,24,40,.06)}
+@media (prefers-color-scheme:dark){:root{--landdot:#2c313c;--bg:#0f1115;--card:#171a21;--ink:#e8eaed;--muted:#9aa1ad;--line:#262a33;--track:#232733;--shadow:0 1px 2px rgba(0,0,0,.4)}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+main{max-width:1180px;margin:0 auto;padding:28px 16px 48px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px 16px;margin-bottom:20px}
+h1{font-size:22px;margin:0;letter-spacing:.2px}h1 span{color:var(--accent)}
+.updated{color:var(--muted);font-size:12px}.updated i{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--good);margin-right:6px;vertical-align:1px}
+.note{background:color-mix(in srgb,var(--warn) 12%,var(--card));border:1px solid color-mix(in srgb,var(--warn) 35%,transparent);color:var(--ink);padding:10px 14px;border-radius:10px;margin-bottom:16px}
+.hero{position:relative;margin-bottom:22px}.summary{display:grid;grid-template-columns:repeat(4,auto);gap:4px 22px;justify-content:start;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:12px 16px}.summary .tile{background:none;border:0;box-shadow:none;padding:0}.summary .tile b{font-size:20px}.hero.with-map .summary{position:absolute;top:12px;left:12px;background:color-mix(in srgb,var(--card) 82%,transparent);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:1}@media (max-width:640px){.hero.with-map .summary{position:static;margin-top:10px;backdrop-filter:none;background:var(--card)}.summary{grid-template-columns:repeat(4,1fr);gap:4px 10px}.summary .tile b{font-size:18px}}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow)}
+.tile b{display:block;font-size:26px;line-height:1.2;font-variant-numeric:tabular-nums}.tile span{color:var(--muted);font-size:12px}
+.map{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:10px 12px}.map svg{display:block;width:100%;height:auto}.land{fill:var(--landdot)}.mark{stroke:var(--card);stroke-width:2}.halo{opacity:.25;animation:pulse 2.4s ease-out infinite;transform-box:fill-box;transform-origin:center}@keyframes pulse{0%{transform:scale(.6);opacity:.45}100%{transform:scale(2.4);opacity:0}}@media (prefers-reduced-motion:reduce){.halo{animation:none}}.where{color:var(--muted);font-size:12px;margin-top:-8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px}
+.node{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:18px;display:flex;flex-direction:column;gap:14px}
+.node.down{opacity:.78}
+.top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.name{font:600 15px ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}
+.badge{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 8px;white-space:nowrap}
+.fams{display:flex;gap:6px;flex-wrap:wrap}
+.pill{font-size:12px;font-weight:600;border-radius:999px;padding:2px 10px;display:inline-flex;align-items:center;gap:6px}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.on{color:var(--good);background:color-mix(in srgb,var(--good) 12%,transparent)}.off{color:var(--muted);background:var(--track)}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:420px){.cols{grid-template-columns:1fr}}
+.col h3{margin:0 0 8px;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.row{display:flex;justify-content:space-between;gap:8px;padding:3px 0;font-variant-numeric:tabular-nums}.row span{color:var(--muted)}
+.bar{height:6px;border-radius:999px;background:var(--track);overflow:hidden;margin:2px 0 6px}.bar i{display:block;height:100%;border-radius:inherit}
+.empty{color:var(--muted);text-align:center;padding:40px 0}
+.map{position:relative}.credit{position:absolute;right:14px;bottom:8px;font-size:10px;color:var(--muted);text-decoration:none;opacity:.7}
+</style></head><body><main>
+<header><h1><span>ArdFerry</span> 状态</h1><div class="updated"><i></i><span id="updated"></span></div></header>
+<div id="note"></div><section class="hero" id="hero"><section class="map" id="map" hidden></section><section class="summary" id="summary"></section></section><section class="grid" id="nodes"></section>
+
+</main>
+<script id="data" type="application/json">__DATA__</script>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const v=(x,u='')=>x==null?'—':`${x}${u}`;
+const pct=x=>x==null?'—':`${(x*100).toFixed(x>=.999?0:1)}%`;
+const tone=x=>x==null?'var(--track)':x>=.98?'var(--good)':x>=.9?'var(--warn)':'var(--bad)';
+const bar=x=>`<div class="bar"><i style="width:${x==null?0:Math.max(2,x*100)}%;background:${tone(x)}"></i></div>`;
+const MASK={cols:180,rows:90,step:2,bits:'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf4AP/AAAAAAAAAAAAAAAAAAAAAAAAX/z///+AAAAAAAABAAAAAAAAAAAAAYd8P///wAA+AAAAAA8AAAAAAAAAAAwAnw////4AAIAAAAAAGAAAAAAAAAAADivwAf//wAAAAADAAf/wAHYAAAAAADoi3sAP//gAAAAAMAD///sAAAAgBgACfwz/AD/+gAAAwAEHf///+/8gBAP/7/nJdjwD/+AAAH/AA7f///////f4P//////h8H/gAAAf/6//f////////Mf/////9H4D8AeAA+ev///////////AP/////4A0B4AAAD5/////////////Af3////gHgA4AAAH5///////////LwAHgH///gHkAAAAAH4/////////+CIAABAB///4D+AAAAGCx/////////4A8AAIAAf///n/gAAAOCD/////////wA4AAAAAf///n/wAAAbP///////////AgAAAAAP/////wAAADf//////////9AAAAAAAF////0YAAAB///////////9AAAAAAAD////8EAAAB///////////5AAAAAAAD////2AAAAB/f5fP//////wAAAAAAAD////gAAAAfxnwPP//////jAAAAAAAD////AAAAAPCb3/n/////+CAAAAAAAD///8AAAAAfALf/n////+ECAAAAAAAB///8AAAAAGHQP/n/////mMAAAAAAAA///8AAAAAH+Ai///////E8AAAAAAAAf//wAAAAAP/AA///////BgAAAAAAAAP//gAAAAAf/73///////gAAAAAAAAAD/AQAAAAAf////f/////gAAAAAAAAAF+AQAAAAB///+/n/////AAAAAAAAAAC+AAAAAAB///+f0H////AAAAAAAAAAAeAwAAAAD////f/B///8gAAAAAAAAAAeGEAAAAH////v+B/z/AAAAAAAAAAAAPMAgAAAD////n+A/B+gAAAAAAAAAAAD8AAAAAD////n4AeB/AgAAAAAAAAAAAPAAAAAH////3gAcAfAgAAAAAAAAAAADAAAAAD////6AAcAfggAAAAAAAAAAABDwAAAD////8wAMATAIAAAAAAAAAAAAr/AAAB/////gAKASAAAAAAAAAAAAAAH/gAAA/////gACAAAIAAAAAAAAAAAAH/8AAAaH///AAAAsGAAAAAAAAAAAAAH/+AAAAB//+AAAAUOAAAAAAAAAAAAAP/+AAAAB//8AAAAYegAAAAAAAAAAAAP//gAAAD//4AAAAMeBgAAAAAAAAAAAP//8AAAB//wAAAAGdiuAAAAAAAAAAAf///AAAA//wAAAACAQHgAAAAAAAAAAP///gAAA//wAAAABwAHwgAAAAAAAAAH///AAAA//wAAAAACIDQIAAAAAAAAAH//+AAAAf/wAAAAAAAAAAAAAAAAAAAD//+AAAA//wgAAAAABxAAAAAAAAAAAD//+AAAA//wgAAAAAPxgBAAAAAAAAAA//8AAAA//jgAAAAAf5gAAAAAAAAAAAf/8AAAA//DgAAAAAf/gAAAAAAAAAAAf/8AAAAf/DAAAAAD//4CAAAAAAAAAAf/wAAAAf/DAAAAAH//4AAAAAAAAAAAf/AAAAAf+CAAAAAH//8AAAAAAAAAAAf/AAAAAP8AAAAAAH//+AAAAAAAAAAA/+AAAAAP8AAAAAAH//+AAAAAAAAAAA/+AAAAAH4AAAAAAD//+AAAAAAAAAAA/8AAAAAHwAAAAAADwf8AAAAAAAAAAA/gAAAAAAAAAAAAACAH4AIAAAAAAAAB/wAAAAAAAAAAAAAAAD4AEAAAAAAAAB+AAAAAAAAAAAAAAAAAAAGAAAAAAAAB6AAAAAAAAAAAAAAAAAwAMAAAAAAAAA8AAAAAAAAAAAAAAAAAQAYAAAAAAAAB4AAAAAAAAAAAAAAAAAAAwAAAAAAAAB4AAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAAACAAAAAAAAAAAAAAAAADgAAAAAAAAAAAAAAAAAAAAAAAAAAAABwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMAAAAAAAAAeAAIP+f/gAAAAAAAAAAAMAAAAAAABP/+H//////AAAAAAAAAAA+AAAAAf////8////////AAAAAAAOEAPAAAB///////////////gAAAP//T//8AAAH//////////////+AAAH/////4AAAH///////////////8AAE//////4ABw////////////////8AAAD//////gCA////////////////wAAAf/////////////////////////+A/4A///////////////////////////////////////////////////////////////////////////////////////'};
+const maskBits=Uint8Array.from(atob(MASK.bits),c=>c.charCodeAt(0));
+const TOP=84,BOTTOM=-58,C=6;   // latitudes shown, and the size of one 2-degree cell in the drawing
+const px=lon=>(lon+180)/MASK.step*C, py=lat=>(TOP-lat)/MASK.step*C;
+let landDots=null;
+function land(){
+  if(landDots)return landDots;
+  const out=[];const r0=Math.round((90-TOP)/MASK.step),r1=Math.round((90-BOTTOM)/MASK.step);
+  for(let r=r0;r<r1;r++)for(let c=0;c<MASK.cols;c++){const i=r*MASK.cols+c;
+    if(maskBits[i>>3]&(0x80>>(i&7)))out.push(`<circle class="land" cx="${c*C+C/2}" cy="${(r-r0)*C+C/2}" r="1.7"/>`);}
+  return landDots=out.join('');
+}
+function drawMap(nodes){
+  const placed=nodes.filter(n=>n.location);
+  $('map').hidden=!placed.length;$('hero').classList.toggle('with-map',!!placed.length);if(!placed.length)return;
+  const w=MASK.cols*C,h=(TOP-BOTTOM)/MASK.step*C;
+  const marks=placed.map(n=>{const up=Object.values(n.families||{}).some(f=>f.available);const col=up?'var(--good)':'var(--muted)';
+    const x=px(n.location.lon),y=py(n.location.lat);const where=[n.location.country,n.location.region].filter(Boolean).join(' · ');
+    return `<g><title>${esc(n.node)}${where?' — '+esc(where):''}${up?'':'（不可用）'}</title>${up?`<circle class="halo" cx="${x}" cy="${y}" r="9" fill="${col}"/>`:''}<circle class="mark" cx="${x}" cy="${y}" r="6" fill="${col}"/></g>`}).join('');
+  $('map').innerHTML=`<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="ArdFerry 节点分布">${land()}${marks}</svg>`+
+    '<a class="credit" href="https://db-ip.com" target="_blank" rel="noopener" title="IP Geolocation by DB-IP (CC BY 4.0)">© DB-IP</a>';   // the licence asks for this credit
+}
+function render(view){
+  $('updated').textContent='更新于 '+new Date(view.generated_at*1000).toLocaleTimeString();
+  $('note').innerHTML=view.note?`<div class="note">${esc(view.note)}</div>`:'';
+  const nodes=view.nodes||[];
+  const up=nodes.filter(n=>Object.values(n.families||{}).some(f=>f.available)).length;
+  const sum=(k)=>nodes.reduce((a,n)=>a+((n.clients||{})[k]||0),0);
+  $('summary').innerHTML=[[nodes.length,'节点'],[up,'可用节点'],[view.devices_now??0,'当前上报设备'],[sum('sessions_now'),'当前中继会话']]
+    .map(([n,l])=>`<div class="tile"><b>${n}</b><span>${l}</span></div>`).join('');
+  drawMap(nodes);
+  if(!nodes.length){$('nodes').innerHTML='<div class="empty">还没有 ArdFerry 节点。</div>';return;}
+  $('nodes').innerHTML=nodes.map(n=>{
+    const fams=n.families||{},c=n.clients||{},any=Object.values(fams).some(f=>f.available);
+    const rtt=Object.values(fams).map(f=>f.probe_rtt_ms_median).filter(x=>x!=null);
+    const rate=Object.values(fams).map(f=>f.success_rate_24h).filter(x=>x!=null);
+    const mRate=rate.length?Math.max(...rate):null;
+    const pills=['ipv4','ipv6'].map(f=>`<span class="pill ${fams[f]&&fams[f].available?'on':'off'}">${f==='ipv4'?'IPv4':'IPv6'}</span>`).join('');
+    const role=n.official?'官方节点':'社区节点';
+    const where=n.location?[n.location.country,n.location.region,n.location.city].filter(Boolean).join(' · '):'';
+    return `<article class="node ${any?'':'down'}">
+      <div class="top"><div class="name">${esc(n.node)}</div><span class="badge">${role}</span></div>${where?`<div class="where">${esc(where)}</div>`:''}
+      <div class="fams">${pills}</div>
+      <div class="cols">
+        <div class="col"><h3>M 测得</h3>
+          <div class="row"><span>握手延迟</span><b>${v(rtt.length?Math.min(...rtt):null,' ms')}</b></div>
+          <div class="row"><span>可用率 24h</span><b>${pct(mRate)}</b></div>${bar(mRate)}
+          <div class="row"><span>心跳</span><b>${n.heartbeat_age_s==null?'—':n.heartbeat_age_s<15?'正常':v(n.heartbeat_age_s,' s 前')}</b></div></div>
+        <div class="col"><h3>客户端测得</h3>
+          <div class="row"><span>握手延迟</span><b>${v(c.client_rtt_ms_median,' ms')}</b></div>
+          <div class="row"><span>成功率 24h</span><b>${pct(c.client_success_rate_24h)}</b></div>${bar(c.client_success_rate_24h)}
+          <div class="row"><span>设备 当前 / 24h</span><b>${v(c.devices_now)} / ${v(c.devices_24h)}</b></div>
+          <div class="row"><span>中继会话</span><b>${v(c.sessions_now)}</b></div>
+          <div class="row"><span>会话往返 · 带宽</span><b>${v(c.session_rtt_ms_median,' ms')} · ${v(c.session_mbps_median,' Mbps')}</b></div></div>
+      </div></article>`}).join('');
+}
+render(JSON.parse($('data').textContent));
+setInterval(async()=>{try{const r=await fetch('/api/v1/ferries'+location.search,{cache:'no-store'});if(r.ok)render(await r.json());}catch(e){}},30000);
+</script></body></html>'''
+
+
+def ferry_page(view):
+    # the data rides in the page (no extra request on first paint) and is refreshed in place every 30 s
+    data = json.dumps(view, ensure_ascii=False).replace('</', '<\\/')
+    return FERRY_PAGE.replace('__DATA__', data)
+
 def dispatch(path, endpoint, data, ip, envelope):
     now=int(time.time())
-    if path.startswith('/api/v2/transit/'):
-        return transit_dispatch(path, endpoint, data, envelope, now)
+    if path == '/api/v1/ferry-report':
+        return ferry_report(endpoint, data, now)
     if path == '/api/v1/register':
         with database() as db:
             row=db.execute('SELECT * FROM devices WHERE endpoint=?',(endpoint,)).fetchone()
@@ -296,10 +531,12 @@ def dispatch(path, endpoint, data, ip, envelope):
         target_id=text(data,'targetEndpoint',ENDPOINT)
         ticket=text(data,'requestId',TICKET)
         expires=data.get('expires')
-        if type(expires) is not int or not now < expires <= now+360 or set(data)!={'code','sessionId','targetEndpoint','requestId','expires','client'}:
+        fields={'code','sessionId','targetEndpoint','requestId','expires','client'}
+        if data.get('transport')=='easytier-v1': fields.add('transport')
+        if type(expires) is not int or not now < expires <= now+360 or set(data)!=fields:
             raise ApiError(400,'连接请求无效；服务器不接收密码。')
         client=data.get('client'); match=CLIENT.fullmatch(client) if isinstance(client,str) else None
-        if match is None or (int(match.group(1)),int(match.group(2)))<MIN_CLIENT: raise ApiError(426,'客户端版本过旧，请升级到 ArdUi v5.pre1 或更高版本。')
+        if match is None or (int(match.group(1)),int(match.group(2)))<MIN_CLIENT: raise ApiError(426,f'客户端版本过旧，请升级到 ArdUi {MIN_TEXT} 或更高版本。')
         limit('connect-device:'+endpoint,20,60)
         with database() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -332,7 +569,13 @@ def dispatch(path, endpoint, data, ip, envelope):
                     text(data,'sessionId',ENDPOINT)
                     if data.get('requestId')!=ticket or data.get('controllerEndpoint')!=row['caller'] or data.get('targetEndpoint')!=endpoint or data.get('clientSessionId')!=row['client_session'] or data.get('expires')!=row['expires']:
                         raise ApiError(400,'会话签名内容不匹配。')
-                    if set(data)!={'sessionId','requestId','controllerEndpoint','targetEndpoint','clientSessionId','expires'}:
+                    fields={'sessionId','requestId','controllerEndpoint','targetEndpoint','clientSessionId','expires'}
+                    requested=json.loads(base64.b64decode(json.loads(row['proof'])['payload'],validate=True))
+                    if requested.get('transport')=='easytier-v1':
+                        fields.update(('transport','transportPort'))
+                        if data.get('transport')!='easytier-v1' or type(data.get('transportPort')) is not int or not 1<=data['transportPort']<=65535:
+                            raise ApiError(400,'无效传输协议或端口。')
+                    if set(data)!=fields:
                         raise ApiError(400,'无效会话响应；禁止发送密码或流量密钥。')
                     db.execute("UPDATE requests SET status='ready',offer=? WHERE id=?",(json.dumps(envelope),ticket))
                 return {'ok':True}
@@ -342,78 +585,24 @@ def dispatch(path, endpoint, data, ip, envelope):
             return result
     raise ApiError(404,'接口不存在。')
 
-def transit_dispatch(path, endpoint, data, envelope, now):
-    with database() as db:
-        db.execute('BEGIN IMMEDIATE')
-        registered(db, endpoint)
-        db.execute('DELETE FROM transit_nodes WHERE seen<?', (now-3600,))
-        db.execute("UPDATE transit_routes SET status='closed' WHERE min(lease_a,lease_b)<? OR (status='pending' AND expires<?)", (now, now))
-        db.execute('DELETE FROM transit_routes WHERE expires<? AND status=?', (now-3600, 'closed'))
-        if path == '/api/v2/transit/key':
-            return {'endpoint': signed_transit({})['endpoint'], 'version': VERSION}
-        if path == '/api/v2/transit/heartbeat':
-            capacity, active, mbps = (data.get(k) for k in ('capacity', 'active', 'mbps'))
-            if type(capacity) is not int or not 1 <= capacity <= 32 or type(active) is not int or not 0 <= active <= capacity or type(mbps) is not int or not 1 <= mbps <= 10000:
-                raise ApiError(400, '无效中继容量。')
-            metrics = data.get('metrics', {})
-            if not isinstance(metrics, dict) or len(json.dumps(metrics)) > 4096: raise ApiError(400, '无效心跳。')
-            db.execute('INSERT INTO transit_nodes VALUES(?,?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET seen=excluded.seen,capacity=excluded.capacity,active=excluded.active,mbps=excluded.mbps,metrics=excluded.metrics',
-                       (endpoint, now, capacity, active, mbps, json.dumps(metrics)))
-            rows = db.execute("SELECT * FROM transit_routes WHERE c=? AND status IN ('pending','ready') ORDER BY expires LIMIT 32", (endpoint,)).fetchall()
-            return {'jobs': [json.loads(r['ticket']) for r in rows if r['status']=='pending'],
-                    'leases': {r['id']: min(r['lease_a'], r['lease_b']) for r in rows}, 'version': VERSION}
-        if path == '/api/v2/transit/candidates':
-            target = text(data, 'target', ENDPOINT)
-            rows = db.execute('SELECT endpoint,capacity,active,mbps,seen FROM transit_nodes WHERE seen>=? AND active<capacity AND endpoint NOT IN (?,?) ORDER BY active*1.0/capacity,seen DESC LIMIT 3',
-                              (now-20, endpoint, target)).fetchall()
-            return {'candidates': [dict(r) for r in rows]}
-        if path == '/api/v2/transit/request':
-            route = text(data, 'route', TICKET)
-            target, candidate = text(data, 'target', ENDPOINT), text(data, 'candidate', ENDPOINT)
-            a_session, b_session = text(data, 'aSession', ENDPOINT), text(data, 'bSession', ENDPOINT)
-            if len({endpoint, target, candidate}) != 3: raise ApiError(400, '转发需要三个不同的设备。')
-            check_grant(data.get('grant'), endpoint, target)
-            check_approval(data.get('approval'), dict(route=route,a=endpoint,b=target,c=candidate,aSession=a_session,bSession=b_session), now)
-            node = db.execute('SELECT * FROM transit_nodes WHERE endpoint=? AND seen>=?', (candidate, now-20)).fetchone()
-            count = db.execute("SELECT count(*) FROM transit_routes WHERE c=? AND status IN ('pending','ready')", (candidate,)).fetchone()[0]
-            per_caller = db.execute("SELECT count(*) FROM transit_routes WHERE a=? AND status IN ('pending','ready')", (endpoint,)).fetchone()[0]
-            if node is None or count >= node['capacity'] or per_caller >= 6: raise ApiError(429, '候选中继容量已满或已离线。')
-            ticket = signed_transit(dict(route=route, a=endpoint, b=target, c=candidate, aSession=a_session, bSession=b_session, expires=now+90, mbps=min(node['mbps'],1000)))
-            try:
-                db.execute('INSERT INTO transit_routes VALUES(?,?,?,?,?,?,?,?,?,NULL)',
-                           (route, endpoint, target, candidate, now+90, now+90, now+90, 'pending', json.dumps(ticket)))
-            except sqlite3.IntegrityError: raise ApiError(409, '转发票据已使用。')
-            return {'ticket': ticket}
-        match = re.fullmatch(r'/api/v2/transit/routes/([0-9a-f]{32})(/ready|/renew|/close)?', path)
-        if match:
-            route, action = match.groups()
-            row = db.execute('SELECT * FROM transit_routes WHERE id=?', (route,)).fetchone()
-            if row is None or endpoint not in (row['a'],row['b'],row['c']): raise ApiError(404, '转发会话不存在。')
-            if action == '/close':
-                db.execute("UPDATE transit_routes SET status='closed' WHERE id=?", (route,))
-                return {'ok': True}
-            if row['status']=='closed': raise ApiError(410, '转发租约已结束。')
-            if action == '/ready':
-                if endpoint != row['c'] or row['status'] != 'pending': raise ApiError(403, '无权发布转发入口。')
-                if data.get('route') != route: raise ApiError(400, '转发编号不匹配。')
-                for name in ('aRelaySession', 'bRelaySession'): text(data, name, ENDPOINT)
-                for name in ('aToken', 'bToken'): text(data, name, TICKET)
-                db.execute("UPDATE transit_routes SET status='ready',offer=? WHERE id=?", (json.dumps(envelope), route))
-                return {'ok': True}
-            if action == '/renew':
-                if endpoint == row['a']: column='lease_a'
-                elif endpoint == row['b']: column='lease_b'
-                else: raise ApiError(403, '中继不能代替双方续期。')
-                db.execute(f'UPDATE transit_routes SET {column}=? WHERE id=?', (now+90,route))
-                return {'ok': True}
-            return {'status': row['status'], 'ticket': json.loads(row['ticket']), 'offer': json.loads(row['offer']) if row['offer'] else None}
-    raise ApiError(404, '中继接口不存在。')
-
 def application(environ,start_response):
     status=200
     try:
         path=environ.get('PATH_INFO','')
         if path=='/api/health' and environ['REQUEST_METHOD']=='GET': result={'service':'arduiserver','version':VERSION,'minClient':'v%d.pre%d' % MIN_CLIENT,'ok':True}
+        elif path=='/api/v1/network' and environ['REQUEST_METHOD']=='GET':
+            result=network()   # public facts about this network, for ArdUi clients and ArdFerry nodes alike
+        elif path in ('/api/v1/ferries','/api/ferries') and environ['REQUEST_METHOD']=='GET':
+            import hmac, urllib.parse
+            token=urllib.parse.parse_qs(environ.get('QUERY_STRING','')).get('token',[''])[0]
+            admin=bool(ADMIN_TOKEN) and hmac.compare_digest(token.encode(),ADMIN_TOKEN.encode())
+            limit('ferries:'+(environ.get('HTTP_X_REAL_IP') or environ.get('REMOTE_ADDR','unknown')),60,60)
+            view=ferry_view(admin)
+            if path=='/api/ferries':
+                body=ferry_page(view).encode()
+                start_response('200 OK',[('Content-Type','text/html; charset=utf-8'),('Content-Length',str(len(body))),('Cache-Control','no-store'),('X-Content-Type-Options','nosniff')])
+                return [body]
+            result=view
         elif environ['REQUEST_METHOD']!='POST': raise ApiError(405,'此接口仅接受 POST。')
         else:
             try: length=int(environ.get('CONTENT_LENGTH') or 0)

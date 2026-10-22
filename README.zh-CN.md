@@ -2,11 +2,25 @@
 
 [English](README.md) · **简体中文**
 
+> ## 角色与职责（请先读这里）
+>
+> **只有三种角色：M、ArdFerry、ArdUi。每个角色只有一项配置：一个 HTTPS 域名。** ArdUi 用的就是现有 `config.json` 里的 `server`，客户端配置不做任何改动。密钥由程序自己生成和保存，不算配置。
+>
+> | 角色 | 唯一的配置 | 职责 |
+> | --- | --- | --- |
+> | **M** | **自己的** HTTPS 域名 | 一个网络的中心：设备登记与 6 位机器编号、在线状态、在设备之间转交签名的连接请求、维护 ArdFerry 节点列表（探测每个入口，把可用的下发给客户端）、地址发现和网络诊断探测。看不到会话内容，也拿不到密码。 |
+> | **ArdFerry** | **M 的** HTTPS 域名 | 两台设备无法直连时转发加密流量。运行未修改的官方 `iroh-relay`；有公网 IP，或路由器支持 UPnP / NAT-PMP 端口映射即可运行。**按不可信设计：任何人都可以运行并加入一个网络。** 它读不到也改不了任何内容；它能看到经过它的 IP 地址、时间和流量大小，也可能拖慢流量，所以客户端优先直连，并按实测质量挑选中继。 |
+> | **ArdUi**（客户端） | **M 的** HTTPS 域名（`config.json` 里的 `server`） | 持有设备密钥（即设备身份）。点对点连接，不通时经 ArdFerry；端到端认证对方设备。谁能做什么由被控端在本机决定，审计录屏也只存在被控端本机。 |
+>
+> **一个网络 = 一个 M = 一个域名。** 自托管就是运行你自己的网络：Bob 的域名和 Li 的域名是两个独立的网络，彼此不知道对方，也不互通。官方网络也只是这样一个普通网络。所有人运行同一套程序，区别只在域名。
+>
+> 完整定义、密钥，以及这个设计与当前代码之间还有哪些差距，见 [ROLES.md](ROLES.md)。
+
 用 6 位编号，安全地远程访问 Windows 电脑。端到端加密，没有 IP、端口、虚拟网卡要配置；被控端逐设备授权；内置对话、文件传输和被控端审计录屏。
 
 **[网页介绍与演示](https://katey07.github.io/ArdUi/)** · **[下载](https://github.com/KateY07/ArdUi/releases)** · [自托管](#自托管) · [历史设计文档](docs/DESIGN-v2.md)
 
-当前版本：v5.4。v5 起，服务端拒绝所有 v5.pre1 以下的旧客户端。
+当前版本：v5.4（v5.5 准备中）。官方服务器现已拒绝 v5.5 以下的客户端：v5.5 用设备密钥签名每个会话，并从 M 获取中继信息。
 
 ## 简介
 
@@ -15,8 +29,8 @@ ArdUi 基于 [ARD](https://github.com/KateY07/ard2)（Iroh）建立点对点的�
 | 功能 | 说明 |
 | --- | --- |
 | 6 位编号连接 | 输入对方的编号和一次性密码，核对完整设备指纹后，由被控端同意授权。之后凭设备身份重连，不用再输密码。 |
-| 逐设备授权 | 被控端为每台控制设备单独开放 FRD、RDP、文件，默认只开 FRD；支持“仅接受这一次”；可随时撤销或断开。 |
-| 远程桌面 | 通过 [FRD](https://github.com/KateY07/frd) 查看和控制已登录的桌面，也可打开 RDP 或 SMB 文件共享。 |
+| 逐设备授权 | 被控端为每台控制设备单独开放 FRD、RDP、对话、文件、通话；支持“仅接受这一次”；可随时撤销或断开。 |
+| 远程桌面 | 通过 [FRD](https://github.com/KateY07/frd) 查看和控制已登录的桌面，也可使用 RDP。 |
 | 对话与文件传输 | 文字、图片、文件（最大 2 GB），显示速度与进度，可取消，传输时仍可聊天。 |
 | 审计录屏 | 对方使用屏幕时，在被控端本地录制（10 帧/秒，保存为分片 MP4），最多占用 10 GB，循环覆盖。使用 Windows 自带的 H.264 编码器，不依赖 FFmpeg。录屏默认开启、不可关闭，被控端首页会显示“录屏中”。 |
 | 中英文界面 | 界面支持中文和英文：自动（跟随 Windows 显示语言），或在 设置 → 通用 → 语言 中选择，重启后生效。你和对方输入的内容（对话、设备名）不会被翻译。 |
@@ -44,13 +58,28 @@ curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | su
 ```
 
 - 需要：Linux（systemd）、root 权限、已指向本机的域名、开放 80/443 端口。
+- **没有域名？** 直接填服务器的公网 IP：`--domain 203.0.113.7`。Let's Encrypt 会签发约 6 天有效的 IP 证书，Caddy 自动续期，客户端用 `https://203.0.113.7/`。
 - 加 `--dry-run` 先预览；加 `--http-only` 只运行目录服务（你自己提供 HTTPS 反向代理）；`--uninstall` 卸载（数据保留在 `/var/lib/arduiserver`）。
 - 脚本同时安装 **UDP 网络探测服务**（默认 UDP 7843 和 7844；`--probe-port N` 改端口，`--no-probe` 不装）。请在防火墙和云安全组里放行这两个 UDP 端口，ArdUi 的网络诊断才能使用你的服务器。
-- 其他选项：`--name 名称`（服务名、用户和目录，可与另一个实例并存）、`--port N`、`--pip-index URL`、`--caddy-binary 路径`。
-- **中国大陆的服务器**通常连不上 GitHub 和 caddyserver.com：请在别处下载 [`selfhost.sh`](selfhost.sh) 和 [`server/arduiserver.py`](server/arduiserver.py) 再拷过去，运行 `sudo bash selfhost.sh --domain … --file arduiserver.py`（没装 Caddy 时加 `--caddy-binary Caddy路径`；`--pip-index` 指定 PyPI 镜像）。
+- 其他选项：`--name 名称`（服务名、用户和目录，可与另一个实例并存）、`--port N`、`--pip-index URL`、`--caddy-binary 路径`、`--wheels 目录`。全部选项见 `bash selfhost.sh --help`。
+- **中国大陆的服务器**通常连不上 GitHub 和 caddyserver.com：请在别处下载 [`selfhost.sh`](selfhost.sh)、[`server/arduiserver.py`](server/arduiserver.py) 和 [`server/probe_udp.py`](server/probe_udp.py) 再拷过去，运行 `sudo bash selfhost.sh --domain … --file arduiserver.py`（没装 Caddy 时加 `--caddy-binary Caddy路径`；`--pip-index` 指定 PyPI 镜像）。
+- **完全离线：** 在一台能联网、Python 版本相同的机器上运行 `pip download pip gunicorn cryptography maxminddb -d wheels`，把这个目录一起拷过去，加 `--wheels wheels`。
 - 部署完成后，在每台客户端的 `%LOCALAPPDATA%\ArdUi\data\config.json` 里设置 `"server": "https://你的域名/"`，重启 ArdUi。验证：浏览器打开 `https://你的域名/api/health`。
 
-范围说明：脚本只部署设备目录服务。流量中继和中继目录（M）默认仍使用公共节点；自建它们请见 [ard2 的中继节点部署文档](https://github.com/KateY07/ard2/tree/main/native_relay)，这部分目前需要手动完成。已验证：不带 HTTPS 的完整流程（`--http-only`）在 smolvm 虚拟机和一台真实的 systemd 服务器（OpenCloudOS 9）上跑通，80/443 被占用时会拒绝继续。Caddy/HTTPS 这一步还没有在带公网域名的全新服务器上跑过。
+**整个 M 一次装好**：加 `--m-bundle 目录`，脚本会同时装好：
+- ArdFerry 目录；
+- 信令与地址发现；
+- M 自己的密钥（只生成一次，保存在 `/var/lib/arduiserver-m`）；
+- `/etc/ardui/network.json`，告诉客户端和 ArdFerry 上述服务在哪里。
+
+说明：
+- `目录` 里放 `ard-relay`、`ard-relay-admission`（Linux 版），以及 [native_relay](https://github.com/KateY07/ard2/tree/main/native_relay) 的 `master.py`、`ferry_identity.py`。
+- 防火墙需另外放行 TCP 8080，以及 TCP 和 UDP 7842。
+- 面向公网的进程拿不到 M 的密钥；只有 `arduiserver-control` 和 HTTPS 前端持有（见 [ROLES.md](ROLES.md)）。
+- ArdFerry 节点用 `install-linux.sh --m 你的域名` 加入。
+- 不加 `--m-bundle` 时，客户端能登记，但连不上。
+
+已验证：整个脚本（含 Caddy）在断网的 systemd 容器（OpenCloudOS 9）里跑通，包括各服务以独立用户运行在加固沙箱中、HTTPS、HTTP 跳转、签名 API 调用、重复运行、IP 地址、卸载；在一台公网服务器上真实签发了 Let's Encrypt IP 证书，ArdUi 客户端对它完成了完整的端到端测试。尚未验证：在全新服务器上为域名签发真实证书。
 
 ## 从源码构建
 

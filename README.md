@@ -2,11 +2,25 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
+> ## Roles — read this first
+>
+> **There are exactly three roles: M, ArdFerry and ArdUi. Each is configured with one thing only: an HTTPS domain.** For ArdUi this is the existing `server` setting in `config.json`; nothing about the client's configuration changes. Keys are generated and kept by the programs themselves; they are not configuration.
+>
+> | Role | Its one setting | Responsibility |
+> | --- | --- | --- |
+> | **M** | **its own** HTTPS domain | The centre of one network. Registers devices and hands out their 6-character IDs, presence, passes signed connection requests between devices, keeps the list of ArdFerry nodes (probes each entrance, gives clients the working ones), address discovery and the network probe. Sees neither session content nor passwords. |
+> | **ArdFerry** | **M's** HTTPS domain | Forwards encrypted traffic when two devices cannot connect directly. Runs the unmodified official `iroh-relay`; works with a public IP, or behind a router with UPnP / NAT-PMP port mapping. **Untrusted by design: anyone may run one and join a network.** It cannot read or alter anything; it can see IP addresses, timing and traffic volume of what passes through it, and it could slow traffic down, so clients prefer direct paths and pick relays by measured quality. |
+> | **ArdUi** (client) | **M's** HTTPS domain (`server` in `config.json`) | Holds the device key (the device's identity). Connects peer-to-peer, falling back to an ArdFerry; authenticates the other device end to end. The controlled machine decides who may do what, and keeps its audit recording locally. |
+>
+> **One network = one M = one domain.** Self-hosting means running your own network: Bob's domain and Li's domain are two separate networks that know nothing of each other and do not interoperate. The official network is just one such network. Everyone runs the same programs; only the domain differs.
+>
+> Full definitions, keys and the remaining gaps between this design and the current code: [ROLES.md](ROLES.md).
+
 High-performance remote access for Windows. Peer-to-peer and end-to-end encrypted, connect by a short device ID with no IP addresses, ports or virtual adapters to set up, and the directory server can be self-hosted with one command.
 
 **[Website](https://katey07.github.io/ArdUi/)** · **[Download](https://github.com/KateY07/ArdUi/releases)** · [Self-hosting](#self-hosting) · [Historical design notes (Chinese)](docs/DESIGN-v2.md)
 
-Current version: v5.4. From v5 the server refuses clients older than v5.pre1.
+Current version: v5.4 (v5.5 in preparation). The official server now refuses clients older than v5.5: v5.5 signs every session with the device keys and learns its relays from M.
 
 ## Why ArdUi
 
@@ -22,8 +36,8 @@ Built on [ARD](https://github.com/KateY07/ard2) (Iroh).
 | Feature | Description |
 | --- | --- |
 | Device ID connect | Enter the 6-character ID and a one-time password, compare the full device fingerprint, and the host approves. Later connections use the device identity and need no password. |
-| Per-device permissions | The host allows FRD, RDP and file access separately for each controlling device (FRD only by default), can accept a connection **just once**, and can revoke or disconnect at any time. |
-| Remote desktop | View and control the signed-in desktop with FRD, or use RDP or an SMB file share. |
+| Per-device permissions | The host allows FRD, RDP, chat, files and calls separately for each controlling device, can accept a connection **just once**, and can revoke or disconnect at any time. |
+| Remote desktop | View and control the signed-in desktop with FRD, or use RDP. |
 | Chat and file transfer | Text, images and files up to 2 GB, with speed and progress, cancellable; chat keeps working during a transfer. |
 | Audit recording | While a device uses the screen it is recorded locally on the host (10 fps, fragmented MP4, up to 10 GB, oldest overwritten) with the H.264 encoder built into Windows. Always on and cannot be switched off; the host shows "recording". |
 | English and Chinese | The interface speaks English or Chinese: automatic (follows the Windows display language) or chosen in Settings → General → Language; it takes effect after a restart. What you and the other side type (chat, device names) is never translated. |
@@ -51,13 +65,28 @@ curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | su
 ```
 
 - Needs Linux with systemd, root, a domain already pointing at the machine, and ports 80/443 open. The script is [selfhost.sh](selfhost.sh); read it before running.
+- **No domain?** Give the server's public IP address: `--domain 203.0.113.7`. Let's Encrypt then issues a short-lived (about 6 days) IP certificate, which Caddy renews on its own, and clients use `https://203.0.113.7/`.
 - `--dry-run` previews without changing anything; `--http-only` runs only the directory service so you can put your own HTTPS reverse proxy in front; `--uninstall` removes the services and keeps the data in `/var/lib/arduiserver`.
 - The script also installs the **UDP network probe** (ports 7843 and 7844 by default; `--probe-port N`, or `--no-probe`). Open both UDP ports in the firewall / cloud security group so that ArdUi's network diagnosis can use your server.
-- Other options: `--name NAME` (service name, user and directories, to run beside another instance), `--port N`, `--pip-index URL`, `--caddy-binary PATH`.
-- **Servers in mainland China** usually cannot reach GitHub or caddyserver.com. Download [`selfhost.sh`](selfhost.sh) and [`server/arduiserver.py`](server/arduiserver.py) elsewhere, copy them over, and run `sudo bash selfhost.sh --domain … --file arduiserver.py` (add `--caddy-binary /path/to/caddy` if Caddy is not installed; `--pip-index` selects a PyPI mirror).
+- Other options: `--name NAME` (service name, user and directories, to run beside another instance), `--port N`, `--pip-index URL`, `--caddy-binary PATH`, `--wheels DIR`. Run `bash selfhost.sh --help` for all of them.
+- **Servers in mainland China** usually cannot reach GitHub or caddyserver.com. Download [`selfhost.sh`](selfhost.sh), [`server/arduiserver.py`](server/arduiserver.py) and [`server/probe_udp.py`](server/probe_udp.py) elsewhere, copy them over, and run `sudo bash selfhost.sh --domain … --file arduiserver.py` (add `--caddy-binary /path/to/caddy` if Caddy is not installed; `--pip-index` selects a PyPI mirror).
+- **Fully offline:** on a connected machine with the same Python version run `pip download pip gunicorn cryptography maxminddb -d wheels`, copy the folder too, and add `--wheels wheels`.
 - Then, on every client, set `"server": "https://your-domain/"` in `%LOCALAPPDATA%\ArdUi\data\config.json` and restart ArdUi. Check the server at `https://your-domain/api/health`.
 
-Scope: the script deploys the directory service only. Relay nodes and the relay directory (M) still default to the public ones; to run your own see the [relay node guide](https://github.com/KateY07/ard2/tree/main/native_relay), which is a manual process for now. Verified so far: the full run without HTTPS (`--http-only`) in a smolvm VM and on a real systemd server (OpenCloudOS 9), and the refusal to run when ports 80/443 are taken. The Caddy/HTTPS step has not been exercised on a fresh server with a public domain.
+**The whole M**, as one installation: add `--m-bundle DIR`. The script then also installs:
+- the ArdFerry directory;
+- signaling and address discovery;
+- M's own key (made once, kept in `/var/lib/arduiserver-m`);
+- `/etc/ardui/network.json`, which tells clients and ArdFerry nodes where all of this is.
+
+Details:
+- `DIR` holds `ard-relay` and `ard-relay-admission` (Linux builds) and `master.py` and `ferry_identity.py` from [native_relay](https://github.com/KateY07/ard2/tree/main/native_relay).
+- Open TCP 8080 and TCP+UDP 7842 as well.
+- The processes facing the public never hold M's key; only `arduiserver-control` and the HTTPS front do (see [ROLES.md](ROLES.md)).
+- ArdFerry nodes join with `install-linux.sh --m your-domain`.
+- Without `--m-bundle`, clients can register but cannot connect.
+
+Verified: the whole script, Caddy included, in an offline systemd container (OpenCloudOS 9): services under their own users in a hardened sandbox, HTTPS, the HTTP redirect, signed API calls, running it twice, an IP address, uninstall. A real Let's Encrypt IP certificate was issued for a public server and ArdUi clients completed a full end-to-end run against it. Not yet tried: a real certificate for a domain name on a fresh server.
 
 ## Building from source
 

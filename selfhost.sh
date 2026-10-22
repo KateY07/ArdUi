@@ -4,24 +4,38 @@
 #   curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | sudo bash -s -- --domain ardui.example.com
 #
 # Options:
-#   --domain NAME     public DNS name that already points at this machine (ports 80 and 443 must be reachable)
+#   --domain NAME     public DNS name that already points at this machine (ports 80 and 443 must be reachable);
+#                     a public IP address works too: Let's Encrypt then issues a short-lived (about 6 days) IP certificate that Caddy renews
 #   --http-only       only run the directory on 127.0.0.1:PORT; you bring your own HTTPS reverse proxy
 #   --port N          local port of the directory (default 8091)
 #   --ref NAME        git branch or tag of KateY07/ArdUi to take arduiserver.py from (default main)
 #   --file PATH       use this arduiserver.py instead of downloading it (servers that cannot reach GitHub)
 #   --base-url URL    download arduiserver.py from URL/server/arduiserver.py instead of raw.githubusercontent.com
 #   --pip-index URL   Python package index for gunicorn and cryptography (default: pip's own setting)
+#   --wheels DIR      install the Python packages from wheel files in DIR, without any network (offline installs;
+#                     fill DIR on a connected machine with: pip download pip gunicorn cryptography maxminddb -d DIR)
 #   --caddy-binary P  use this Caddy binary instead of downloading one from caddyserver.com
 #   --tls-internal    sign the certificate with Caddy's own local CA instead of Let's Encrypt (tests, private networks; clients will not trust it)
 #   --no-probe        do not install the UDP network probe (the part of ArdUi's network diagnosis that needs the server)
 #   --probe-port N    first UDP port of the probe (it uses N and N+1, default 7843); open both in your firewall / cloud security group
 #   --probe-host H    the host name clients use for the probe (default: the --domain)
+#   --m-bundle DIR    also install M's ArdFerry directory and its signaling / address discovery, from DIR: ard-relay and
+#                     ard-relay-admission (Linux builds for this machine), master.py and ferry_identity.py. Without it only the
+#                     device directory is installed and clients can register but not connect (see ROLES.md)
+#   --m-identity FILE use this M identity (PKCS#8 DER private key) instead of making a new one, when moving an existing M
+#   --m-host H        host name or address that clients and ArdFerry nodes use for the parts above (default: the --domain)
+#   --directory-port N  public TCP port of the ArdFerry directory (default 8080)
+#   --control-port N  public TCP and UDP port of signaling and address discovery (default 7842)
+#   --front-group G   group of the HTTPS front that serves the directory with M's key (default ardui-caddy; with --http-only,
+#                     the group your own proxy runs as)
 #   --name NAME       service name, user and directories (default arduiserver); lets a second instance run beside another one
 #   --dry-run         print what would be done and change nothing
 #   --uninstall       remove the services (data in /var/lib/arduiserver is kept)
 set -euo pipefail
 
-DOMAIN=; PORT=8091; REF=main; SRC_FILE=; BASE_URL=; PIP_INDEX=; CADDY_BIN=; NAME=arduiserver; PROBE=true; PROBE_PORT=7843; PROBE_HOST=; TLS_INTERNAL=false; HTTP_ONLY=false; DRY=false; UNINSTALL=false
+DOMAIN=; PORT=8091; REF=main; SRC_FILE=; BASE_URL=; PIP_INDEX=; WHEELS=; CADDY_BIN=; NAME=arduiserver; PROBE=true; PROBE_PORT=7843; PROBE_HOST=; TLS_INTERNAL=false; HTTP_ONLY=false; DRY=false; UNINSTALL=false
+M_BUNDLE=; M_IDENTITY=; M_HOST=; DIRECTORY_PORT=8080; CONTROL_PORT=7842; FRONT_GROUP=ardui-caddy
+
 CONF=/etc/ardui; CADDY_DATA=/var/lib/ardui-caddy
 
 say()  { printf '\033[1m==> %s\033[0m\n' "$*"; }
@@ -40,7 +54,14 @@ while [ $# -gt 0 ]; do
     --file) SRC_FILE=${2:?}; shift 2;;
     --base-url) BASE_URL=${2:?}; shift 2;;
     --pip-index) PIP_INDEX=${2:?}; shift 2;;
+    --wheels) WHEELS=${2:?}; shift 2;;
     --caddy-binary) CADDY_BIN=${2:?}; shift 2;;
+    --m-bundle) M_BUNDLE=${2:?}; shift 2;;
+    --m-identity) M_IDENTITY=${2:?}; shift 2;;
+    --m-host) M_HOST=${2:?}; shift 2;;
+    --directory-port) DIRECTORY_PORT=${2:?}; shift 2;;
+    --control-port) CONTROL_PORT=${2:?}; shift 2;;
+    --front-group) FRONT_GROUP=${2:?}; shift 2;;
     --name) NAME=${2:?}; shift 2;;
     --tls-internal) TLS_INTERNAL=true; shift;;
     --no-probe) PROBE=false; shift;;
@@ -48,7 +69,7 @@ while [ $# -gt 0 ]; do
     --probe-host) PROBE_HOST=${2:?}; shift 2;;
     --dry-run) DRY=true; shift;;
     --uninstall) UNINSTALL=true; shift;;
-    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) awk 'NR>1 && !/^#/{exit} NR>1' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) die "unknown option: $1";;
   esac
 done
@@ -62,19 +83,31 @@ command -v systemctl >/dev/null || die "systemd is required"
 
 if $UNINSTALL; then
   say "removing services"
-  for unit in "$NAME" "$NAME-probe" ardui-caddy; do
+  for unit in "$NAME" "$NAME-probe" "$NAME-relays" "$NAME-control" ardui-caddy; do
     run systemctl disable --now "$unit" 2>/dev/null || true
     run rm -f "/etc/systemd/system/$unit.service"
   done
   run systemctl daemon-reload
-  echo "Kept: $DATA (device database), $APP, $CONF. Delete them by hand if you really want to start over."
+  echo "Kept: $DATA (device database), /var/lib/$NAME-m (M identity), $APP, $CONF. Delete them by hand if you really want to start over."
   exit 0
 fi
 
 $HTTP_ONLY || [ -n "$DOMAIN" ] || die "give --domain NAME (or --http-only to run behind your own proxy)"
 case "$PORT" in ''|*[!0-9]*) die "--port must be a number";; esac
 case "$PROBE_PORT" in ''|*[!0-9]*) die "--probe-port must be a number";; esac
+case "$DIRECTORY_PORT$CONTROL_PORT" in *[!0-9]*) die "--directory-port and --control-port must be numbers";; esac
+# loopback only: the ArdFerry directory behind the HTTPS front, and the signaling's local HTTP
+RELAYS_PORT=$((PORT + 1)); CONTROL_LOCAL=$((PORT + 2))
 [ -n "$PROBE_HOST" ] || PROBE_HOST=$DOMAIN
+[ -n "$M_HOST" ] || M_HOST=$DOMAIN
+if [ -n "$M_BUNDLE" ]; then
+  for f in ard-relay ard-relay-admission master.py ferry_identity.py; do [ -f "$M_BUNDLE/$f" ] || die "--m-bundle: $M_BUNDLE/$f is missing"; done
+  [ -n "$M_HOST" ] || die "--m-bundle with --http-only needs --m-host (the name or address clients reach this machine at)"
+  [ -z "$M_IDENTITY" ] || [ -f "$M_IDENTITY" ] || die "--m-identity: no such file: $M_IDENTITY"
+fi
+# An IP address instead of a name: Let's Encrypt only issues IP certificates with its short-lived profile.
+IS_IP=false
+if printf '%s' "$DOMAIN" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$|^[0-9a-fA-F:]*:[0-9a-fA-F:.]*$'; then IS_IP=true; fi
 
 # ---- packages ---------------------------------------------------------------------------------------------------
 say "checking packages"
@@ -108,7 +141,37 @@ if $PROBE; then
   run install -m 644 "$ptmp" "$APP/probe_udp.py"; rm -f "$ptmp"
 fi
 [ -x "$APP/venv/bin/python" ] || run python3 -m venv "$APP/venv"
-run "$APP/venv/bin/pip" install --quiet --no-cache-dir ${PIP_INDEX:+--index-url "$PIP_INDEX"} --upgrade pip gunicorn cryptography
+if [ -n "$WHEELS" ]; then
+  [ -d "$WHEELS" ] || die "--wheels: no such directory: $WHEELS"
+  run "$APP/venv/bin/pip" install --quiet --no-cache-dir --no-index --find-links "$WHEELS" --upgrade pip gunicorn cryptography maxminddb
+else
+  run "$APP/venv/bin/pip" install --quiet --no-cache-dir ${PIP_INDEX:+--index-url "$PIP_INDEX"} --upgrade pip gunicorn cryptography maxminddb
+fi
+
+# The sandbox both Python services run in: no privileges, no devices, a read-only system, only IP and Unix sockets.
+# (No MemoryDenyWriteExecute: cryptography's cffi callbacks need writable-executable memory.)
+HARDEN='NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources'
 
 write_file "/etc/systemd/system/$NAME.service" 644 <<EOF
 [Unit]
@@ -121,13 +184,11 @@ WorkingDirectory=$APP
 Environment=ARDUI_DATABASE=$DATA/devices.sqlite3
 Environment=ARDUI_PROBE_PORT=$PROBE_PORT
 $($PROBE && [ -n "$PROBE_HOST" ] && echo "Environment=ARDUI_PROBE_HOST=$PROBE_HOST")
+$([ -n "$M_BUNDLE" ] && echo "Environment=ARDUI_M_STATUS=http://127.0.0.1:$RELAYS_PORT/status")
 ExecStart=$APP/venv/bin/gunicorn --bind 127.0.0.1:$PORT --workers 1 --threads 8 --timeout 30 arduiserver:application
 Restart=on-failure
 UMask=0077
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectHome=true
-ProtectSystem=strict
+$HARDEN
 ReadWritePaths=$DATA
 [Install]
 WantedBy=multi-user.target
@@ -147,10 +208,7 @@ Environment=ARDUI_PROBE_PORT=$PROBE_PORT
 ExecStart=$APP/venv/bin/python $APP/probe_udp.py
 Restart=on-failure
 UMask=0077
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectHome=true
-ProtectSystem=strict
+$HARDEN
 ReadWritePaths=$DATA
 MemoryMax=256M
 TasksMax=64
@@ -159,7 +217,137 @@ WantedBy=multi-user.target
 EOF
 fi
 
+# ---- M: the ArdFerry directory, signaling and address discovery ---------------------------------------------------
+# Two processes with different users (ROLES.md): $NAME-relays (master.py, user $NAME) faces the public behind the HTTPS front and
+# never sees M's key; $NAME-control (ard-relay, user $NAME-m) holds it. The front gets a PEM copy to serve the directory with it,
+# because ard and ArdFerry recognise the directory by that key.
+MKEY=/var/lib/$NAME-m; MCONF=$CONF/m; M_KEY=
+if [ -n "$M_BUNDLE" ]; then
+  say "installing M (ArdFerry directory, signaling, address discovery)"
+  id "$NAME-m" >/dev/null 2>&1 || run useradd --system --home-dir "$MKEY" --shell /usr/sbin/nologin "$NAME-m"
+  if [ "$FRONT_GROUP" = ardui-caddy ] && ! id ardui-caddy >/dev/null 2>&1; then
+    run useradd --system --home-dir "$CADDY_DATA" --shell /usr/sbin/nologin ardui-caddy
+  fi
+  getent group "$FRONT_GROUP" >/dev/null || $DRY || die "--front-group: no such group: $FRONT_GROUP"
+  run install -d -m 755 "$APP/m" "$APP/m/bin" "$CONF"
+  run install -d -m 700 -o "$NAME-m" -g "$NAME-m" "$MKEY"
+  run install -d -m 750 -o root -g "$FRONT_GROUP" "$MCONF"
+  run install -d -m 700 -o "$NAME" -g "$NAME" "$DATA/relays"
+  for f in master.py ferry_identity.py; do run install -m 644 "$M_BUNDLE/$f" "$APP/m/$f"; done
+  for f in ard-relay ard-relay-admission; do run install -m 755 "$M_BUNDLE/$f" "$APP/m/bin/$f"; done
+  if ! $DRY; then
+    # M's identity: made once (or taken over with --m-identity) and kept; the front's certificate is derived from it every run
+    M_KEY=$("$APP/venv/bin/python" -I - "$MKEY/identity" "$MCONF/m.pem" "$MCONF/m.key" "$M_IDENTITY" <<'PY'
+import os, sys
+from datetime import datetime, timedelta, timezone
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+identity, pem, key_file, imported = sys.argv[1:5]
+DER, PKCS8, NONE = serialization.Encoding.DER, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+def write(path, data, mode):
+    pending = path + '.new'
+    fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, 'wb') as out:
+        out.write(data); out.flush(); os.fsync(out.fileno())
+    os.replace(pending, path)
+current = open(identity, 'rb').read() if os.path.exists(identity) else None
+if imported:
+    der = open(imported, 'rb').read()
+    if current is not None and current != der:
+        write(identity + '.replaced', current, 0o600)
+        print('the previous M identity was kept as ' + identity + '.replaced', file=sys.stderr)
+    if current != der:
+        write(identity, der, 0o600)
+elif current is None:
+    write(identity, ec.generate_private_key(ec.SECP256R1()).private_bytes(DER, PKCS8, NONE), 0o600)
+key = serialization.load_der_private_key(open(identity, 'rb').read(), None)
+if not isinstance(key, ec.EllipticCurvePrivateKey) or key.curve.name != 'secp256r1':
+    sys.exit('the M identity must be a P-256 key')
+name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'ArdUi M')])
+now = datetime.now(timezone.utc)
+cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+        .serial_number(x509.random_serial_number()).not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=3650)).sign(key, hashes.SHA256()))
+write(pem, cert.public_bytes(serialization.Encoding.PEM), 0o640)
+write(key_file, key.private_bytes(serialization.Encoding.PEM, PKCS8, NONE), 0o640)
+print('spki:' + key.public_key().public_bytes(DER, serialization.PublicFormat.SubjectPublicKeyInfo).hex())
+PY
+) || die "could not prepare the M identity"
+    chown "$NAME-m:$NAME-m" "$MKEY/identity"; chown "root:$FRONT_GROUP" "$MCONF/m.pem" "$MCONF/m.key"
+    echo "M key: ${M_KEY:0:24}…${M_KEY: -16}"
+    # the directory's configuration; the operator's list of official nodes (shown as such on the panel) is kept across runs
+    "$APP/venv/bin/python" -I - "$APP/m/master.json" "$DATA/relays" "$APP/m/bin/ard-relay-admission" "$RELAYS_PORT" <<'PY'
+import hashlib, json, os, sys
+path, data, admission, port = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+try:
+    official = json.load(open(path)).get('official', [])
+except (OSError, ValueError):
+    official = []
+config = dict(http_listen=['127.0.0.1', port], events=data + '/events.ndjson', open_ca_dir=data + '/ardferry-ca',
+              admission_probe=admission, admission_probe_sha256=hashlib.sha256(open(admission, 'rb').read()).hexdigest(),
+              nodes={}, official=official)
+with open(path + '.new', 'w') as out:
+    json.dump(config, out, indent=1)
+os.replace(path + '.new', path)
+PY
+    chmod 644 "$APP/m/master.json"
+  fi
+
+  write_file "/etc/systemd/system/$NAME-relays.service" 644 <<EOF
+[Unit]
+Description=ArdUi M: ArdFerry directory ($NAME)
+After=network-online.target
+[Service]
+User=$NAME
+Group=$NAME
+WorkingDirectory=$APP/m
+ExecStart=$APP/venv/bin/python -u $APP/m/master.py --config $APP/m/master.json
+Restart=always
+RestartSec=3
+UMask=0077
+$HARDEN
+ReadWritePaths=$DATA/relays
+[Install]
+WantedBy=multi-user.target
+EOF
+  write_file "/etc/systemd/system/$NAME-control.service" 644 <<EOF
+[Unit]
+Description=ArdUi M: signaling and address discovery, TCP and UDP $CONTROL_PORT; holds M's key ($NAME)
+After=network-online.target
+[Service]
+User=$NAME-m
+Group=$NAME-m
+ExecStart=$APP/m/bin/ard-relay --control-only --listen 127.0.0.1:$CONTROL_LOCAL --qad-listen 0.0.0.0:$CONTROL_PORT --identity $MKEY/identity
+Restart=always
+RestartSec=3
+UMask=0077
+$HARDEN
+MemoryDenyWriteExecute=true
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+
 # ---- HTTPS (Caddy) ----------------------------------------------------------------------------------------------
+# What the HTTPS front serves on the directory port: only the directory and node registration, with M's own key.
+directory_site() {
+  cat <<EOF
+https://:$DIRECTORY_PORT {
+    tls $MCONF/m.pem $MCONF/m.key
+    @relays path /directory /register
+    handle @relays {
+        reverse_proxy 127.0.0.1:$RELAYS_PORT {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+    handle {
+        respond 404
+    }
+}
+EOF
+}
 if ! $HTTP_ONLY; then
   say "setting up HTTPS for $DOMAIN"
   if ss -ltn 2>/dev/null | grep -qE ':(80|443)\s' && ! systemctl is-active --quiet ardui-caddy; then
@@ -176,9 +364,12 @@ if ! $HTTP_ONLY; then
   id ardui-caddy >/dev/null 2>&1 || run useradd --system --home-dir "$CADDY_DATA" --shell /usr/sbin/nologin ardui-caddy
   run install -d -m 755 "$CONF"
   run install -d -m 700 -o ardui-caddy -g ardui-caddy "$CADDY_DATA"
+  # Clients reaching an IP address send no SNI (Windows / .NET never do), and without a default Caddy aborts the handshake.
   write_file "$CONF/Caddyfile" 644 <<EOF
+$($IS_IP && printf '{\n    default_sni %s\n}\n' "$DOMAIN")
 $DOMAIN {
 $($TLS_INTERNAL && echo "    tls internal")
+$(! $TLS_INTERNAL && $IS_IP && printf '    tls {\n        issuer acme {\n            profile shortlived\n        }\n    }')
     encode zstd gzip
     header X-Content-Type-Options nosniff
     handle /api/* {
@@ -190,6 +381,7 @@ $($TLS_INTERNAL && echo "    tls internal")
         respond "ArdUi directory" 200
     }
 }
+$([ -n "$M_BUNDLE" ] && directory_site)
 EOF
   write_file /etc/systemd/system/ardui-caddy.service 644 <<EOF
 [Unit]
@@ -207,7 +399,15 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOF
-  $DRY || "$(command -v caddy)" validate --config "$CONF/Caddyfile" --adapter caddyfile >/dev/null || die "Caddyfile did not validate"
+  if ! $DRY; then
+    "$(command -v caddy)" fmt --overwrite "$CONF/Caddyfile" 2>/dev/null || true
+    # Validating provisions the TLS setup (with --tls-internal: a whole CA). Do it in a throw-away place, not in root's home or the
+    # current directory; the service keeps its own data in $CADDY_DATA.
+    vtmp=$(mktemp -d)
+    env HOME="$vtmp" XDG_DATA_HOME="$vtmp" XDG_CONFIG_HOME="$vtmp" "$(command -v caddy)" validate --config "$CONF/Caddyfile" --adapter caddyfile >"$vtmp/out" 2>&1 \
+      || { tail -3 "$vtmp/out" >&2; rm -rf "$vtmp"; die "Caddyfile did not validate"; }
+    rm -rf "$vtmp"
+  fi
 fi
 
 # ---- start and check --------------------------------------------------------------------------------------------
@@ -216,6 +416,7 @@ run systemctl daemon-reload
 run systemctl enable "$NAME"
 run systemctl restart "$NAME"
 $PROBE && { run systemctl enable "$NAME-probe"; run systemctl restart "$NAME-probe"; }
+[ -n "$M_BUNDLE" ] && for unit in "$NAME-control" "$NAME-relays"; do run systemctl enable "$unit"; run systemctl restart "$unit"; done
 $HTTP_ONLY || { run systemctl enable ardui-caddy; run systemctl restart ardui-caddy; }
 $DRY && { echo "(dry run: nothing was changed)"; exit 0; }
 
@@ -229,13 +430,41 @@ fi
 url="http://127.0.0.1:$PORT/"
 if ! $HTTP_ONLY; then
   url="https://$DOMAIN/"
-  say "waiting for the certificate (needs DNS for $DOMAIN to point here and ports 80/443 open)"
+  $IS_IP && url="https://$( case "$DOMAIN" in *:*) echo "[$DOMAIN]";; *) echo "$DOMAIN";; esac )/"
+  say "waiting for the certificate (needs $($IS_IP && echo "$DOMAIN to be this machine's public address" || echo "DNS for $DOMAIN to point here") and ports 80/443 open)"
   ok=false
   k=; $TLS_INTERNAL && k=-k   # a certificate from Caddy's own CA is not trusted by curl
-  for _ in $(seq 1 45); do curl -fsS $k --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/health" >/dev/null 2>&1 && { ok=true; break; }; sleep 2; done
-  $ok && echo "public health: $(curl -fsS $k --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/health")" || { warn "https://$DOMAIN/api/health is not answering yet; see: journalctl -u ardui-caddy"; }
+  # a name is checked through this machine (DNS may still be on its way); an IP address is checked as clients will reach it
+  check() { if $IS_IP; then curl -fsS $k "${url}api/health"; else curl -fsS $k --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/health"; fi; }
+  for _ in $(seq 1 45); do check >/dev/null 2>&1 && { ok=true; break; }; sleep 2; done
+  $ok && echo "public health: $(check)" || { warn "${url}api/health is not answering yet; see: journalctl -u ardui-caddy"; }
 fi
 
+if [ -n "$M_BUNDLE" ]; then
+  sleep 1
+  curl -fsS "http://127.0.0.1:$RELAYS_PORT/directory" >/dev/null 2>&1 && echo "ArdFerry directory: running" \
+    || warn "the ArdFerry directory is not answering yet: journalctl -u $NAME-relays"
+  ss -lun 2>/dev/null | grep -qE ":$CONTROL_PORT\\s" && echo "signaling / address discovery: listening on TCP and UDP $CONTROL_PORT" \
+    || warn "signaling is not listening yet: journalctl -u $NAME-control"
+  # What this M tells its clients and ArdFerry nodes (GET /api/v1/network): written once, then left to the operator.
+  m_host=$M_HOST; case "$m_host" in *:*) m_host="[$m_host]";; esac
+  if [ ! -f "$CONF/network.json" ]; then
+    printf '{"relayDirectory": "https://%s:%s/directory", "master": "https://%s:%s/", "masterKey": "%s"}\n' \
+      "$m_host" "$DIRECTORY_PORT" "$m_host" "$CONTROL_PORT" "$M_KEY" > "$CONF/network.json"
+    chmod 644 "$CONF/network.json"
+    echo "wrote $CONF/network.json"
+  elif ! grep -q "\"$M_KEY\"" "$CONF/network.json"; then
+    warn "$CONF/network.json names another M key than this M's ($M_KEY); clients will refuse this M until it is corrected"
+  fi
+  if $HTTP_ONLY; then
+    echo
+    echo "--http-only: your HTTPS front must serve the ArdFerry directory with M's key. For Caddy (running as group $FRONT_GROUP):"
+    directory_site | sed 's/^/    /'
+  fi
+elif [ ! -f "$CONF/network.json" ]; then
+  warn "$CONF/network.json is missing: this M does not yet tell its clients where its ArdFerry directory is,"
+  warn "so clients can register but cannot connect. Run this again with --m-bundle DIR (see ROLES.md)."
+fi
 client_url=$url; proxy_note=
 if $HTTP_ONLY; then
   client_url="https://YOUR-DOMAIN/"
@@ -249,6 +478,8 @@ $proxy_note
 Point ArdUi at it (on every machine), in  %LOCALAPPDATA%\\ArdUi\\data\\config.json  set:
     "server": "$client_url"
 then restart ArdUi.
-$($PROBE && echo "Network diagnosis: open UDP $PROBE_PORT and $((PROBE_PORT + 1)) in the firewall / cloud security group so that ArdUi's probe can reach the server.") Back up $DATA/ (it holds the device database).
+$($PROBE && echo "Network diagnosis: open UDP $PROBE_PORT and $((PROBE_PORT + 1)) in the firewall / cloud security group so that ArdUi's probe can reach the server.")
+$([ -n "$M_BUNDLE" ] && echo "M: open TCP $DIRECTORY_PORT and TCP+UDP $CONTROL_PORT as well. ArdFerry nodes join with: install-linux.sh --m ${DOMAIN:-YOUR-DOMAIN}")
+Back up $DATA/ (device database) and $MKEY/identity (M's key: a new one makes every client and node re-learn this M).
 Logs:  journalctl -u $NAME -f
 EOF
