@@ -51,7 +51,9 @@ sealed class FerryMonitor
             return new
             {
                 node, probes = mine.Length, ok = mine.Count(p => p.Ok), rttMs = Median(mine.Where(p => p.Ok).Select(p => p.Ms)),
-                sessions = used.Length, sessionRttMs = Median(used.Select(s => s.UdpRtt ?? s.TcpRtt)), mbps = Median(used.Select(s => s.BandwidthMbps)),
+                // the overlay measures its selected path all the time (both ends); the session's own probes are the fallback
+                sessions = used.Length, sessionRttMs = Median(used.Select(s => s.Overlay?.Link(s.Overlay.Selected)?.RttMs ?? s.UdpRtt ?? s.TcpRtt)),
+                mbps = Median(used.Select(s => s.Overlay?.Link(s.Overlay.Selected)?.BandwidthMbps ?? s.BandwidthMbps)),
             };
         }).Where(r => r.probes > 0 || r.sessions > 0).Take(16).ToArray();
         if (rows.Length == 0) return;

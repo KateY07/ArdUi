@@ -9,6 +9,16 @@ static class ConnectFlowTests
         void Check(bool ok, string name) { if (!ok) { failures++; Console.Error.WriteLine("FAIL " + name); } else Console.WriteLine("ok   " + name); }
         ConnectFailure Kind(Exception ex) => ConnectFlow.Classify(ex).Kind;
 
+        // which ArdFerry a session runs over comes from the path ard selected, not from lines about this machine's own relays
+        string? Relay(string line) => Engine.RelayName.Match(line) is { Success: true } m ? (m.Groups[1].Success ? m.Groups[1].Value : "direct") : null;
+        const string ferry = "s-b82dae428052f7d8294dd36522766037c693df34.ard-relay.invalid";
+        Check(Relay($"INFO ard: network path selected tunnel=1 path=PathId(8) transport=\"relay\" network=\"relay\" remote=relay:https://{ferry}/ local=Relay") == ferry,
+            "the selected relay path names the ArdFerry");
+        Check(Relay("INFO ard: network path selected tunnel=1 path=PathId(2) transport=\"udp\" network=\"ipv6\" remote=[2001:db8::5]:4433 local=x") == "direct",
+            "a selected direct path clears the ArdFerry");
+        Check(Relay($"INFO ard::relay_directory: candidate local registration verified relay=https://{ferry}/ revision=1") == null,
+            "this machine's own relay registration is not the session's path");
+
         Check(Kind(new IOException(ConnectFlow.RejectedText)) == ConnectFailure.NoPermission, "rejected → NoPermission");
         Check(ConnectFlow.Classify(new IOException(ConnectFlow.RejectedText)).AskPassword, "NoPermission asks for the password again");
         Check(Kind(new IOException("对端未接受连接，请检查允许访问开关。")) == ConnectFailure.NoPermission, "ticket rejected → NoPermission");

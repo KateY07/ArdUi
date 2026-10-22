@@ -235,10 +235,15 @@ sealed class Session : IAsyncDisposable
                     var nonce = RandomNumberGenerator.GetBytes(12);
                     watch.Restart();
                     await udp.SendAsync(Wire.Packet(Capability, 0, nonce), stop.Token);
-                    var reply = await udp.ReceiveAsync(stop.Token).AsTask().WaitAsync(TimeSpan.FromSeconds(4), stop.Token);
-                    watch.Stop();
-                    UdpRtt = Wire.ValidPacket(reply.Buffer, Capability) && reply.Buffer.AsSpan(18).SequenceEqual(nonce)
-                        ? watch.Elapsed.TotalMilliseconds : null;
+                    // one lost datagram on a lossy path only loses this UDP sample; the TCP round trip and bandwidth stay
+                    try
+                    {
+                        var reply = await udp.ReceiveAsync(stop.Token).AsTask().WaitAsync(TimeSpan.FromSeconds(4), stop.Token);
+                        watch.Stop();
+                        UdpRtt = Wire.ValidPacket(reply.Buffer, Capability) && reply.Buffer.AsSpan(18).SequenceEqual(nonce)
+                            ? watch.Elapsed.TotalMilliseconds : null;
+                    }
+                    catch (TimeoutException) { UdpRtt = null; }
                     if(round++%12==0)
                     {
                         try{BandwidthMbps=await MeasureBandwidth(stop.Token);}

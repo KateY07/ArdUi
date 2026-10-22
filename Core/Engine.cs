@@ -38,7 +38,9 @@ sealed class Engine : IAsyncDisposable
         try { return new Engine(state,settings,await Ard.Identity(state.IdentityDirectory,CancellationToken.None)); }
         catch { state.Dispose(); throw; }
     }
-    static readonly Regex RelayName = new(@"relay=https://(s-[0-9a-f]{40}\.ard-relay\.invalid)/", RegexOptions.Compiled);
+    // The ArdFerry a session's traffic runs over right now: ard's "network path selected … remote=relay:https://s-….ard-relay.invalid/"
+    // (a direct path names an address instead). Other lines mentioning relays are about this machine's own relay registrations.
+    internal static readonly Regex RelayName = new(@"network path selected .*?\bremote=(?:relay:https://(s-[0-9a-f]{40}\.ard-relay\.invalid)/|\S)", RegexOptions.Compiled);
     // A status that did not change must not wake the UI: ard prints thousands of lines per second at trace level.
     void Update(string id,string message) { if(Status.TryGetValue(id,out var old)&&old==message)return; Status[id]=message; Changed?.Invoke(); }
     public void SetStatus(string id,string message)=>Update(id,message);
@@ -72,7 +74,7 @@ sealed class Engine : IAsyncDisposable
         session.Process.Output += line =>
         {
             FileLog.Write("ard " + session.PeerId[..8], line);
-            if (RelayName.Match(line) is { Success: true } relay) session.RelayName = relay.Groups[1].Value;
+            if (RelayName.Match(line) is { Success: true } relay) session.RelayName = relay.Groups[1].Success ? relay.Groups[1].Value : null;
             if (line.Contains(" WARN ", StringComparison.Ordinal) || line.Contains(" ERROR ", StringComparison.Ordinal)) Events.AddFromArd(line);
             if (line.Contains("CONNECTED", StringComparison.Ordinal) || line.Contains("network path selected", StringComparison.Ordinal) || line.Contains("READY:", StringComparison.Ordinal))
             {
