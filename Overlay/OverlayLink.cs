@@ -50,8 +50,21 @@ sealed class OverlayLink : IAsyncDisposable
     public Action? HealthChanged;
     public volatile bool Responsive=true;
     public volatile bool HealthReady=true;
-    public void ObserveResponse(bool responsive)
-    {if(Responsive==responsive)return;Responsive=responsive;HealthChanged?.Invoke();}
+    // A probe answers for the moment it was sent. Probes overlap (one waits up to 2 s), so a late answer from an older probe must
+    // not undo what a newer one found: one sent during a blackout times out after the path is back, or answers after it failed.
+    readonly object responseGate=new();long responseSentAt=long.MinValue;
+    public void ObserveResponse(bool responsive,long? sentAt=null)
+    {
+        lock(responseGate)
+        {
+            var at=sentAt??Environment.TickCount64;
+            if(at<responseSentAt)return;
+            responseSentAt=at;
+            if(Responsive==responsive)return;
+            Responsive=responsive;
+        }
+        HealthChanged?.Invoke();
+    }
     public OverlayLink(string name,TcpClient tcp,Func<byte[],CancellationToken,Task> sendUdp,Func<string> network,Stream? output=null)
     {Name=name;this.tcp=tcp;this.output=output??tcp.GetStream();tcp.NoDelay=true;this.sendUdp=sendUdp;this.network=network;}
     public async Task Send(byte[] data,bool udp,CancellationToken ct)

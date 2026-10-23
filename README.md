@@ -73,18 +73,18 @@ curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | su
 - **Fully offline:** on a connected machine with the same Python version run `pip download pip gunicorn cryptography maxminddb -d wheels`, copy the folder too, and add `--wheels wheels`.
 - Then, on every client, set `"server": "https://your-domain/"` in `%LOCALAPPDATA%\ArdUi\data\config.json` and restart ArdUi. Check the server at `https://your-domain/api/health`.
 
-**The whole M**, as one installation: add `--m-bundle DIR`. The script then also installs:
+**The whole M** is installed in one run. Besides the device directory, the script installs:
 - the ArdFerry directory;
 - signaling and address discovery;
 - M's own key (made once, kept in `/var/lib/arduiserver-m`);
 - `/etc/ardui/network.json`, which tells clients and ArdFerry nodes where all of this is.
 
 Details:
-- `DIR` holds `ard-relay` and `ard-relay-admission` (Linux builds) and `master.py` and `ferry_identity.py` from [native_relay](https://github.com/KateY07/ard2/tree/main/native_relay).
+- These parts come from the **M package** attached to the release, `ardui-m-linux-x86_64.tar.gz`: static builds of `ard-relay` and `ard-relay-admission` (any x86_64 Linux) with `master.py` and `ferry_identity.py`. The script downloads it and accepts it only if its SHA-256 is the one pinned in the script. Servers that cannot reach GitHub: download it elsewhere and add `--m-package FILE`.
 - Open TCP 8080 and TCP+UDP 7842 as well.
 - The processes facing the public never hold M's key; only `arduiserver-control` and the HTTPS front do (see [ROLES.md](ROLES.md)).
 - ArdFerry nodes join your network in one step, with the installer your M hands out: `curl -fsSL https://your-domain/ardferry.sh | sudo bash` on Linux, `& ([scriptblock]::Create((irm https://your-domain/ardferry.ps1)))` on Windows. Anyone can add capacity to the official network the same way with `f.visnova.cn`.
-- Without `--m-bundle`, clients can register but cannot connect.
+- `--no-m` installs only the device directory (clients can then register but not connect).
 
 Verified: the whole script, Caddy included, in an offline systemd container (OpenCloudOS 9): services under their own users in a hardened sandbox, HTTPS, the HTTP redirect, signed API calls, running it twice, an IP address, uninstall. A real Let's Encrypt IP certificate was issued for a public server and ArdUi clients completed a full end-to-end run against it. Not yet tried: a real certificate for a domain name on a fresh server.
 

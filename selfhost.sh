@@ -19,9 +19,11 @@
 #   --no-probe        do not install the UDP network probe (the part of ArdUi's network diagnosis that needs the server)
 #   --probe-port N    first UDP port of the probe (it uses N and N+1, default 7843); open both in your firewall / cloud security group
 #   --probe-host H    the host name clients use for the probe (default: the --domain)
-#   --m-bundle DIR    also install M's ArdFerry directory and its signaling / address discovery, from DIR: ard-relay and
-#                     ard-relay-admission (Linux builds for this machine), master.py and ferry_identity.py. Without it only the
-#                     device directory is installed and clients can register but not connect (see ROLES.md)
+#   The whole M is installed: besides the device directory, M's ArdFerry directory and its signaling / address discovery,
+#   from the M package of the ArdUi release (ardui-m-linux-x86_64.tar.gz, checked against the SHA-256 pinned below).
+#   --m-package FILE  use this already downloaded M package (servers that cannot reach GitHub)
+#   --m-bundle DIR    use the M parts from DIR instead: ard-relay, ard-relay-admission, master.py, ferry_identity.py
+#   --no-m            install only the device directory (clients can then register but not connect; see ROLES.md)
 #   --m-identity FILE use this M identity (PKCS#8 DER private key) instead of making a new one, when moving an existing M
 #   --m-host H        host name or address that clients and ArdFerry nodes use for the parts above (default: the --domain)
 #   --directory-port N  public TCP port of the ArdFerry directory (default 8080)
@@ -34,7 +36,7 @@
 set -euo pipefail
 
 DOMAIN=; PORT=8091; REF=main; SRC_FILE=; BASE_URL=; PIP_INDEX=; WHEELS=; CADDY_BIN=; NAME=arduiserver; PROBE=true; PROBE_PORT=7843; PROBE_HOST=; TLS_INTERNAL=false; HTTP_ONLY=false; DRY=false; UNINSTALL=false
-M_BUNDLE=; M_IDENTITY=; M_HOST=; DIRECTORY_PORT=8080; CONTROL_PORT=7842; FRONT_GROUP=ardui-caddy
+M_BUNDLE=; M_PACKAGE=; NO_M=false; M_IDENTITY=; M_HOST=; DIRECTORY_PORT=8080; CONTROL_PORT=7842; FRONT_GROUP=ardui-caddy
 
 CONF=/etc/ardui; CADDY_DATA=/var/lib/ardui-caddy
 
@@ -57,6 +59,8 @@ while [ $# -gt 0 ]; do
     --wheels) WHEELS=${2:?}; shift 2;;
     --caddy-binary) CADDY_BIN=${2:?}; shift 2;;
     --m-bundle) M_BUNDLE=${2:?}; shift 2;;
+    --m-package) M_PACKAGE=${2:?}; shift 2;;
+    --no-m) NO_M=true; shift;;
     --m-identity) M_IDENTITY=${2:?}; shift 2;;
     --m-host) M_HOST=${2:?}; shift 2;;
     --directory-port) DIRECTORY_PORT=${2:?}; shift 2;;
@@ -100,10 +104,10 @@ case "$DIRECTORY_PORT$CONTROL_PORT" in *[!0-9]*) die "--directory-port and --con
 RELAYS_PORT=$((PORT + 1)); CONTROL_LOCAL=$((PORT + 2))
 [ -n "$PROBE_HOST" ] || PROBE_HOST=$DOMAIN
 [ -n "$M_HOST" ] || M_HOST=$DOMAIN
-if [ -n "$M_BUNDLE" ]; then
-  for f in ard-relay ard-relay-admission master.py ferry_identity.py; do [ -f "$M_BUNDLE/$f" ] || die "--m-bundle: $M_BUNDLE/$f is missing"; done
-  [ -n "$M_HOST" ] || die "--m-bundle with --http-only needs --m-host (the name or address clients reach this machine at)"
+if ! $NO_M; then
+  [ -n "$M_HOST" ] || die "with --http-only, give --m-host (the name or address clients reach this machine at), or --no-m"
   [ -z "$M_IDENTITY" ] || [ -f "$M_IDENTITY" ] || die "--m-identity: no such file: $M_IDENTITY"
+  [ -z "$M_PACKAGE" ] || [ -f "$M_PACKAGE" ] || die "--m-package: no such file: $M_PACKAGE"
 fi
 # An IP address instead of a name: Let's Encrypt only issues IP certificates with its short-lived profile.
 IS_IP=false
@@ -121,6 +125,31 @@ if $need_install; then
   elif command -v yum     >/dev/null; then run yum install -y python3 python3-pip curl ca-certificates
   elif command -v apk     >/dev/null; then die "Alpine is not supported (no systemd)"
   else die "install python3 (3.8+), python3-venv and curl, then run this again"; fi
+fi
+
+# ---- the M package -----------------------------------------------------------------------------------------------
+# Static builds of ard-relay (signaling, address discovery) and ard-relay-admission (the ArdFerry probe), with master.py and
+# ferry_identity.py, built from the ard2 sources of this release. The SHA-256 is pinned here, so a download is accepted only if it
+# is exactly the published package.
+M_RELEASE=v5.5
+M_PACKAGE_NAME=ardui-m-linux-x86_64.tar.gz
+M_PACKAGE_SHA256=bd84caa0fe34ca2b603c90fb617ef154082b1f1fac5b402077765a2d080a76be
+if ! $NO_M && [ -z "$M_BUNDLE" ]; then
+  case "$(uname -m)" in x86_64|amd64) ;; *) die "the M package is built for x86_64 only; on $(uname -m) give --m-bundle DIR (or --no-m)";; esac
+  say "getting the M package ($M_PACKAGE_NAME)"
+  MPKG=$(mktemp -d)
+  if [ -n "$M_PACKAGE" ]; then run cp "$M_PACKAGE" "$MPKG/$M_PACKAGE_NAME"
+  else run curl -fsSL --connect-timeout 15 --max-time 900 "https://github.com/KateY07/ArdUi/releases/download/$M_RELEASE/$M_PACKAGE_NAME" -o "$MPKG/$M_PACKAGE_NAME" \
+    || die "could not download $M_PACKAGE_NAME (is GitHub reachable from here? download it elsewhere and give --m-package FILE)"; fi
+  if ! $DRY; then
+    [ "$(sha256sum "$MPKG/$M_PACKAGE_NAME" | cut -d' ' -f1)" = "$M_PACKAGE_SHA256" ] || die "$M_PACKAGE_NAME is not the published M package (SHA-256 mismatch)"
+    tar -xzf "$MPKG/$M_PACKAGE_NAME" -C "$MPKG"
+    echo "M package verified ($(cat "$MPKG/ardui-m/VERSION" 2>/dev/null))"
+  fi
+  M_BUNDLE=$MPKG/ardui-m
+fi
+if [ -n "$M_BUNDLE" ] && ! $DRY; then
+  for f in ard-relay ard-relay-admission master.py ferry_identity.py; do [ -f "$M_BUNDLE/$f" ] || die "$M_BUNDLE/$f is missing"; done
 fi
 
 # ---- the directory service --------------------------------------------------------------------------------------
@@ -164,7 +193,7 @@ for spec in iroh-relay-v1.1.0-x86_64-unknown-linux-musl.tar.gz:9a68108b824e4164a
   [ -f "$target" ] && [ "$(sha256sum "$target" | cut -d' ' -f1)" = "$sum" ] && continue
   atmp=$(mktemp)
   if [ -n "$src_dir" ] && [ -f "$src_dir/$archive" ]; then cp "$src_dir/$archive" "$atmp"
-  else curl -fsSL --connect-timeout 15 --max-time 600 "https://github.com/n0-computer/iroh/releases/download/v1.1.0/$archive" -o "$atmp" || true; fi
+  else curl -fsSL --connect-timeout 15 --max-time 300 "https://github.com/n0-computer/iroh/releases/download/v1.1.0/$archive" -o "$atmp" || true; fi
   if [ "$(sha256sum "$atmp" | cut -d' ' -f1)" = "$sum" ]; then install -m 644 "$atmp" "$target"
   else warn "no official $archive for the ArdFerry installer to fall back on (GitHub unreachable? put it next to the --file arduiserver.py)"; fi
   rm -f "$atmp"
@@ -387,7 +416,7 @@ if ! $HTTP_ONLY; then
   if ! command -v caddy >/dev/null; then
     case "$(uname -m)" in x86_64|amd64) arch=amd64;; aarch64|arm64) arch=arm64;; armv7l) arch=arm;; *) die "no Caddy build for $(uname -m)";; esac
     if [ -n "$CADDY_BIN" ]; then run install -m 755 "$CADDY_BIN" /usr/local/bin/caddy
-    else run curl -fsSL --connect-timeout 15 "https://caddyserver.com/api/download?os=linux&arch=$arch" -o /usr/local/bin/caddy || die "could not download Caddy; install it yourself or pass --caddy-binary PATH"; fi
+    else run curl -fsSL --connect-timeout 15 --max-time 1800 "https://caddyserver.com/api/download?os=linux&arch=$arch" -o /usr/local/bin/caddy || { rm -f /usr/local/bin/caddy; die "could not download Caddy (caddyserver.com unreachable or too slow); download it elsewhere and pass --caddy-binary PATH"; }; fi
     run chmod 755 /usr/local/bin/caddy
   fi
   id ardui-caddy >/dev/null 2>&1 || run useradd --system --home-dir "$CADDY_DATA" --shell /usr/sbin/nologin ardui-caddy
@@ -493,7 +522,7 @@ if [ -n "$M_BUNDLE" ]; then
   fi
 elif [ ! -f "$CONF/network.json" ]; then
   warn "$CONF/network.json is missing: this M does not yet tell its clients where its ArdFerry directory is,"
-  warn "so clients can register but cannot connect. Run this again with --m-bundle DIR (see ROLES.md)."
+  warn "so clients can register but cannot connect. Run this again without --no-m (see ROLES.md)."
 fi
 client_url=$url; proxy_note=
 if $HTTP_ONLY; then

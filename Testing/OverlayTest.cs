@@ -157,6 +157,9 @@ static class OverlayTest
             Check(caller.RecoveringSelectedPath,"failure replacement lost the failed selection context");
             candidate.ObserveResponse(true);await Exchange(1000);
             Check(caller.Selected=="test-C","recovered candidate left selection stranded on base");
+            // a probe sent before the latest answer (it timed out late, during a blackout that has ended) changes nothing
+            candidate.ObserveResponse(false,Environment.TickCount64-1500);
+            Check(candidate.Responsive,"a stale probe result overrode a newer one");
             candidate.ObserveResponse(false);await Exchange(1000);
             var basePath=caller.Link("base")!;
             for(var i=0;i<16;i++){basePath.Sample(10);candidate.Sample(2);}

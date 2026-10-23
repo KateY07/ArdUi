@@ -1,8 +1,8 @@
 #!/bin/sh
 # Update the official M (NJ, f.visnova.cn) the same way a self-hoster installs one: selfhost.sh in --http-only mode behind the Caddy
 # that NJ already runs. M is one installation (ROLES.md): device directory, network probe, ArdFerry directory, signaling and address
-# discovery. Copy selfhost.sh, server/arduiserver.py, server/probe_udp.py, native_relay/master.py and native_relay/ferry_identity.py
-# to /tmp first, with ardferry.sh and ardferry.ps1 (the one-step ArdFerry installers this M hands out) and, if NJ cannot reach GitHub,
+# discovery. Copy selfhost.sh, server/arduiserver.py and server/probe_udp.py to /tmp first, with the release's M package
+# ardui-m-linux-x86_64.tar.gz (NJ cannot always reach GitHub; selfhost.sh checks its pinned SHA-256), with ardferry.sh and ardferry.ps1 (the one-step ArdFerry installers this M hands out) and, if NJ cannot reach GitHub,
 # the official iroh-relay-v1.1.0 archives (*-linux-musl.tar.gz, *-windows-msvc.zip), then run this as root. Rollback: /root/m-rollback-<stamp>.sh (written below).
 set -eu
 health() { curl -fsS -m 10 https://f.visnova.cn/api/health; }
@@ -26,8 +26,6 @@ EOF
 fi
 
 # ---- M's relay part: from the hand-made units in /opt/ard2/directory to selfhost.sh -----------------------------------------
-bundle=/tmp/m-bundle; rm -rf "$bundle"; mkdir -p "$bundle"
-cp "$OLD/bin/ard-relay" "$OLD/bin/ard-relay-admission" /tmp/master.py /tmp/ferry_identity.py "$bundle/"
 if systemctl list-unit-files ard-directory-master.service >/dev/null 2>&1 && [ -f /etc/systemd/system/ard-directory-master.service ]; then
   cat > "/root/m-rollback-$stamp.sh" <<EOF
 #!/bin/sh
@@ -50,7 +48,8 @@ PY
   systemctl disable --now ard-directory-master ard-directory-control   # frees 8080 for Caddy and 7842 for arduiserver-control
 fi
 bash /tmp/selfhost.sh --http-only --file /tmp/arduiserver.py \
-  --m-bundle "$bundle" --m-identity "$OLD/pki-relay-identity/master.identity" --m-host 175.27.160.144 --front-group caddy
+  $( [ -f /tmp/ardui-m-linux-x86_64.tar.gz ] && echo --m-package /tmp/ardui-m-linux-x86_64.tar.gz ) \
+  --m-identity "$OLD/pki-relay-identity/master.identity" --m-host 175.27.160.144 --front-group caddy
 
 # Rough locations for the ArdFerry map: DB-IP's free city database (CC BY 4.0), refreshed when this month's is not there yet.
 geo=/var/lib/arduiserver/dbip-city-lite.mmdb; month=$(date -u +%Y-%m)
@@ -92,22 +91,11 @@ EOF
 t=$(mktemp -d); env HOME="$t" XDG_DATA_HOME="$t" XDG_CONFIG_HOME="$t" /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null; rm -rf "$t"
 systemctl reload caddy
 
-# NJ's own ArdFerry joins like everyone else's: configured with M's domain only (its certificate from M's old CA cannot pass the
-# HTTPS front). Its new name is added to the official list.
-if ! grep -q '"m"' "$OLD/nj-node.json"; then
-  cp -a "$OLD/nj-node.json" "$OLD/nj-node.json.before-$stamp"
-  python3 - "$OLD/nj-node.json" <<'PY'
-import json, sys
-path = sys.argv[1]; old = json.load(open(path))
-json.dump(dict(m='f.visnova.cn', data=old['data'] + '-ferry', relay_port=old['relay_port'], official_relay_sha256=old['official_relay_sha256'],
-               upnp=False, manual_endpoints=old.get('manual_endpoints', [])), open(path, 'w'), indent=1)
-PY
-  systemctl restart ardferry
-  for _ in $(seq 1 30); do [ -f "$OLD/run/nj-ferry/identity/node.pem" ] && break; sleep 1; done
-fi
+# NJ's own ArdFerry is installed like anyone's (curl -fsSL https://f.visnova.cn/ardferry.sh | sudo bash -s -- --no-upnp, in
+# /opt/ardferry) and is listed as official.
 node=
-[ -f "$OLD/run/nj-ferry/identity/node.pem" ] && node=$(python3 -I -c "import sys; sys.path.insert(0, sys.argv[1]); import ferry_identity; print(ferry_identity.ensure(sys.argv[2])['node'])" \
-  "$OLD/product" "$OLD/run/nj-ferry/identity")
+[ -f /opt/ardferry/data/identity/node.pem ] && node=$(/opt/ardferry/venv/bin/python -I -c \
+  "import sys; sys.path.insert(0, '/opt/ardferry'); import ferry_identity; print(ferry_identity.ensure(sys.argv[1])['node'])" /opt/ardferry/data/identity)
 if [ -n "$node" ]; then
   python3 - "$NEW/master.json" "$node" <<'PY'
 import json, sys

@@ -453,16 +453,16 @@ sealed class OverlaySession : IAsyncDisposable
     public async Task<double> Probe(OverlayLink link,bool udp,int bytes=32)
     {
         var id=Interlocked.Increment(ref probeId);var waiter=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);probes[id]=waiter;
-        var watch=Stopwatch.StartNew();Interlocked.Increment(ref link.Probes);
+        var watch=Stopwatch.StartNew();var sentAt=Environment.TickCount64;Interlocked.Increment(ref link.Probes);
         try
         {
             await SendOn(link,Frame(10,id,0,new byte[bytes]),udp);
             await waiter.Task.WaitAsync(TimeSpan.FromSeconds(2),stop.Token);
             var rtt=watch.Elapsed.TotalMilliseconds;
-            if(udp){link.JitterMs=link.RttMs is{} old?Math.Abs(old-rtt):0;link.RttMs=rtt;link.Sample(rtt);link.ObserveResponse(true);}
+            if(udp){link.JitterMs=link.RttMs is{} old?Math.Abs(old-rtt):0;link.RttMs=rtt;link.Sample(rtt);link.ObserveResponse(true,sentAt);}
             return rtt;
         }
-        catch{Interlocked.Increment(ref link.Lost);if(udp){link.Sample(null);link.ObserveResponse(false);}throw;}
+        catch{Interlocked.Increment(ref link.Lost);if(udp){link.Sample(null);link.ObserveResponse(false,sentAt);}throw;}
         finally{probes.TryRemove(id,out _);}
     }
     async Task Maintain()

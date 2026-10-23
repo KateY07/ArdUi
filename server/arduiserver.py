@@ -358,7 +358,12 @@ def ferry_view(admin=False):
                        client_rtt_ms_median=median(c['rtt']),
                        client_success_rate_24h=round(c['ok_24h'] / c['probes_24h'], 4) if c['probes_24h'] else None,
                        session_rtt_ms_median=median(c['session_rtt']), session_mbps_median=median(c['mbps']))
-        nodes.setdefault(name, dict(node=name, families={}))['clients'] = summary
+        # The page lists the ArdFerry nodes M knows now (M forgets a silent one after 10 minutes). Client reports about any other
+        # node are history; only when M's own measurements cannot be had are nodes reported in the last 10 minutes shown.
+        if name in nodes:
+            nodes[name]['clients'] = summary
+        elif note and any(r['node'] == name and r['minute'] >= now // 60 - 10 for r in day):
+            nodes[name] = dict(node=name, families={}, clients=summary)
     result = []
     for node in sorted(nodes.values(), key=lambda n: n['node']):
         node['location'] = node_location(node, admin)

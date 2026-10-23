@@ -104,11 +104,13 @@ ArdUi 程序，加它使用的传输层 ard，加 FRD 等应用。
 ## 与现状的差距
 
 已消除：
-- **M 合为一个安装单元**：`selfhost.sh --m-bundle DIR` 一次装好设备登记、信令、地址发现、ArdFerry 目录和状态面板，生成 M 身份密钥并写好 `/etc/ardui/network.json`。
+- **M 合为一个安装单元**：`selfhost.sh` 一次装好设备登记、信令、地址发现、ArdFerry 目录和状态面板，生成 M 身份密钥并写好 `/etc/ardui/network.json`。
   - **面向公网的进程**：`arduiserver`、`arduiserver-relays`，以 `arduiserver` 用户运行，拿不到 M 身份密钥。
   - **持有 M 身份密钥的进程**：`arduiserver-control`，以 `arduiserver-m` 用户运行。
   - **HTTPS 前端**：Caddy 持有一份 PEM 副本，用来以 M 的密钥提供 ArdFerry 目录。原因是 ard 和 ArdFerry 都靠这把密钥认出目录。
 - **NJ 也用这个安装器**：`server/deploy.sh` 调用 `selfhost.sh`。
+- **M 包随版本发布**：`ardui-m-linux-x86_64.tar.gz`（静态编译），`selfhost.sh` 自动下载并按固定的 SHA-256 校验。
+- **ArdFerry 一键加入**：M 提供 `https://域名/ardferry.sh`（Windows：`ardferry.ps1`），脚本里已填好该 M 的域名。
 - **"兜底"（fallback）角色已去掉**：所有 ArdFerry 都是候选，由 iroh 按实测延迟挑选。
 - **ArdTransit 已退役**：客户端和服务端的代码都已删除；服务端启动时删除旧表。
 - **`relay`/`relayKey` 不再使用**：客户端从 M 的 `/api/v1/network` 获取。
@@ -117,5 +119,4 @@ ArdUi 程序，加它使用的传输层 ard，加 FRD 等应用。
 
 | 现状 | 应当是 |
 |---|---|
-| `--m-bundle` 需要自备 Linux 版 `ard-relay`、`ard-relay-admission` | 随版本发布 M 包，`selfhost.sh` 自动下载并校验哈希 |
 | ArdFerry 目录与信令用独立端口（8080、7842），客户端经 IP 访问 NJ | 都经 M 的域名访问 |
