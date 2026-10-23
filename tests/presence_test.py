@@ -16,6 +16,7 @@ from pathlib import Path
 folder = tempfile.mkdtemp(prefix='ardui-presence-')
 os.environ['ARDUI_DATABASE'] = os.path.join(folder, 'devices.sqlite3')
 os.environ['ARDUI_NETWORK'] = os.path.join(folder, 'network.json')
+os.environ['ARDUI_FERRY_FILES'] = os.path.join(folder, 'ardferry')
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'server'))
 
 # Database created by the first release has no "name" column; the new code must migrate it in place.
@@ -155,3 +156,28 @@ assert 'ArdFerry' in page and good_entry['node'] in page and '"session_mbps_medi
 for _ in range(3): controller.call('/api/v1/ferry-report', {'ferries': [good_entry]})
 assert controller.call('/api/v1/ferry-report', {'ferries': [good_entry]})[0] == 429, 'a device cannot report faster than allowed'
 print('PASS: ArdFerry reports from clients: validated, rate limited, aggregated, public view without addresses')
+# The one-step ArdFerry installer comes from M with M's own domain filled in; the iroh-relay copy only if it is the official one.
+def fetch(path, host='m.example', ip='198.51.100.9'):
+    seen = {}
+    environ = {'PATH_INFO': path, 'REQUEST_METHOD': 'GET', 'REMOTE_ADDR': '127.0.0.1', 'HTTP_X_REAL_IP': ip, 'HTTP_HOST': host}
+    body = b''.join(arduiserver.application(environ, lambda status, headers: seen.update(status=int(status.split()[0]))))
+    return seen['status'], body
+assert fetch('/ardferry.sh')[0] == 404, 'an M without the script says so'
+os.makedirs(os.environ['ARDUI_FERRY_FILES'])
+with open(os.path.join(os.environ['ARDUI_FERRY_FILES'], 'ardferry.ps1'), 'w', encoding='utf-8', newline='') as out:
+    out.write("param(\r\n    [string]$M = '@M@',\r\n)\r\n")
+with open(os.path.join(os.environ['ARDUI_FERRY_FILES'], 'ardferry.sh'), 'w', encoding='utf-8', newline='\n') as out:
+    out.write("#!/usr/bin/env bash\nM='@M@'\necho M='@M@' stays in the rest\n")
+status, body = fetch('/ardferry.sh', host='m.example')
+assert status == 200 and body.startswith(b"#!/usr/bin/env bash\nM='m.example'\n") and b"echo M='@M@'" in body, body
+assert fetch('/ardferry.sh', host='m.example:443')[1].count(b"M='m.example'\n") == 1, 'the default HTTPS port is left out'
+assert fetch('/ardferry.ps1')[1] == b"param(\r\n    [string]$M = 'm.example',\r\n)\r\n", 'the Windows script keeps its line ends'
+assert fetch('/ardferry.sh', host="m.example';reboot;'")[0] == 400, 'a host that is not a domain is refused'
+name = 'iroh-relay-v1.1.0-x86_64-unknown-linux-musl.tar.gz'
+assert fetch('/ardferry/' + name)[0] == 404 and fetch('/ardferry/../devices.sqlite3')[0] == 404
+with open(os.path.join(os.environ['ARDUI_FERRY_FILES'], name), 'wb') as out:
+    out.write(b'not the official archive')
+assert fetch('/ardferry/' + name)[0] == 404, 'an archive that does not match the published SHA-256 is never served'
+for _ in range(30): fetch('/ardferry.sh', ip='198.51.100.77')
+assert fetch('/ardferry.sh', ip='198.51.100.77')[0] == 429, 'downloads are rate limited per address'
+print('PASS: ArdFerry installer served with M domain; relay archive only if official; rate limited')

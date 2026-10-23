@@ -140,6 +140,35 @@ if $PROBE; then
   if ! $DRY; then grep -q 'class Service' "$ptmp" || die "that does not look like probe_udp.py"; fi
   run install -m 644 "$ptmp" "$APP/probe_udp.py"; rm -f "$ptmp"
 fi
+# The one-step ArdFerry installers this M hands out (https://DOMAIN/ardferry.sh and .ps1, with this M's domain filled in), and a copy of the
+# official iroh-relay archives for servers that cannot reach GitHub; arduiserver serves an archive only if its SHA-256 is the official one.
+run install -d -m 755 "$APP/ardferry"
+src_dir=$( [ -n "$SRC_FILE" ] && cd "$(dirname "$SRC_FILE")" && pwd || true )
+for script in ardferry.sh ardferry.ps1; do
+  ftmp=$(mktemp)
+  if [ -n "$src_dir" ] && [ -f "$src_dir/$script" ]; then run cp "$src_dir/$script" "$ftmp"
+  elif [ -n "$src_dir" ] && [ -f "$src_dir/../$script" ]; then run cp "$src_dir/../$script" "$ftmp"
+  else run curl -fsSL --connect-timeout 15 "${BASE_URL:-https://raw.githubusercontent.com/KateY07/ArdUi/$REF}/$script" -o "$ftmp" \
+    || warn "could not get $script: this M will not hand it out (put it next to the --file arduiserver.py)"; fi
+  if ! $DRY && [ -s "$ftmp" ]; then
+    grep -qF "'@M@'" "$ftmp" || die "that does not look like $script"
+    install -m 644 "$ftmp" "$APP/ardferry/$script"
+  fi
+  rm -f "$ftmp"
+done
+for spec in iroh-relay-v1.1.0-x86_64-unknown-linux-musl.tar.gz:9a68108b824e4164ad2eec729cf0e8167e4cb50581cb745a242bace135df7614 \
+            iroh-relay-v1.1.0-aarch64-unknown-linux-musl.tar.gz:1b4261b6dd0d17ae9a7516aa6d122b296a77678bac174ce30262702c9f91cb00 \
+            iroh-relay-v1.1.0-x86_64-pc-windows-msvc.zip:052bd32704afcb4492a0cd8e619e1bb47c69cbe8ecaa89907c22033634b3da1c; do
+  archive=${spec%%:*}; sum=${spec##*:}; target="$APP/ardferry/$archive"
+  $DRY && { echo "+ fetch $archive"; continue; }
+  [ -f "$target" ] && [ "$(sha256sum "$target" | cut -d' ' -f1)" = "$sum" ] && continue
+  atmp=$(mktemp)
+  if [ -n "$src_dir" ] && [ -f "$src_dir/$archive" ]; then cp "$src_dir/$archive" "$atmp"
+  else curl -fsSL --connect-timeout 15 --max-time 600 "https://github.com/n0-computer/iroh/releases/download/v1.1.0/$archive" -o "$atmp" || true; fi
+  if [ "$(sha256sum "$atmp" | cut -d' ' -f1)" = "$sum" ]; then install -m 644 "$atmp" "$target"
+  else warn "no official $archive for the ArdFerry installer to fall back on (GitHub unreachable? put it next to the --file arduiserver.py)"; fi
+  rm -f "$atmp"
+done
 [ -x "$APP/venv/bin/python" ] || run python3 -m venv "$APP/venv"
 if [ -n "$WHEELS" ]; then
   [ -d "$WHEELS" ] || die "--wheels: no such directory: $WHEELS"
@@ -352,7 +381,7 @@ if ! $HTTP_ONLY; then
   say "setting up HTTPS for $DOMAIN"
   if ss -ltn 2>/dev/null | grep -qE ':(80|443)\s' && ! systemctl is-active --quiet ardui-caddy; then
     warn "ports 80/443 are already in use by something else. Re-run with --http-only and add this to your own reverse proxy:"
-    warn "    $DOMAIN { handle /api/* { reverse_proxy 127.0.0.1:$PORT { header_up X-Real-IP {remote_host} } } }"
+    warn "    $DOMAIN { @api path /api/* /ardferry.sh /ardferry.ps1 /ardferry/*; handle @api { reverse_proxy 127.0.0.1:$PORT { header_up X-Real-IP {remote_host} } } }"
     die "refusing to fight over ports 80/443"
   fi
   if ! command -v caddy >/dev/null; then
@@ -372,7 +401,8 @@ $($TLS_INTERNAL && echo "    tls internal")
 $(! $TLS_INTERNAL && $IS_IP && printf '    tls {\n        issuer acme {\n            profile shortlived\n        }\n    }')
     encode zstd gzip
     header X-Content-Type-Options nosniff
-    handle /api/* {
+    @api path /api/* /ardferry.sh /ardferry.ps1 /ardferry/*
+    handle @api {
         reverse_proxy 127.0.0.1:$PORT {
             header_up X-Real-IP {remote_host}
         }
@@ -468,7 +498,7 @@ fi
 client_url=$url; proxy_note=
 if $HTTP_ONLY; then
   client_url="https://YOUR-DOMAIN/"
-  proxy_note="(--http-only: put your HTTPS reverse proxy in front, /api/* -> 127.0.0.1:$PORT, and use its https:// address below.)"
+  proxy_note="(--http-only: put your HTTPS reverse proxy in front, /api/*, /ardferry.sh, /ardferry.ps1 and /ardferry/* -> 127.0.0.1:$PORT, and use its https:// address below.)"
 fi
 cat <<EOF
 
@@ -479,7 +509,7 @@ Point ArdUi at it (on every machine), in  %LOCALAPPDATA%\\ArdUi\\data\\config.js
     "server": "$client_url"
 then restart ArdUi.
 $($PROBE && echo "Network diagnosis: open UDP $PROBE_PORT and $((PROBE_PORT + 1)) in the firewall / cloud security group so that ArdUi's probe can reach the server.")
-$([ -n "$M_BUNDLE" ] && echo "M: open TCP $DIRECTORY_PORT and TCP+UDP $CONTROL_PORT as well. ArdFerry nodes join with: install-linux.sh --m ${DOMAIN:-YOUR-DOMAIN}")
+$([ -n "$M_BUNDLE" ] && echo "M: open TCP $DIRECTORY_PORT and TCP+UDP $CONTROL_PORT as well. ArdFerry nodes join with: curl -fsSL https://${DOMAIN:-YOUR-DOMAIN}/ardferry.sh | sudo bash")
 Back up $DATA/ (device database) and $MKEY/identity (M's key: a new one makes every client and node re-learn this M).
 Logs:  journalctl -u $NAME -f
 EOF

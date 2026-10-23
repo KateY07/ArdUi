@@ -2,6 +2,7 @@
 Production: gunicorn --bind 127.0.0.1:8091 --workers 1 --threads 8 arduiserver:application
 """
 import base64
+import hashlib
 import json
 import os
 import re
@@ -54,6 +55,52 @@ def network():
             not isinstance(value['masterKey'], str) or not re.fullmatch(r'spki:[0-9a-f]{2,512}', value['masterKey'])):
         raise ApiError(503, '此网络的中继配置无效。')
     return value
+
+# The one-step ArdFerry installers (ardferry.sh, ardferry.ps1, built in ard2's native_relay/deploy) and a copy of the official iroh-relay archives
+# for servers that cannot reach GitHub. The script fetched from this M joins this M's network: its domain is filled in from the host
+# the request was made to. The archives are served only if they match the SHA-256 published with the iroh release.
+FERRY_FILES = os.environ.get('ARDUI_FERRY_FILES', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ardferry'))
+FERRY_ARCHIVES = {
+    'iroh-relay-v1.1.0-x86_64-unknown-linux-musl.tar.gz': '9a68108b824e4164ad2eec729cf0e8167e4cb50581cb745a242bace135df7614',
+    'iroh-relay-v1.1.0-aarch64-unknown-linux-musl.tar.gz': '1b4261b6dd0d17ae9a7516aa6d122b296a77678bac174ce30262702c9f91cb00',
+    'iroh-relay-v1.1.0-x86_64-pc-windows-msvc.zip': '052bd32704afcb4492a0cd8e619e1bb47c69cbe8ecaa89907c22033634b3da1c',
+}
+FERRY_SCRIPTS = {'/ardferry.sh': 'text/x-shellscript; charset=utf-8', '/ardferry.ps1': 'text/plain; charset=utf-8'}
+_ferry_checked = {}
+
+def ferry_download(path, environ, start_response):
+    limit('ardferry:' + (environ.get('HTTP_X_REAL_IP') or environ.get('REMOTE_ADDR', 'unknown')), 30, 60)
+    if path in FERRY_SCRIPTS:
+        host = environ.get('HTTP_HOST', '')
+        if not re.fullmatch(r'[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?', host):
+            raise ApiError(400, '无法确定 M 的域名。')
+        try:
+            with open(os.path.join(FERRY_FILES, path[1:]), encoding='utf-8', newline='') as source:
+                script = source.read()
+        except OSError:
+            raise ApiError(404, '此 M 未提供 ArdFerry 安装脚本。')
+        body = script.replace("'@M@'", "'%s'" % host.removesuffix(':443'), 1).encode()
+        start_response('200 OK', [('Content-Type', FERRY_SCRIPTS[path]), ('Content-Length', str(len(body))),
+                                  ('Cache-Control', 'no-cache'), ('X-Content-Type-Options', 'nosniff')])
+        return [body]
+    name = path[len('/ardferry/'):]
+    if name not in FERRY_ARCHIVES:
+        raise ApiError(404, '没有这个文件。')
+    file = os.path.join(FERRY_FILES, name)
+    try:
+        stat = os.stat(file)
+        if _ferry_checked.get(name) != (stat.st_size, stat.st_mtime):
+            with open(file, 'rb') as source:
+                if hashlib.sha256(source.read()).hexdigest() != FERRY_ARCHIVES[name]:
+                    raise ApiError(404, '没有这个文件。')
+            _ferry_checked[name] = (stat.st_size, stat.st_mtime)
+        source = open(file, 'rb')
+    except OSError:
+        raise ApiError(404, '没有这个文件。')
+    start_response('200 OK', [('Content-Type', 'application/zip' if name.endswith('.zip') else 'application/gzip'), ('Content-Length', str(stat.st_size)),
+                              ('Cache-Control', 'public, max-age=86400'), ('X-Content-Type-Options', 'nosniff')])
+    wrapper = environ.get('wsgi.file_wrapper')
+    return wrapper(source, 1 << 16) if wrapper else iter(lambda: source.read(1 << 16), b'')
 
 def check_grant(value, controller, target):
     try:
@@ -603,6 +650,8 @@ def application(environ,start_response):
                 start_response('200 OK',[('Content-Type','text/html; charset=utf-8'),('Content-Length',str(len(body))),('Cache-Control','no-store'),('X-Content-Type-Options','nosniff')])
                 return [body]
             result=view
+        elif (path in FERRY_SCRIPTS or path.startswith('/ardferry/')) and environ['REQUEST_METHOD']=='GET':
+            return ferry_download(path,environ,start_response)
         elif environ['REQUEST_METHOD']!='POST': raise ApiError(405,'此接口仅接受 POST。')
         else:
             try: length=int(environ.get('CONTENT_LENGTH') or 0)

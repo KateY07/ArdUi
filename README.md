@@ -83,7 +83,7 @@ Details:
 - `DIR` holds `ard-relay` and `ard-relay-admission` (Linux builds) and `master.py` and `ferry_identity.py` from [native_relay](https://github.com/KateY07/ard2/tree/main/native_relay).
 - Open TCP 8080 and TCP+UDP 7842 as well.
 - The processes facing the public never hold M's key; only `arduiserver-control` and the HTTPS front do (see [ROLES.md](ROLES.md)).
-- ArdFerry nodes join with `install-linux.sh --m your-domain`.
+- ArdFerry nodes join your network in one step, with the installer your M hands out: `curl -fsSL https://your-domain/ardferry.sh | sudo bash` on Linux, `& ([scriptblock]::Create((irm https://your-domain/ardferry.ps1)))` on Windows. Anyone can add capacity to the official network the same way with `f.visnova.cn`.
 - Without `--m-bundle`, clients can register but cannot connect.
 
 Verified: the whole script, Caddy included, in an offline systemd container (OpenCloudOS 9): services under their own users in a hardened sandbox, HTTPS, the HTTP redirect, signed API calls, running it twice, an IP address, uninstall. A real Let's Encrypt IP certificate was issued for a public server and ArdUi clients completed a full end-to-end run against it. Not yet tried: a real certificate for a domain name on a fresh server.

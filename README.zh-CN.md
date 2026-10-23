@@ -76,7 +76,7 @@ curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | su
 - `目录` 里放 `ard-relay`、`ard-relay-admission`（Linux 版），以及 [native_relay](https://github.com/KateY07/ard2/tree/main/native_relay) 的 `master.py`、`ferry_identity.py`。
 - 防火墙需另外放行 TCP 8080，以及 TCP 和 UDP 7842。
 - 面向公网的进程拿不到 M 的密钥；只有 `arduiserver-control` 和 HTTPS 前端持有（见 [ROLES.md](ROLES.md)）。
-- ArdFerry 节点用 `install-linux.sh --m 你的域名` 加入。
+- ArdFerry 节点用你的 M 提供的一键脚本加入：Linux 上 `curl -fsSL https://你的域名/ardferry.sh | sudo bash`，Windows 上 `& ([scriptblock]::Create((irm https://你的域名/ardferry.ps1)))`。任何人也可以用 `f.visnova.cn` 以同样方式为官方网络增加 ArdFerry。
 - 不加 `--m-bundle` 时，客户端能登记，但连不上。
 
 已验证：整个脚本（含 Caddy）在断网的 systemd 容器（OpenCloudOS 9）里跑通，包括各服务以独立用户运行在加固沙箱中、HTTPS、HTTP 跳转、签名 API 调用、重复运行、IP 地址、卸载；在一台公网服务器上真实签发了 Let's Encrypt IP 证书，ArdUi 客户端对它完成了完整的端到端测试。尚未验证：在全新服务器上为域名签发真实证书。

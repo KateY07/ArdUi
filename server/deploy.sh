@@ -2,7 +2,8 @@
 # Update the official M (NJ, f.visnova.cn) the same way a self-hoster installs one: selfhost.sh in --http-only mode behind the Caddy
 # that NJ already runs. M is one installation (ROLES.md): device directory, network probe, ArdFerry directory, signaling and address
 # discovery. Copy selfhost.sh, server/arduiserver.py, server/probe_udp.py, native_relay/master.py and native_relay/ferry_identity.py
-# to /tmp first (NJ cannot reach GitHub), then run this as root. Rollback: /root/m-rollback-<stamp>.sh (written below).
+# to /tmp first, with ardferry.sh and ardferry.ps1 (the one-step ArdFerry installers this M hands out) and, if NJ cannot reach GitHub,
+# the official iroh-relay-v1.1.0 archives (*-linux-musl.tar.gz, *-windows-msvc.zip), then run this as root. Rollback: /root/m-rollback-<stamp>.sh (written below).
 set -eu
 health() { curl -fsS -m 10 https://f.visnova.cn/api/health; }
 stamp=$(date -u +%Y%m%dT%H%M%S)
@@ -65,7 +66,8 @@ cat > /etc/caddy/Caddyfile <<'EOF'
 f.visnova.cn {
 	encode zstd gzip
 	header X-Content-Type-Options nosniff
-	handle /api/* {
+	@api path /api/* /ardferry.sh /ardferry.ps1 /ardferry/*
+	handle @api {
 		reverse_proxy 127.0.0.1:8091 {
 			header_up X-Real-IP {remote_host}
 		}
