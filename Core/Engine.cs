@@ -144,13 +144,24 @@ sealed class Engine : IAsyncDisposable
         var conversation = ChatFor(session.PeerId); _ = session.Completion.ContinueWith(_ => conversation.Close(), TaskScheduler.Default);
         session.Overlay.Changed+=()=>Update(session.PeerId,Describe(session,session.Host));
     }
+    // How long an incoming session waits for a controller that has gone without a goodbye (its machine went offline, its ArdUi
+    // was killed). The controller came with a one-time identity and will not come back to this session; a new connection makes a
+    // new one. The controller's own recovery has its budget in Session.StartMetrics.
+    internal static TimeSpan IncomingRecoveryBudget=TimeSpan.FromMinutes(2);
     async Task Monitor(Session session,bool host)
     {
+        long? pathless=null;
         while(!session.Token.IsCancellationRequested)
         {
             var child=session.Process;
             try{await Task.WhenAny(child.Exited,Task.Delay(1000,session.Token));session.Token.ThrowIfCancellationRequested();}catch(OperationCanceledException){break;}
             if(!session.Live)break;
+            if(host&&session.Overlay is{} overlay)
+            {
+                if(overlay.Link(overlay.Selected)?.Live==true)pathless=null;
+                else if(Environment.TickCount64-(pathless??=Environment.TickCount64)>IncomingRecoveryBudget.TotalMilliseconds)
+                {Diagnostics.Log("incoming-abandoned",$"{session.PeerId[..8]}: no path for {IncomingRecoveryBudget.TotalSeconds:F0} s; the controller is gone");break;}
+            }
             if(!child.Exited.IsCompleted)continue;
             if(session.Overlay==null||!session.Live)break;
             try

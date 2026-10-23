@@ -125,8 +125,21 @@ static class SelfTest
                 if(caller.State.Peers.Count!=0||caller.Outgoing.Count!=0)throw new Exception("Repeated local removal failed.");
                 Console.WriteLine($"TEST: repeated add round {round} removed.");
             }
-            await hd.Revoke(caller.Id);
             Console.WriteLine("PASS: three add, transfer, remove, and immediate re-add cycles.");
+            // A controller that vanishes without a goodbye (machine offline, ArdUi killed) is not waited for forever.
+            Engine.IncomingRecoveryBudget=TimeSpan.FromSeconds(5);
+            await cd.Connect(hd.Code,hd.AccessPassword,ct).WaitAsync(TimeSpan.FromSeconds(75),ct);
+            await VerifyFlow();
+            if(!caller.Outgoing.TryRemove(host.Id,out var vanished))throw new Exception("Outgoing session missing.");
+            await vanished.DisposeAsync();   // no "bye": the host only sees its paths go
+            using(var abandon=CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                abandon.CancelAfter(TimeSpan.FromSeconds(60));
+                while(host.Incoming.ContainsKey(caller.Id))await Task.Delay(250,abandon.Token);
+            }
+            Console.WriteLine("PASS: an incoming session whose controller vanished without a goodbye ends after the recovery budget.");
+            await cd.RemoveLocal(caller.State.Peers.Single());
+            await hd.Revoke(caller.Id);
             await hd.SetAccess(false,ct);
             if (hd.Enabled || host.Incoming.Count != 0) throw new Exception("Disable failed.");
             Console.WriteLine("PASS: host disable stops incoming sessions.");
