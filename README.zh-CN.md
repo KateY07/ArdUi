@@ -20,7 +20,7 @@
 
 **[网页介绍与演示](https://katey07.github.io/ArdUi/)** · **[下载](https://github.com/KateY07/ArdUi/releases)** · [自托管](#自托管) · [历史设计文档](docs/DESIGN-v2.md)
 
-当前版本：v5.5。官方服务器拒绝 v5.5 以下的客户端：v5.5 用设备密钥签名每个会话，并从 M 获取中继信息。
+当前版本：v6.pre1（预览版）。官方服务器拒绝 v6.pre1 以下的客户端：从 v6 起，设备不再定时轮询服务器，而是等服务器通知，建立连接的时间约缩短一半。
 
 ## 简介
 
@@ -63,7 +63,7 @@ curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | su
 - 脚本同时安装 **UDP 网络探测服务**（默认 UDP 7843 和 7844；`--probe-port N` 改端口，`--no-probe` 不装）。请在防火墙和云安全组里放行这两个 UDP 端口，ArdUi 的网络诊断才能使用你的服务器。
 - 其他选项：`--name 名称`（服务名、用户和目录，可与另一个实例并存）、`--port N`、`--pip-index URL`、`--caddy-binary 路径`、`--wheels 目录`。全部选项见 `bash selfhost.sh --help`。
 - **中国大陆的服务器**通常连不上 GitHub 和 caddyserver.com：请在别处下载 [`selfhost.sh`](selfhost.sh)、[`server/arduiserver.py`](server/arduiserver.py) 和 [`server/probe_udp.py`](server/probe_udp.py) 再拷过去，运行 `sudo bash selfhost.sh --domain … --file arduiserver.py`（没装 Caddy 时加 `--caddy-binary Caddy路径`；`--pip-index` 指定 PyPI 镜像）。
-- **完全离线：** 在一台能联网、Python 版本相同的机器上运行 `pip download pip gunicorn cryptography maxminddb -d wheels`，把这个目录一起拷过去，加 `--wheels wheels`。
+- **完全离线：** 在一台能联网、Python 版本相同的机器上运行 `pip download pip uvicorn cryptography maxminddb -d wheels`，把这个目录一起拷过去，加 `--wheels wheels`。
 - 部署完成后，在每台客户端的 `%LOCALAPPDATA%\ArdUi\data\config.json` 里设置 `"server": "https://你的域名/"`，重启 ArdUi。验证：浏览器打开 `https://你的域名/api/health`。
 
 **整个 M 一次装好**：除设备目录外，脚本还会装好：

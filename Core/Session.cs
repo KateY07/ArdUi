@@ -187,7 +187,7 @@ sealed class Session : IAsyncDisposable
     }
     public async Task RestartArd(CancellationToken ct)
     {
-        await Process.DisposeAsync();ct.ThrowIfCancellationRequested();Process=new Child(Ard.Exe,directory,ardArguments);
+        await Process.DisposeAsync();ct.ThrowIfCancellationRequested();Process=new Child(Process.LogTag,Ard.Exe,directory,ardArguments);
         Diagnostics.Log("ard-restart",PeerId);
     }
     public async Task<TcpClient> OpenTcp(int port, CancellationToken ct)

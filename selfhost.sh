@@ -11,9 +11,9 @@
 #   --ref NAME        git branch or tag of KateY07/ArdUi to take arduiserver.py from (default main)
 #   --file PATH       use this arduiserver.py instead of downloading it (servers that cannot reach GitHub)
 #   --base-url URL    download arduiserver.py from URL/server/arduiserver.py instead of raw.githubusercontent.com
-#   --pip-index URL   Python package index for gunicorn and cryptography (default: pip's own setting)
+#   --pip-index URL   Python package index for uvicorn and cryptography (default: pip's own setting)
 #   --wheels DIR      install the Python packages from wheel files in DIR, without any network (offline installs;
-#                     fill DIR on a connected machine with: pip download pip gunicorn cryptography maxminddb -d DIR)
+#                     fill DIR on a connected machine with: pip download pip uvicorn cryptography maxminddb -d DIR)
 #   --caddy-binary P  use this Caddy binary instead of downloading one from caddyserver.com
 #   --tls-internal    sign the certificate with Caddy's own local CA instead of Let's Encrypt (tests, private networks; clients will not trust it)
 #   --no-probe        do not install the UDP network probe (the part of ArdUi's network diagnosis that needs the server)
@@ -201,9 +201,9 @@ done
 [ -x "$APP/venv/bin/python" ] || run python3 -m venv "$APP/venv"
 if [ -n "$WHEELS" ]; then
   [ -d "$WHEELS" ] || die "--wheels: no such directory: $WHEELS"
-  run "$APP/venv/bin/pip" install --quiet --no-cache-dir --no-index --find-links "$WHEELS" --upgrade pip gunicorn cryptography maxminddb
+  run "$APP/venv/bin/pip" install --quiet --no-cache-dir --no-index --find-links "$WHEELS" --upgrade pip uvicorn cryptography maxminddb
 else
-  run "$APP/venv/bin/pip" install --quiet --no-cache-dir ${PIP_INDEX:+--index-url "$PIP_INDEX"} --upgrade pip gunicorn cryptography maxminddb
+  run "$APP/venv/bin/pip" install --quiet --no-cache-dir ${PIP_INDEX:+--index-url "$PIP_INDEX"} --upgrade pip uvicorn cryptography maxminddb
 fi
 
 # The sandbox both Python services run in: no privileges, no devices, a read-only system, only IP and Unix sockets.
@@ -243,7 +243,7 @@ Environment=ARDUI_DATABASE=$DATA/devices.sqlite3
 Environment=ARDUI_PROBE_PORT=$PROBE_PORT
 $($PROBE && [ -n "$PROBE_HOST" ] && echo "Environment=ARDUI_PROBE_HOST=$PROBE_HOST")
 $([ -n "$M_BUNDLE" ] && echo "Environment=ARDUI_M_STATUS=http://127.0.0.1:$RELAYS_PORT/status")
-ExecStart=$APP/venv/bin/gunicorn --bind 127.0.0.1:$PORT --workers 1 --threads 8 --timeout 30 arduiserver:application
+ExecStart=$APP/venv/bin/uvicorn --host 127.0.0.1 --port $PORT --workers 1 --app-dir $APP --no-access-log --timeout-keep-alive 30 --lifespan on arduiserver:asgi
 Restart=on-failure
 UMask=0077
 $HARDEN

@@ -20,7 +20,7 @@ High-performance remote access for Windows. Peer-to-peer and end-to-end encrypte
 
 **[Website](https://katey07.github.io/ArdUi/)** · **[Download](https://github.com/KateY07/ArdUi/releases)** · [Self-hosting](#self-hosting) · [Historical design notes (Chinese)](docs/DESIGN-v2.md)
 
-Current version: v5.5. The official server refuses clients older than v5.5: v5.5 signs every session with the device keys and learns its relays from M.
+Current version: v6.pre1 (preview). The official server refuses clients older than v6.pre1: since v6 a device waits for news from the server instead of polling it, which roughly halves the time to connect.
 
 ## Why ArdUi
 
@@ -70,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | su
 - The script also installs the **UDP network probe** (ports 7843 and 7844 by default; `--probe-port N`, or `--no-probe`). Open both UDP ports in the firewall / cloud security group so that ArdUi's network diagnosis can use your server.
 - Other options: `--name NAME` (service name, user and directories, to run beside another instance), `--port N`, `--pip-index URL`, `--caddy-binary PATH`, `--wheels DIR`. Run `bash selfhost.sh --help` for all of them.
 - **Servers in mainland China** usually cannot reach GitHub or caddyserver.com. Download [`selfhost.sh`](selfhost.sh), [`server/arduiserver.py`](server/arduiserver.py) and [`server/probe_udp.py`](server/probe_udp.py) elsewhere, copy them over, and run `sudo bash selfhost.sh --domain … --file arduiserver.py` (add `--caddy-binary /path/to/caddy` if Caddy is not installed; `--pip-index` selects a PyPI mirror).
-- **Fully offline:** on a connected machine with the same Python version run `pip download pip gunicorn cryptography maxminddb -d wheels`, copy the folder too, and add `--wheels wheels`.
+- **Fully offline:** on a connected machine with the same Python version run `pip download pip uvicorn cryptography maxminddb -d wheels`, copy the folder too, and add `--wheels wheels`.
 - Then, on every client, set `"server": "https://your-domain/"` in `%LOCALAPPDATA%\ArdUi\data\config.json` and restart ArdUi. Check the server at `https://your-domain/api/health`.
 
 **The whole M** is installed in one run. Besides the device directory, the script installs:

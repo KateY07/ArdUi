@@ -1,8 +1,11 @@
 """ArdUi trusted directory and short-lived connection authorization (WSGI).
-Production: gunicorn --bind 127.0.0.1:8091 --workers 1 --threads 8 arduiserver:application
+Production: uvicorn --host 127.0.0.1 --port 8091 --workers 1 arduiserver:asgi (one process: waiting requests are woken in memory)
 """
+import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import io
 import json
 import os
 import re
@@ -10,6 +13,7 @@ import secrets
 import sqlite3
 import string
 import tempfile
+import threading
 import time
 from http import HTTPStatus
 from cryptography.exceptions import InvalidSignature
@@ -21,18 +25,17 @@ CODE = re.compile(r'[A-Z0-9]{6}\Z')
 ENDPOINT = re.compile(r'[0-9a-f]{64}\Z')
 TICKET = re.compile(r'[0-9a-f]{32}\Z')
 COMPUTER_NAME = re.compile(r'[^\x00-\x1f\x7f]{1,64}\Z')
-VERSION = 'v5.5'
+VERSION = 'v6.pre1'
 # Network probe (see probe_udp.py): this server only mints short-lived tokens, each bound to the caller's IP address.
 PROBE_KEY = os.environ.get('ARDUI_PROBE_KEY', DB + '.probe-key')
 PROBE_HOST = os.environ.get('ARDUI_PROBE_HOST', '')
 PROBE_PORT = int(os.environ.get('ARDUI_PROBE_PORT', '7843'))
 # Clients older than this are refused with 426 (the header is "v<major>.pre<n>", sent by ArdUi since v5.pre1; older clients send none).
-# v5.5 (v5.pre5) learns the relay directory from this server (/api/v1/network) and signs every session with the device keys;
-# older clients are not supported. ARDUI_MIN_CLIENT=v<major>.pre<n> overrides it (e.g. while a release is rolling out).
+# v6 (v6.pre1) waits for news instead of polling every few seconds (WAIT_SECONDS below); older clients are not supported. ARDUI_MIN_CLIENT=v<major>.pre<n> overrides it (e.g. while a release is rolling out).
 CLIENT = re.compile(r'v(\d{1,3})\.pre(\d{1,3})\Z')
-_min = CLIENT.fullmatch(os.environ.get('ARDUI_MIN_CLIENT', 'v5.pre5'))
-MIN_CLIENT = (int(_min.group(1)), int(_min.group(2))) if _min else (5, 5)
-MIN_TEXT = 'v%d.%d' % MIN_CLIENT
+_min = CLIENT.fullmatch(os.environ.get('ARDUI_MIN_CLIENT', 'v6.pre1'))
+MIN_CLIENT = (int(_min.group(1)), int(_min.group(2))) if _min else (6, 1)
+MIN_TEXT = 'v%d.pre%d' % MIN_CLIENT
 # What this network's clients need besides this server: where M's relay directory and address discovery are, and M's key.
 # Written by the operator (selfhost.sh / deploy.sh); see ROLES.md.
 NETWORK_FILE = os.environ.get('ARDUI_NETWORK', '/etc/ardui/network.json')
@@ -41,6 +44,43 @@ def check_client(environ):
     match = CLIENT.fullmatch(environ.get('HTTP_X_ARDUI_CLIENT', ''))
     if match is None or (int(match.group(1)), int(match.group(2))) < MIN_CLIENT:
         raise ApiError(426, f'客户端版本过旧，请升级到 ArdUi {MIN_TEXT} 或更高版本。')
+
+# ---- waiting for news (long polling) -----------------------------------------------------------------------------------
+# A host's poll and a controller's look at its connection request are answered at once when there is something new for them,
+# otherwise as soon as something arrives (or after WAIT_SECONDS; then they ask again): no fixed polling interval stands between a
+# connection request and its delivery. A waiting request holds no thread, only its connection and a future (see asgi below).
+WAIT_SECONDS = 12
+_news_lock = threading.Lock()
+_news = {}             # key -> version, bumped by notify(); any thread
+_news_waiters = {}     # key -> set of asyncio futures; event loop thread only
+_news_loop = None
+
+def news(key):
+    with _news_lock:
+        return _news.get(key, 0)
+
+def notify(*keys):
+    with _news_lock:
+        if len(_news) > 100000:
+            _news.clear()   # a waiting request then sees a changed version and simply asks again
+        for key in keys:
+            _news[key] = _news.get(key, 0) + 1
+    loop = _news_loop
+    if loop is not None:
+        loop.call_soon_threadsafe(_wake, keys)
+
+def _wake(keys):
+    for key in keys:
+        for future in _news_waiters.pop(key, ()):
+            if not future.done():
+                future.set_result(None)
+
+class Wait(Exception):
+    """Raised by a handler with nothing new to report: the asynchronous front calls `again` once `key` has news after `version`
+    (read before the handler looked), or after WAIT_SECONDS. Under a plain WSGI server (the tests) `again` is called at once."""
+    def __init__(self, key, version, again):
+        super().__init__(key)
+        self.key, self.version, self.again = key, version, again
 
 def network():
     try:
@@ -100,7 +140,10 @@ def ferry_download(path, environ, start_response):
     start_response('200 OK', [('Content-Type', 'application/zip' if name.endswith('.zip') else 'application/gzip'), ('Content-Length', str(stat.st_size)),
                               ('Cache-Control', 'public, max-age=86400'), ('X-Content-Type-Options', 'nosniff')])
     wrapper = environ.get('wsgi.file_wrapper')
-    return wrapper(source, 1 << 16) if wrapper else iter(lambda: source.read(1 << 16), b'')
+    if wrapper:
+        return wrapper(source, 1 << 16)
+    with source:
+        return [source.read()]
 
 def check_grant(value, controller, target):
     try:
@@ -531,7 +574,9 @@ def dispatch(path, endpoint, data, ip, envelope):
         with database() as db:
             registered(db,endpoint)
             db.execute('UPDATE devices SET enabled=?,epoch=epoch+1,seen=? WHERE endpoint=?',(int(enabled),now,endpoint))
+            dropped=[r[0] for r in db.execute('SELECT id FROM requests WHERE target=?',(endpoint,))]
             db.execute('DELETE FROM requests WHERE target=?',(endpoint,))
+        notify('poll:'+endpoint,*('ticket:'+t for t in dropped))   # waiting controllers learn at once that their request is gone
         return {'enabled':enabled}
     if path == '/api/v1/offline':
         if data: raise ApiError(400,'离线请求不接受参数。')
@@ -542,25 +587,33 @@ def dispatch(path, endpoint, data, ip, envelope):
         return {'offline':True}
     if path == '/api/v1/poll':
         enabled=data.get('enabled')
-        if type(enabled) is not bool or 'enabled' not in data or not set(data)<={'enabled','name'}: raise ApiError(400,'无效访问开关；服务器不接收密码。')
+        if type(enabled) is not bool or 'enabled' not in data or not set(data)<={'enabled','name','known'}: raise ApiError(400,'无效访问开关；服务器不接收密码。')
         computer=data.get('name')
         if computer is not None and (not isinstance(computer,str) or not COMPUTER_NAME.fullmatch(computer)): raise ApiError(400,'计算机名无效。')
+        known=data.get('known',[])   # the requests this host already handles: only others are news
+        if not isinstance(known,list) or len(known)>16 or not all(isinstance(k,str) and TICKET.fullmatch(k) for k in known): raise ApiError(400,'已知请求列表无效。')
+        key='poll:'+endpoint; version=news(key)
+        def pending(db):
+            # The access switch is changed through /access only: a poll just reads it, so a late poll cannot undo a change.
+            row=registered(db,endpoint)
+            active=bool(enabled and row['enabled'])
+            tickets=db.execute('''SELECT r.id,r.caller AS controllerEndpoint,d.code AS controllerCode,
+              r.client_session AS clientSessionId,r.expires,r.proof FROM requests r JOIN devices d ON d.endpoint=r.caller
+              WHERE r.target=? AND r.status='pending' AND r.epoch=? AND r.expires>=? ORDER BY r.rowid LIMIT 16''',
+              (endpoint,row['epoch'],int(time.time()))).fetchall() if active else []
+            return {'enabled':active,'tickets':[{**dict(r),'proof':json.loads(r['proof'])} for r in tickets]}
         with database() as db:
             db.execute('BEGIN IMMEDIATE')
             row=registered(db,endpoint)
-            # Poll cannot re-enable server permission; /access is required.
-            active=bool(enabled and row['enabled'])
             db.execute('UPDATE devices SET seen=? WHERE endpoint=?',(now,endpoint))
             if computer is not None and computer!=row['name']:
                 db.execute('UPDATE devices SET name=? WHERE endpoint=?',(computer,endpoint))
-            if not enabled:
-                db.execute('UPDATE devices SET enabled=0 WHERE endpoint=?',(endpoint,))
-                db.execute('DELETE FROM requests WHERE target=?',(endpoint,))
             db.execute('DELETE FROM requests WHERE expires < ?',(now,))
-            tickets=db.execute('''SELECT r.id,r.caller AS controllerEndpoint,d.code AS controllerCode,
-              r.client_session AS clientSessionId,r.expires,r.proof FROM requests r JOIN devices d ON d.endpoint=r.caller
-              WHERE r.target=? AND r.status='pending' AND r.epoch=? ORDER BY r.rowid LIMIT 16''', (endpoint,row['epoch'])).fetchall() if active else []
-        return {'enabled':active,'tickets':[{**dict(r),'proof':json.loads(r['proof'])} for r in tickets]}
+            reply=pending(db)
+        if any(t['id'] not in known for t in reply['tickets']): return reply
+        def again():
+            with database() as db: return pending(db)
+        raise Wait(key,version,again)
     if path == '/api/v1/presence':
         peers=data.get('peers')
         if set(data)!={'peers'} or not isinstance(peers,list) or len(peers)>64: raise ApiError(400,'在线状态请求无效。')
@@ -602,10 +655,12 @@ def dispatch(path, endpoint, data, ip, envelope):
             try:
                 db.execute('INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,NULL)',(ticket,target_id,endpoint,session,target['epoch'],expires,'pending',json.dumps(envelope)))
             except sqlite3.IntegrityError: raise ApiError(409,'重复连接请求。')
+        notify('poll:'+target_id)   # after the commit: the host's waiting poll finds it
         return {'id':ticket,'endpoint':target_id,'code':code}
     match=re.fullmatch(r'/api/v1/tickets/([0-9a-f]{32})(/ready|/reject)?',path)
     if match:
         ticket,action=match.groups()
+        key='ticket:'+ticket; version=news(key)
         with database() as db:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM requests WHERE id=?',(ticket,)).fetchone()
@@ -630,11 +685,24 @@ def dispatch(path, endpoint, data, ip, envelope):
                     if set(data)!=fields:
                         raise ApiError(400,'无效会话响应；禁止发送密码或流量密钥。')
                     db.execute("UPDATE requests SET status='ready',offer=? WHERE id=?",(json.dumps(envelope),ticket))
-                return {'ok':True}
-            if endpoint!=row['caller']: raise ApiError(403,'无权读取此授权。')
-            result={'status':row['status']}
-            if row['status']=='ready': result['offer']=json.loads(row['offer'])
-            return result
+                answered=True
+            else:
+                if endpoint!=row['caller']: raise ApiError(403,'无权读取此授权。')
+                answered=False
+                result={'status':row['status']}
+                if row['status']=='ready': result['offer']=json.loads(row['offer'])
+        if answered:
+            notify(key)   # after the commit: the controller's waiting look sees the answer
+            return {'ok':True}
+        if result['status']!='pending': return result
+        def again():
+            with database() as db:
+                row=db.execute('SELECT status,offer FROM requests WHERE id=?',(ticket,)).fetchone()
+            if row is None: raise ApiError(410,'连接授权已过期，请重试。')
+            answer={'status':row['status']}
+            if row['status']=='ready': answer['offer']=json.loads(row['offer'])
+            return answer
+        raise Wait(key,version,again)
     raise ApiError(404,'接口不存在。')
 
 def application(environ,start_response):
@@ -666,19 +734,95 @@ def application(environ,start_response):
             # Caddy overwrites this header; the backend listens on loopback only.
             ip=environ.get('HTTP_X_REAL_IP') or environ.get('REMOTE_ADDR','unknown')
             endpoint,data,envelope=authenticate(path,environ['wsgi.input'].read(length),ip)
-            result=dispatch(path,endpoint,data,ip,envelope)
+            try: result=dispatch(path,endpoint,data,ip,envelope)
+            except Wait as wait:
+                if environ.get('ardui.async'): raise
+                result=wait.again()
     except ApiError as ex: status,result=ex.status,{'error':ex.message}
+    except Wait: raise   # the asynchronous front waits for news, then answers (see asgi)
     except Exception:
         # Never log request bodies, access passwords, signatures or session capabilities.
         import traceback
         traceback.print_exc()
         status,result=500,{'error':'服务暂时不可用。'}
+    return json_reply(status,result,start_response)
+
+def json_reply(status,result,start_response):
     body=json.dumps(result,ensure_ascii=False).encode()
     start_response(f'{status} {HTTPStatus(status).phrase}', [('Content-Type','application/json; charset=utf-8'),('Content-Length',str(len(body))),('Cache-Control','no-store'),('X-Content-Type-Options','nosniff')])
     return [body]
 
+# ---- the asynchronous front (ASGI, served by uvicorn) ------------------------------------------------------------------
+# The request handlers above stay synchronous (sqlite) and run in a thread pool; only waiting for news happens on the event loop,
+# so a host that waits for connection requests costs no thread.
+_pool = ThreadPoolExecutor(max_workers=32, thread_name_prefix='arduiserver')
+
+async def _waited(wait, environ):
+    """Wait until wait.key has news after wait.version (or WAIT_SECONDS), then answer with wait.again()."""
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    _news_waiters.setdefault(wait.key, set()).add(future)
+    try:
+        if news(wait.key) == wait.version:   # registered first, then checked: news between the handler's look and now is not lost
+            try: await asyncio.wait_for(asyncio.shield(future), WAIT_SECONDS)
+            except asyncio.TimeoutError: pass
+    finally:
+        waiters = _news_waiters.get(wait.key)
+        if waiters is not None:
+            waiters.discard(future)
+            if not waiters: _news_waiters.pop(wait.key, None)
+    reply = {}
+    def again():
+        try: status, result = 200, wait.again()
+        except ApiError as ex: status, result = ex.status, {'error': ex.message}
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            status, result = 500, {'error': '服务暂时不可用。'}
+        return b''.join(json_reply(status, result, lambda line, headers: reply.update(status=line, headers=headers)))
+    return await loop.run_in_executor(_pool, again), reply
+
+async def asgi(scope, receive, send):
+    global _news_loop
+    if scope['type'] == 'lifespan':
+        while True:
+            message = await receive()
+            if message['type'] == 'lifespan.startup':
+                _news_loop = asyncio.get_running_loop()
+                await send({'type': 'lifespan.startup.complete'})
+            elif message['type'] == 'lifespan.shutdown':
+                await send({'type': 'lifespan.shutdown.complete'})
+                return
+    if scope['type'] != 'http':
+        return
+    _news_loop = asyncio.get_running_loop()
+    body = bytearray()
+    while True:
+        message = await receive()
+        if message['type'] == 'http.disconnect':
+            return
+        body += message.get('body', b'')
+        if not message.get('more_body') or len(body) > 65536:
+            break
+    environ = {'REQUEST_METHOD': scope['method'], 'PATH_INFO': scope['path'], 'QUERY_STRING': scope['query_string'].decode('latin-1'),
+               'REMOTE_ADDR': (scope.get('client') or ('', 0))[0], 'wsgi.input': io.BytesIO(bytes(body)), 'ardui.async': True}
+    for name, value in scope['headers']:
+        name = name.decode('latin-1').upper().replace('-', '_'); value = value.decode('latin-1')
+        environ[name if name in ('CONTENT_TYPE', 'CONTENT_LENGTH') else 'HTTP_' + name] = value
+    reply = {}
+    def run():
+        chunks = application(environ, lambda line, headers: reply.update(status=line, headers=headers))
+        return b''.join(chunks)
+    try:
+        payload = await asyncio.get_running_loop().run_in_executor(_pool, run)
+    except Wait as wait:
+        payload, reply = await _waited(wait, environ)
+    await send({'type': 'http.response.start', 'status': int(reply['status'].split()[0]),
+                'headers': [(k.lower().encode('latin-1'), v.encode('latin-1')) for k, v in reply['headers']]})
+    await send({'type': 'http.response.body', 'body': payload})
+
 initialize()
 if __name__=='__main__':
-    # Local integration tests only; production runs behind Caddy using Gunicorn.
+    # Local integration tests only (no waiting: WSGI asks again at once); production runs uvicorn with asgi behind Caddy.
     from wsgiref.simple_server import make_server
     make_server('127.0.0.1',int(os.environ.get('ARDUI_PORT','8091')),application).serve_forever()

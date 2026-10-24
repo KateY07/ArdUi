@@ -31,7 +31,6 @@ sealed class DirectoryClient : IAsyncDisposable
     // Who is online, learned from the trusted server only; nothing here opens a connection to a device.
     readonly ConcurrentDictionary<string,(PresenceEntry Entry,DateTimeOffset At)> presence=new();
     DateTimeOffset presenceAt;
-    bool sendComputerName=true;
     Task loop = Task.CompletedTask;
     string code = "";
     bool online;
@@ -268,6 +267,7 @@ sealed class DirectoryClient : IAsyncDisposable
         var announced = false;
         while (!stop.IsCancellationRequested)
         {
+            var waited = false;
             try
             {
                 if (code.Length == 0)
@@ -284,6 +284,7 @@ sealed class DirectoryClient : IAsyncDisposable
                     { networkAt = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(55); Diagnostics.Log("network-refresh", ex.Message); }
                 }
                 await Poll(stop.Token);
+                waited = true;
                 Outdated = null;
                 // once the network's relays are known: measure the ArdFerry nodes from here and report to M
                 if (ferryTask == null && engine.Settings.Network != null)
@@ -315,23 +316,18 @@ sealed class DirectoryClient : IAsyncDisposable
             }
             catch (Exception ex)
             { online = false; Changed?.Invoke(); if (!announced) { Notice?.Invoke("网络不稳定，正在重试…"); engine.Events.Add("ERROR", "服务器", "无法连接可信服务器，每 3 秒重试一次：" + ex.Message); } announced = true; }
+            if (waited) continue;   // the server held the poll until there was news (or 12 s): ask again right away
             try { await Task.Delay(3000, stop.Token); } catch (OperationCanceledException) { break; }
         }
     }
     public async Task Poll(CancellationToken ct)
     {
-        // Serialize access changes with heartbeats: a stale disabled poll must not undo enable.
-        await edits.WaitAsync(ct);
-        try
+        // The server holds the poll until a connection request arrives that is not among `known` (the ones being handled here)
+        // or the access switch changes, or for 12 s. It only reads the switch (changed through /access), so this poll does not
+        // take the lock that access changes take: switching access is never kept waiting by it.
         {
-            PollReply reply;
-            try { reply = await Call<PollReply>("/api/v1/poll", sendComputerName ? new { enabled = Enabled, name = Environment.MachineName } : new { enabled = Enabled }, ct); }
-            catch (IOException ex) when (sendComputerName && ex.Message.Contains("无效访问开关"))
-            {
-                // A server from before computer names rejects the extra field; keep working without it.
-                sendComputerName = false;
-                reply = await Call<PollReply>("/api/v1/poll", new { enabled = Enabled }, ct);
-            }
+            var known = seen.Keys.Take(16).ToArray();
+            var reply = await Call<PollReply>("/api/v1/poll", new { enabled = Enabled, name = Environment.MachineName, known }, ct);
             if (!Enabled) return;
             var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             foreach (var old in seen.Where(p => p.Value < now).Select(p => p.Key).ToArray()) seen.Remove(old);
@@ -344,7 +340,6 @@ sealed class DirectoryClient : IAsyncDisposable
                 _ = task.ContinueWith(t => jobs.TryRemove(ticket.Id, out _), TaskScheduler.Default);
             }
         }
-        finally { edits.Release(); }
     }
     // Controllers that asked to connect and whose session is still being set up (shown as "connecting" before a session exists).
     readonly Dictionary<string, string> arriving = new();
@@ -361,10 +356,14 @@ sealed class DirectoryClient : IAsyncDisposable
                 throw new InvalidDataException("连接请求与设备签名不匹配。");
             if (!ClientVersion.Allowed(request.Client))
                 throw new InvalidDataException($"对方的 ArdUi 版本过旧（需要 {ClientVersion.Minimum} 或更高），已拒绝其接入。");
+            // the host's share of the set-up time, next to the controller's stages (Lookup, Verify, Signal, Link)
+            engine.Events.Add("INFO", "接入", ticket.ControllerCode + " · 收到连接请求");
             await EnsureNetwork(ct);
             var sessionId = await engine.AcceptServerSession(ticket, (request, token) => AuthorizePassword(ticket, request, token), ct);
+            engine.Events.Add("INFO", "接入", ticket.ControllerCode + " · 本机就绪");
             await Call<JsonElement>($"/api/v1/tickets/{ticket.Id}/ready",
                 new ServerOffer(sessionId, ticket.Id, ticket.ControllerEndpoint, engine.Id, ticket.ClientSessionId, ticket.Expires), ct);
+            engine.Events.Add("INFO", "接入", ticket.ControllerCode + " · 已通知 M");
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex)
@@ -559,7 +558,7 @@ sealed class DirectoryClient : IAsyncDisposable
             ServerOffer? offer = null;
             while (offer == null)
             {
-                await Task.Delay(1000, timeout.Token);
+                // held by the server until the host answers (or 12 s): no pause between the looks
                 var status = await Call<TicketReply>($"/api/v1/tickets/{request.RequestId}", new { }, timeout.Token);
                 if (status.Status == "rejected") throw new IOException("对端未接受连接，请检查允许访问开关。");
                 if (status.Status != "ready") continue;

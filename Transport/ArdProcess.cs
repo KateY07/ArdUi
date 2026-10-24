@@ -41,9 +41,14 @@ sealed class Child : IAsyncDisposable
     public string Network => path.Network;
     public double? PathRtt => path.Rtt;
     public event Action<string>? Output;
+    // The log file group ("ard " + device): every line is written, from the first one on; the start-up phase (until "relay
+    // online" / "READY:") is where connection set-up time goes, and nobody has subscribed to Output yet then.
+    public string? LogTag { get; }
     int disposed;
-    public Child(string exe, string cwd, params string[] args)
+    public Child(string exe, string cwd, params string[] args) : this(null, exe, cwd, args) { }
+    public Child(string? logTag, string exe, string cwd, params string[] args)
     {
+        LogTag = logTag;
         var start = new ProcessStartInfo(exe) { WorkingDirectory = cwd, UseShellExecute = false,
             CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
         start.Environment.Remove("RUST_LOG"); start.Environment["NO_COLOR"] = "1";
@@ -63,6 +68,7 @@ sealed class Child : IAsyncDisposable
                 if(line.Contains(signal,StringComparison.Ordinal))startupSignals.TryAdd(signal,0);
             lines.Enqueue(line); while (lines.Count > 100) lines.TryDequeue(out _);
             Diagnostics.Log("ard",line);
+            if(LogTag!=null)FileLog.Write(LogTag,line);
             path.Observe(line);
             if(line.Contains("relay online",StringComparison.Ordinal)||line.Contains("READY:",StringComparison.Ordinal)||line.Contains("CONNECTED",StringComparison.Ordinal)||line.Contains("network path selected",StringComparison.Ordinal))
                 Interlocked.Exchange(ref progressAt,Environment.TickCount64);
@@ -110,12 +116,12 @@ static class Ard
         if (p.ExitCode != 0) throw new IOException(await error);
         return Wire.Endpoint(await output);
     }
-    public static Child Start(string dir, bool host, int port, string peer, Settings settings) =>
+    public static Child Start(string dir, bool host, int port, string peer, Settings settings, string? logTag = null) =>
         settings.StaticRelay
-            ? new(Exe, dir, host ? "open" : "forward", port.ToString(), "to", Wire.Endpoint(peer),
+            ? new(logTag, Exe, dir, host ? "open" : "forward", port.ToString(), "to", Wire.Endpoint(peer),
                 "--relay", settings.Relay, "--relay-key", settings.RelayKey,
                 settings.DetailedArdDiagnostics?"-vv":"-v")
-            : new(Exe, dir, host ? "open" : "forward", port.ToString(), "to", Wire.Endpoint(peer),
+            : new(logTag, Exe, dir, host ? "open" : "forward", port.ToString(), "to", Wire.Endpoint(peer),
                 "--relay-directory", settings.DirectoryUrl, "--master", settings.MasterUrl, "--master-key", settings.MasterKey,
                 settings.DetailedArdDiagnostics?"-vv":"-v");
 }

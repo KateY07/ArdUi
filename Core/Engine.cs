@@ -73,7 +73,6 @@ sealed class Engine : IAsyncDisposable
     {
         session.Process.Output += line =>
         {
-            FileLog.Write("ard " + session.PeerId[..8], line);
             if (RelayName.Match(line) is { Success: true } relay) session.RelayName = relay.Groups[1].Success ? relay.Groups[1].Value : null;
             if (line.Contains(" WARN ", StringComparison.Ordinal) || line.Contains(" ERROR ", StringComparison.Ordinal)) Events.AddFromArd(line);
             if (line.Contains("CONNECTED", StringComparison.Ordinal) || line.Contains("network path selected", StringComparison.Ordinal) || line.Contains("READY:", StringComparison.Ordinal))
@@ -261,7 +260,7 @@ sealed class Engine : IAsyncDisposable
             Child? child=null;
             try
             {
-                child=Ard.Start(dir,host,port,remote,Settings);
+                child=Ard.Start(dir,host,port,remote,Settings,"ard "+peer[..8]);
                 await child.WaitFor(ready,ct);
                 return child;
             }

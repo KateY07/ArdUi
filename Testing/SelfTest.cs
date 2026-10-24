@@ -5,6 +5,9 @@ static class SelfTest
     public static async Task<int> Prototype()
     {
         var root = Path.Combine(Path.GetTempPath(), "ArdUi-prototype-" + Guid.NewGuid().ToString("N"));
+        // ARDUI_TEST_LOG=DIR keeps the run's log (both devices, every ARD line from start-up on) for timing analysis
+        var keepLog = Environment.GetEnvironmentVariable("ARDUI_TEST_LOG");
+        if (keepLog != null) FileLog.Start(root);
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(6));
         var ct = timeout.Token;
         var echo = new TcpListener(IPAddress.Loopback, 0); echo.Start();
@@ -106,9 +109,23 @@ static class SelfTest
             if(caller.Outgoing[host.Id].Forward(port).Port!=stablePort)throw new Exception("Local forwarding port changed across reconnect.");
             await VerifyFlow();Console.WriteLine("PASS: killed ARD child recovered automatically with the same local forwarding port.");
             var savedPeer=caller.State.Peers.Single();await cd.Pause(savedPeer);await host.Disconnect(caller.Id);
+            var reconnectWatch=System.Diagnostics.Stopwatch.StartNew();
             await cd.Connect(hd.Code,"",ct,enrolling:false);
+            Console.WriteLine($"TIME: authorized reconnect {reconnectWatch.Elapsed.TotalSeconds:F1} s");
             if (hostChecks != 2 || callerChecks != 1) throw new Exception("Authorized reconnect prompted again.");
             await VerifyFlow(); Console.WriteLine("PASS: authorized reconnect without enrollment password or consent.");
+            // A controller that vanishes without a goodbye (machine offline, ArdUi killed) is not waited for forever. (Here, where a
+            // session exists without a new enrollment: enrollment attempts are rate limited per device.)
+            Engine.IncomingRecoveryBudget=TimeSpan.FromSeconds(5);
+            if(!caller.Outgoing.TryRemove(host.Id,out var vanished))throw new Exception("Outgoing session missing.");
+            await vanished.DisposeAsync();   // no "bye": the host only sees its paths go
+            using(var abandon=CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                abandon.CancelAfter(TimeSpan.FromSeconds(60));
+                while(host.Incoming.ContainsKey(caller.Id))await Task.Delay(250,abandon.Token);
+            }
+            Engine.IncomingRecoveryBudget=TimeSpan.FromMinutes(2);
+            Console.WriteLine("PASS: an incoming session whose controller vanished without a goodbye ends after the recovery budget.");
             await hd.Revoke(caller.Id);
             if (host.Incoming.Count != 0 || hd.Controllers.Length != 0) throw new Exception("Revoke failed.");
             await cd.Pause(caller.State.Peers.Single());
@@ -119,26 +136,15 @@ static class SelfTest
             for(var round=1;round<=3;round++)
             {
                 Console.WriteLine($"TEST: repeated add round {round} connecting.");
+                var roundWatch=System.Diagnostics.Stopwatch.StartNew();
                 await cd.Connect(hd.Code,hd.AccessPassword,ct).WaitAsync(TimeSpan.FromSeconds(75),ct);
+                Console.WriteLine($"TIME: add round {round} connect {roundWatch.Elapsed.TotalSeconds:F1} s");
                 await VerifyFlow();
                 var saved=caller.State.Peers.Single();await cd.RemoveLocal(saved);
                 if(caller.State.Peers.Count!=0||caller.Outgoing.Count!=0)throw new Exception("Repeated local removal failed.");
                 Console.WriteLine($"TEST: repeated add round {round} removed.");
             }
             Console.WriteLine("PASS: three add, transfer, remove, and immediate re-add cycles.");
-            // A controller that vanishes without a goodbye (machine offline, ArdUi killed) is not waited for forever.
-            Engine.IncomingRecoveryBudget=TimeSpan.FromSeconds(5);
-            await cd.Connect(hd.Code,hd.AccessPassword,ct).WaitAsync(TimeSpan.FromSeconds(75),ct);
-            await VerifyFlow();
-            if(!caller.Outgoing.TryRemove(host.Id,out var vanished))throw new Exception("Outgoing session missing.");
-            await vanished.DisposeAsync();   // no "bye": the host only sees its paths go
-            using(var abandon=CancellationTokenSource.CreateLinkedTokenSource(ct))
-            {
-                abandon.CancelAfter(TimeSpan.FromSeconds(60));
-                while(host.Incoming.ContainsKey(caller.Id))await Task.Delay(250,abandon.Token);
-            }
-            Console.WriteLine("PASS: an incoming session whose controller vanished without a goodbye ends after the recovery budget.");
-            await cd.RemoveLocal(caller.State.Peers.Single());
             await hd.Revoke(caller.Id);
             await hd.SetAccess(false,ct);
             if (hd.Enabled || host.Incoming.Count != 0) throw new Exception("Disable failed.");
@@ -148,6 +154,13 @@ static class SelfTest
         finally
         {
             echo.Stop();
+            if (keepLog != null)
+            {
+                await Task.Delay(1500);   // the log writer flushes on its own pace
+                Directory.CreateDirectory(keepLog);
+                foreach (var file in Directory.GetFiles(Path.Combine(root, "logs"))) File.Copy(file, Path.Combine(keepLog, Path.GetFileName(file)), true);
+                Console.WriteLine("LOG: " + keepLog);
+            }
             if (Directory.Exists(root)) Directory.Delete(root,true);
         }
     }
