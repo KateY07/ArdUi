@@ -69,7 +69,9 @@ sealed record NetworkInfo(string RelayDirectory, string Master, string MasterKey
 
 sealed record SignedEnvelope(string Endpoint, long IssuedAt, string Nonce, string Payload, string Signature);
 sealed record MachineInfo(string Code, string Endpoint);
-sealed record ServerRequest(string Code, string TargetEndpoint, string SessionId, string RequestId, long Expires, string? Client = null);
+// The ArdFerry of a session: chosen by the controller from its own measurements, written into its signed request, used by both sides.
+sealed record FerryChoice(string Node, string Key, string[] Addresses);
+sealed record ServerRequest(string Code, string TargetEndpoint, string SessionId, string RequestId, long Expires, string? Client = null, FerryChoice? Ferry = null);
 sealed record ServerOffer(string SessionId, string RequestId, string ControllerEndpoint, string TargetEndpoint, string ClientSessionId, long Expires);
 sealed record ServerTicket(string Id, string ControllerEndpoint, string ControllerCode, string ClientSessionId, long Expires, SignedEnvelope Proof);
 sealed record PollReply(bool Enabled, ServerTicket[] Tickets);

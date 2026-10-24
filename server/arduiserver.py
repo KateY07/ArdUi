@@ -25,16 +25,17 @@ CODE = re.compile(r'[A-Z0-9]{6}\Z')
 ENDPOINT = re.compile(r'[0-9a-f]{64}\Z')
 TICKET = re.compile(r'[0-9a-f]{32}\Z')
 COMPUTER_NAME = re.compile(r'[^\x00-\x1f\x7f]{1,64}\Z')
-VERSION = 'v6.pre1'
+VERSION = 'v6.pre2'
 # Network probe (see probe_udp.py): this server only mints short-lived tokens, each bound to the caller's IP address.
 PROBE_KEY = os.environ.get('ARDUI_PROBE_KEY', DB + '.probe-key')
 PROBE_HOST = os.environ.get('ARDUI_PROBE_HOST', '')
 PROBE_PORT = int(os.environ.get('ARDUI_PROBE_PORT', '7843'))
 # Clients older than this are refused with 426 (the header is "v<major>.pre<n>", sent by ArdUi since v5.pre1; older clients send none).
-# v6 (v6.pre1) waits for news instead of polling every few seconds (WAIT_SECONDS below); older clients are not supported. ARDUI_MIN_CLIENT=v<major>.pre<n> overrides it (e.g. while a release is rolling out).
+# v6 waits for news instead of polling every few seconds (WAIT_SECONDS below); since v6.pre2 the controller names the session's
+# ArdFerry in its signed request (both sides use it). Older clients are not supported. ARDUI_MIN_CLIENT=v<major>.pre<n> overrides it (e.g. while a release is rolling out).
 CLIENT = re.compile(r'v(\d{1,3})\.pre(\d{1,3})\Z')
-_min = CLIENT.fullmatch(os.environ.get('ARDUI_MIN_CLIENT', 'v6.pre1'))
-MIN_CLIENT = (int(_min.group(1)), int(_min.group(2))) if _min else (6, 1)
+_min = CLIENT.fullmatch(os.environ.get('ARDUI_MIN_CLIENT', 'v6.pre2'))
+MIN_CLIENT = (int(_min.group(1)), int(_min.group(2))) if _min else (6, 2)
 MIN_TEXT = 'v%d.pre%d' % MIN_CLIENT
 # What this network's clients need besides this server: where M's relay directory and address discovery are, and M's key.
 # Written by the operator (selfhost.sh / deploy.sh); see ROLES.md.
@@ -636,7 +637,12 @@ def dispatch(path, endpoint, data, ip, envelope):
         target_id=text(data,'targetEndpoint',ENDPOINT)
         ticket=text(data,'requestId',TICKET)
         expires=data.get('expires')
-        fields={'code','sessionId','targetEndpoint','requestId','expires','client'}
+        fields={'code','sessionId','targetEndpoint','requestId','expires','client','ferry'}
+        ferry=data.get('ferry')   # the session's ArdFerry, chosen by the controller; the host checks the signed request itself
+        if (not isinstance(ferry,dict) or set(ferry)!={'node','key','addresses'} or not isinstance(ferry['node'],str) or not FERRY_NAME.fullmatch(ferry['node'])
+                or not isinstance(ferry['key'],str) or not re.fullmatch(r'spki:[0-9a-f]{2,512}',ferry['key']) or not isinstance(ferry['addresses'],list)
+                or not 1<=len(ferry['addresses'])<=8 or not all(isinstance(a,str) and len(a)<=64 for a in ferry['addresses'])):
+            raise ApiError(400,'连接请求没有有效的 ArdFerry。')
         if data.get('transport')=='easytier-v1': fields.add('transport')
         if type(expires) is not int or not now < expires <= now+360 or set(data)!=fields:
             raise ApiError(400,'连接请求无效；服务器不接收密码。')

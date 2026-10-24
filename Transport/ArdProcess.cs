@@ -116,12 +116,17 @@ static class Ard
         if (p.ExitCode != 0) throw new IOException(await error);
         return Wire.Endpoint(await output);
     }
-    public static Child Start(string dir, bool host, int port, string peer, Settings settings, string? logTag = null) =>
-        settings.StaticRelay
-            ? new(logTag, Exe, dir, host ? "open" : "forward", port.ToString(), "to", Wire.Endpoint(peer),
-                "--relay", settings.Relay, "--relay-key", settings.RelayKey,
-                settings.DetailedArdDiagnostics?"-vv":"-v")
-            : new(logTag, Exe, dir, host ? "open" : "forward", port.ToString(), "to", Wire.Endpoint(peer),
-                "--relay-directory", settings.DirectoryUrl, "--master", settings.MasterUrl, "--master-key", settings.MasterKey,
-                settings.DetailedArdDiagnostics?"-vv":"-v");
+    public static Child Start(string dir, bool host, int port, string peer, Settings settings, FerryChoice? ferry, string? logTag = null)
+    {
+        var verbosity = settings.DetailedArdDiagnostics ? "-vv" : "-v";
+        if (settings.StaticRelay)
+            return new(logTag, Exe, dir, host ? "open" : "forward", port.ToString(), "to", Wire.Endpoint(peer),
+                "--relay", settings.Relay, "--relay-key", settings.RelayKey, verbosity);
+        if (ferry == null) throw new IOException("没有选定 ArdFerry。");
+        // the session's single ArdFerry: no directory, no measuring, no switching (ard --help)
+        var args = new List<string> { host ? "open" : "forward", port.ToString(), "to", Wire.Endpoint(peer),
+            "--ferry", ferry.Node, "--ferry-key", ferry.Key, "--master", settings.MasterUrl, "--master-key", settings.MasterKey, verbosity };
+        foreach (var address in ferry.Addresses) { args.Add("--ferry-addr"); args.Add(address); }
+        return new(logTag, Exe, dir, args.ToArray());
+    }
 }

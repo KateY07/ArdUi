@@ -31,15 +31,46 @@ sealed class FerryMonitor
         }
     }
 
-    internal async Task Once(CancellationToken ct)
+    // the nodes of the last measurement, for choosing a session's ArdFerry
+    IReadOnlyList<Ferry> known = [];
+
+    async Task<(Ferry[] Ferries, Probe[] Probes)> MeasureAll(CancellationToken ct)
     {
-        if (engine.Settings.Network is not { } network) return;
+        if (engine.Settings.Network is not { } network) return ([], []);
         var ferries = await Directory(network, ct);
         // only entrances this machine can reach at all: a failure over IPv6 from a machine without IPv6 says nothing about the node
         var ipv6 = HasGlobalIPv6();
         var probes = await Task.WhenAll(ferries.Where(f => f.Available && (f.Family != "ipv6" || ipv6))
             .SelectMany(f => f.Urls.Select(url => Measure(f, url, ct))));
         Latest = probes.GroupBy(p => p.Node).ToDictionary(g => g.Key, g => (g.Any(p => p.Ok), Median(g.Where(p => p.Ok).Select(p => p.Ms))));
+        known = ferries;
+        return (ferries, probes);
+    }
+
+    // The session's ArdFerry: the fastest node that answered in the last measurement, with all of its published entrances (each
+    // side dials the ones it can). The controller chooses; the host uses the same one (see DirectoryClient).
+    public FerryChoice? Choose()
+    {
+        var best = Latest.Where(p => p.Value.Ok && p.Value.Ms != null).OrderBy(p => p.Value.Ms).Select(p => p.Key).FirstOrDefault();
+        if (best == null) return null;
+        var entries = known.Where(f => f.Node == best && f.Available).ToArray();
+        if (entries.Length == 0) return null;
+        var addresses = entries.SelectMany(f => f.Urls).Select(url => new Uri(url)).Select(uri => $"{uri.Host}:{uri.Port}").Distinct().Take(8).ToArray();
+        return new FerryChoice(best, "spki:" + entries[0].Spki, addresses);
+    }
+
+    // A choice right now: from the last measurement, or (right after start-up) from one made at once.
+    public async Task<FerryChoice?> ChooseNow(CancellationToken ct)
+    {
+        if (Choose() is { } choice) return choice;
+        await MeasureAll(ct);
+        return Choose();
+    }
+
+    internal async Task Once(CancellationToken ct)
+    {
+        if (engine.Settings.Network == null) return;
+        var (ferries, probes) = await MeasureAll(ct);
         var names = ferries.GroupBy(f => f.Node).ToDictionary(g => ServiceName(g.Key, g.First().Spki), g => g.Key);
         var sessions = engine.Outgoing.Values.Concat(engine.Incoming.Values).Where(s => s.Live && s.Network.Contains("中继", StringComparison.Ordinal))
             .Select(s => (Node: s.RelayName is { } name && names.TryGetValue(name, out var node) ? node : null, Session: s))

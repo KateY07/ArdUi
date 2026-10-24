@@ -352,6 +352,8 @@ sealed class DirectoryClient : IAsyncDisposable
         {
             if (!Enabled || ticket.Expires <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return;
             var request = Verify<ServerRequest>(ticket.Proof, "/api/v1/connect", Wire.Endpoint(ticket.ControllerEndpoint));
+            // the controller chose the session's ArdFerry and signed it into its request: this side uses the same one
+            var ferry = engine.Settings.StaticRelay ? null : CheckedFerry(request.Ferry);
             if (request.TargetEndpoint != engine.Id || request.Code != Code || request.SessionId != ticket.ClientSessionId || request.RequestId != ticket.Id || request.Expires != ticket.Expires)
                 throw new InvalidDataException("连接请求与设备签名不匹配。");
             if (!ClientVersion.Allowed(request.Client))
@@ -359,7 +361,7 @@ sealed class DirectoryClient : IAsyncDisposable
             // the host's share of the set-up time, next to the controller's stages (Lookup, Verify, Signal, Link)
             engine.Events.Add("INFO", "接入", ticket.ControllerCode + " · 收到连接请求");
             await EnsureNetwork(ct);
-            var sessionId = await engine.AcceptServerSession(ticket, (request, token) => AuthorizePassword(ticket, request, token), ct);
+            var sessionId = await engine.AcceptServerSession(ticket, ferry, (request, token) => AuthorizePassword(ticket, request, token), ct);
             engine.Events.Add("INFO", "接入", ticket.ControllerCode + " · 本机就绪");
             await Call<JsonElement>($"/api/v1/tickets/{ticket.Id}/ready",
                 new ServerOffer(sessionId, ticket.Id, ticket.ControllerEndpoint, engine.Id, ticket.ClientSessionId, ticket.Expires), ct);
@@ -490,6 +492,20 @@ sealed class DirectoryClient : IAsyncDisposable
         }
         finally { edits.Release(); }
     }
+    async Task<FerryChoice> ChooseFerry(CancellationToken ct)
+    {
+        await EnsureNetwork(ct);
+        var monitor = Ferries ?? new FerryMonitor(engine, (route, value, token) => Call<JsonElement>(route, value, token));
+        return await monitor.ChooseNow(ct) ?? throw new IOException("没有可用的 ArdFerry：刚测过的中转节点都连不上，请检查网络。");
+    }
+    static readonly Regex FerryNode = new(@"\A[A-Za-z0-9_-]{1,64}\z"), FerryKey = new(@"\Aspki:[0-9a-f]{2,512}\z");
+    static FerryChoice CheckedFerry(FerryChoice? ferry)
+    {
+        if (ferry == null || !FerryNode.IsMatch(ferry.Node) || !FerryKey.IsMatch(ferry.Key) || ferry.Addresses is not { Length: >= 1 and <= 8 }
+            || ferry.Addresses.Any(a => !System.Net.IPEndPoint.TryParse(a, out var e) || e.Port == 0))
+            throw new InvalidDataException("对方没有指定有效的 ArdFerry，请升级两端 ArdUi。");
+        return ferry;
+    }
     // Spawning ard.exe and the session directory work are synchronous at the start of a connection, so keep them off the UI thread.
     // Raised as a connection moves through its stages, for the progress display.
     public event Action<string,ConnectStage>? Stage;
@@ -552,7 +568,9 @@ sealed class DirectoryClient : IAsyncDisposable
         try
         {
             var local = await Ard.Identity(dir, timeout.Token);
-            var request = new ServerRequest(machine,target.Endpoint,local,Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow.AddSeconds(background?60:300).ToUnixTimeSeconds(),Program.WireVersion);
+            // the session's ArdFerry: this side chooses it from its own measurements; the host uses the same one
+            var ferry = engine.Settings.StaticRelay ? null : await ChooseFerry(timeout.Token);
+            var request = new ServerRequest(machine,target.Endpoint,local,Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow.AddSeconds(background?60:300).ToUnixTimeSeconds(),Program.WireVersion,ferry);
             Report(machine,ConnectStage.Signal);
             await Call<JsonElement>("/api/v1/connect", request, timeout.Token);
             ServerOffer? offer = null;
@@ -569,7 +587,7 @@ sealed class DirectoryClient : IAsyncDisposable
             }
             transferred = true;
             Report(machine,ConnectStage.Link);
-            await engine.ConnectServerSession(target, dir, offer, enrolling, password, timeout.Token);
+            await engine.ConnectServerSession(target, dir, offer, ferry, enrolling, password, timeout.Token);
         }
         finally { if (!transferred) try { Directory.Delete(dir, true); } catch (IOException) { } }
     }

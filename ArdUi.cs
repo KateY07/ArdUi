@@ -88,6 +88,8 @@ static class Program
                 return ConnectFlowTests.Run();
             if (args.Contains("--self-test"))
                 return SelfTest.RunAsync().GetAwaiter().GetResult();
+            if (args.Contains("--connect-test"))
+                return ConnectTiming.Run(args).GetAwaiter().GetResult();
             if (args.Contains("--prototype-test"))
                 return SelfTest.Prototype().GetAwaiter().GetResult();
             if (args.Contains("--overlay-test"))

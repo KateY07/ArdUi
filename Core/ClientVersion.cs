@@ -5,7 +5,7 @@
 // v5.5 (announced as v5.pre5) signs each session's key exchange with the device keys; older versions cannot, so they are turned away early.
 static class ClientVersion
 {
-    public const int MinMajor = 6, MinPre = 1;
+    public const int MinMajor = 6, MinPre = 2;
     public static string Minimum => $"v{MinMajor}.pre{MinPre}";
 
     public static bool Allowed(string? version)

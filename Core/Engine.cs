@@ -252,7 +252,7 @@ sealed class Engine : IAsyncDisposable
             text.Contains("timed out",StringComparison.OrdinalIgnoreCase)||
             Regex.IsMatch(text,@"os error \d+");
     }
-    async Task<Child> StartArdWithRetry(string peer,string dir,bool host,int port,string remote,string ready,CancellationToken ct)
+    async Task<Child> StartArdWithRetry(string peer,string dir,bool host,int port,string remote,string ready,FerryChoice? ferry,CancellationToken ct)
     {
         Exception? last=null;
         for(var attempt=1;attempt<=3;attempt++)
@@ -260,7 +260,7 @@ sealed class Engine : IAsyncDisposable
             Child? child=null;
             try
             {
-                child=Ard.Start(dir,host,port,remote,Settings,"ard "+peer[..8]);
+                child=Ard.Start(dir,host,port,remote,Settings,ferry,"ard "+peer[..8]);
                 await child.WaitFor(ready,ct);
                 return child;
             }
@@ -282,7 +282,7 @@ sealed class Engine : IAsyncDisposable
     }
     // Every session's key exchange is signed with this device's key and must be signed by the peer's (see OverlayIdentity).
     OverlayIdentity Identity(string peer)=>DirectoryApi?.OverlayIdentity(peer)??throw new InvalidOperationException("尚未连接可信服务器，无法建立会话。");
-    public async Task<string> AcceptServerSession(ServerTicket ticket, Func<PasswordRequest, CancellationToken, Task<Authorization?>> verifyPassword, CancellationToken ct)
+    public async Task<string> AcceptServerSession(ServerTicket ticket, FerryChoice? ferry, Func<PasswordRequest, CancellationToken, Task<Authorization?>> verifyPassword, CancellationToken ct)
     {
         using var operation=await operations.Enter("in:"+ticket.ControllerEndpoint,ct);ct=operation.Token;
         string? dir = null; Gateway? gateway = null; Child? child = null; Session? session = null;
@@ -298,7 +298,7 @@ sealed class Engine : IAsyncDisposable
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, token);
                 return await verifyPassword(password, linked.Token);
             });
-            child = await StartArdWithRetry(peer.Id,dir,true,gateway.Port,ticket.ClientSessionId,"relay online",ct);
+            child = await StartArdWithRetry(peer.Id,dir,true,gateway.Port,ticket.ClientSessionId,"relay online",ferry,ct);
             session = new Session(peer.Id, peer.Address, gateway.Port, capability, Settings.TcpPorts, Settings.UdpPorts, child, dir, Identity(peer.Id), gateway);
             session.OverlayReady+=()=>ConfigureOverlay(session);
             var attached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -335,7 +335,7 @@ sealed class Engine : IAsyncDisposable
             throw;
         }
     }
-    public async Task ConnectServerSession(MachineInfo target, string dir, ServerOffer offer, bool enrolling, string password, CancellationToken ct)
+    public async Task ConnectServerSession(MachineInfo target, string dir, ServerOffer offer, FerryChoice? ferry, bool enrolling, string password, CancellationToken ct)
     {
         using var operation=await operations.Enter("out:"+target.Endpoint,ct);ct=operation.Token;
         Child? child = null; Session? session = null;
@@ -344,7 +344,7 @@ sealed class Engine : IAsyncDisposable
         {
             var port = Wire.Port();
             Update(peer.Id, "正在建立经过身份签名的连接…");
-            child = await StartArdWithRetry(peer.Id,dir,false,port,offer.SessionId,"READY:",ct);
+            child = await StartArdWithRetry(peer.Id,dir,false,port,offer.SessionId,"READY:",ferry,ct);
             using var tcp = new TcpClient(); await tcp.ConnectAsync(IPAddress.Loopback, port, ct);
             var header = new byte[23]; "AUI1"u8.CopyTo(header); header[20] = 2;
             await tcp.GetStream().WriteAsync(header, ct);
