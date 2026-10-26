@@ -19,6 +19,26 @@ static class Preview
         }
         finally { window.Close(); }
     }
+    // `--render-update-preview DIR`: the guided-update card while this version is refused and downloading, and once a download is ready.
+    public static int RenderUpdate(string folder)
+    {
+        AppBuilder.Configure<App>().UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = false })
+            .UseSkia().SetupWithoutStarting();
+        Directory.CreateDirectory(folder);
+        var window = new MainWindow(true); window.Show();
+        try
+        {
+            foreach (var (name, urgent, phase) in new[] { ("update-downloading.png", true, Updater.Phase.Downloading), ("update-ready.png", false, Updater.Phase.Ready) })
+            {
+                window.ShowUpdate(urgent, phase, "v6.3", 6_815_744, 16_500_834, null);
+                Dispatcher.UIThread.RunJobs(); window.UpdateLayout(); Dispatcher.UIThread.RunJobs();
+                using var bitmap = window.CaptureRenderedFrame() ?? throw new IOException("无法渲染界面。");
+                bitmap.Save(Path.Combine(folder, name));
+            }
+            return 0;
+        }
+        finally { window.Close(); }
+    }
     static void VerifyConfirmation(MainWindow owner)
     {
         var method=typeof(MainWindow).GetMethod("ConfirmPair",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance)!;

@@ -20,9 +20,11 @@
 #   --probe-port N    first UDP port of the probe (it uses N and N+1, default 7843); open both in your firewall / cloud security group
 #   --probe-host H    the host name clients use for the probe (default: the --domain)
 #   The whole M is installed: besides the device directory, M's ArdFerry directory and its signaling / address discovery,
-#   from the M package of the ArdUi release (ardui-m-linux-x86_64.tar.gz, checked against the SHA-256 pinned below).
+#   from the M package of the ArdUi release (ardui-m-linux-x86_64.tar.gz, checked against the SHA-256 pinned below), which also
+#   carries that release's ArdUi installer: this M offers it to its clients (guided updates).
 #   --m-package FILE  use this already downloaded M package (servers that cannot reach GitHub)
 #   --m-bundle DIR    use the M parts from DIR instead: ard-relay, ard-relay-admission, master.py, ferry_identity.py
+#                     (and client/ArdUi-vX_setup.exe, the installer this M offers its clients for guided updates)
 #   --no-m            install only the device directory (clients can then register but not connect; see ROLES.md)
 #   --m-identity FILE use this M identity (PKCS#8 DER private key) instead of making a new one, when moving an existing M
 #   --m-host H        host name or address that clients and ArdFerry nodes use for the parts above (default: the --domain)
@@ -131,9 +133,9 @@ fi
 # Static builds of ard-relay (signaling, address discovery) and ard-relay-admission (the ArdFerry probe), with master.py and
 # ferry_identity.py, built from the ard2 sources of this release. The SHA-256 is pinned here, so a download is accepted only if it
 # is exactly the published package.
-M_RELEASE=v6.2
+M_RELEASE=v6.3
 M_PACKAGE_NAME=ardui-m-linux-x86_64.tar.gz
-M_PACKAGE_SHA256=b423f6c5a8480537f542e2774ebfbba22c18dfb8b21bfa4fb62ee86382c9b163
+M_PACKAGE_SHA256=578001bc05ab5e4dbca81f21b59c527444dfaf62426dc98b4752f59383211a4b
 if ! $NO_M && [ -z "$M_BUNDLE" ]; then
   case "$(uname -m)" in x86_64|amd64) ;; *) die "the M package is built for x86_64 only; on $(uname -m) give --m-bundle DIR (or --no-m)";; esac
   say "getting the M package ($M_PACKAGE_NAME)"
@@ -185,6 +187,22 @@ for script in ardferry.sh ardferry.ps1; do
   fi
   rm -f "$ftmp"
 done
+# The ArdUi installer that comes with the M package (client/ArdUi-vX_setup.exe), offered to this M's clients for guided updates: they
+# download it from here, check its size and SHA-256 against release.json, and ask the person before installing. Nothing is fetched.
+run install -d -m 755 "$APP/client"
+if [ -n "$M_BUNDLE" ] && ! $DRY; then
+  client=$(ls "$M_BUNDLE"/client/ArdUi-v*_setup.exe 2>/dev/null | head -n 1 || true)
+  if [ -n "$client" ]; then
+    name=$(basename "$client"); version=${name#ArdUi-}; version=${version%_setup.exe}
+    printf '%s' "$version" | grep -qE '^v[0-9]{1,3}\.(pre)?[0-9]{1,3}$' || die "$name: not an ArdUi installer name"
+    rm -f "$APP/client/"ArdUi-*_setup.exe "$APP/client/release.json"
+    install -m 644 "$client" "$APP/client/$name"
+    printf '{"version": "%s", "file": "%s", "size": %s, "sha256": "%s"}\n' "$version" "$name" "$(stat -c %s "$client")" "$(sha256sum "$client" | cut -d' ' -f1)" \
+      > "$APP/client/release.json.tmp"
+    chmod 644 "$APP/client/release.json.tmp"; mv "$APP/client/release.json.tmp" "$APP/client/release.json"
+    echo "ArdUi installer for guided updates: $name"
+  else warn "the M parts have no client/ArdUi-vX_setup.exe: this M offers its clients no update"; fi
+fi
 for spec in iroh-relay-v1.1.0-x86_64-unknown-linux-musl.tar.gz:9a68108b824e4164ad2eec729cf0e8167e4cb50581cb745a242bace135df7614 \
             iroh-relay-v1.1.0-aarch64-unknown-linux-musl.tar.gz:1b4261b6dd0d17ae9a7516aa6d122b296a77678bac174ce30262702c9f91cb00 \
             iroh-relay-v1.1.0-x86_64-pc-windows-msvc.zip:052bd32704afcb4492a0cd8e619e1bb47c69cbe8ecaa89907c22033634b3da1c; do

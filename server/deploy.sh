@@ -2,7 +2,7 @@
 # Update the official M (NJ, f.visnova.cn) the same way a self-hoster installs one: selfhost.sh in --http-only mode behind the Caddy
 # that NJ already runs. M is one installation (ROLES.md): device directory, network probe, ArdFerry directory, signaling and address
 # discovery. Copy selfhost.sh, server/arduiserver.py and server/probe_udp.py to /tmp first, with the release's M package
-# ardui-m-linux-x86_64.tar.gz (NJ cannot always reach GitHub; selfhost.sh checks its pinned SHA-256), with ardferry.sh and ardferry.ps1 (the one-step ArdFerry installers this M hands out) and, if NJ cannot reach GitHub,
+# ardui-m-linux-x86_64.tar.gz (NJ cannot always reach GitHub; selfhost.sh checks its pinned SHA-256; it carries the ArdUi installer too), with ardferry.sh and ardferry.ps1 (the one-step ArdFerry installers this M hands out) and, if NJ cannot reach GitHub,
 # the official iroh-relay-v1.1.0 archives (*-linux-musl.tar.gz, *-windows-msvc.zip), then run this as root. Rollback: /root/m-rollback-<stamp>.sh (written below).
 set -eu
 health() { curl -fsS -m 10 https://f.visnova.cn/api/health; }

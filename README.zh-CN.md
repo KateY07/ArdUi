@@ -20,7 +20,7 @@
 
 **[网页介绍与演示](https://katey07.github.io/ArdUi/)** · **[下载](https://github.com/KateY07/ArdUi/releases)** · [自托管](#自托管) · [历史设计文档](docs/DESIGN-v2.md)
 
-当前版本：v6.2。官方服务器拒绝 v6.2（v6.pre2）以下的客户端：从 v6.2 起，会话双方使用主控端选定的同一个 ArdFerry，在慢速网络上建立连接的时间再缩短约一半。
+当前版本：v6.3。官方服务器拒绝 v6.2（v6.pre2）以下的客户端：从 v6.2 起，会话双方使用主控端选定的同一个 ArdFerry，在慢速网络上建立连接的时间再缩短约一半。
 
 ## 简介
 
@@ -73,7 +73,7 @@ curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | su
 - `/etc/ardui/network.json`，告诉客户端和 ArdFerry 上述服务在哪里。
 
 说明：
-- 这些组件来自发布页附带的 **M 包** `ardui-m-linux-x86_64.tar.gz`：静态编译的 `ard-relay`、`ard-relay-admission`（任何 x86_64 Linux 都能运行），以及 `master.py`、`ferry_identity.py`。脚本会自动下载，只有 SHA-256 与脚本里固定的值一致才会安装。连不上 GitHub 的服务器：在别处下载后加 `--m-package 文件`。
+- 这些组件来自发布页附带的 **M 包** `ardui-m-linux-x86_64.tar.gz`：静态编译的 `ard-relay`、`ard-relay-admission`（任何 x86_64 Linux 都能运行），`master.py`、`ferry_identity.py`，以及同一版本的 ArdUi 安装包，由 M 提供给它的客户端：有新版本时，ArdUi 在后台从 M 下载，核对大小和 SHA-256，下载完询问用户是否安装（不会自行安装）。脚本会自动下载，只有 SHA-256 与脚本里固定的值一致才会安装。连不上 GitHub 的服务器：在别处下载后加 `--m-package 文件`。
 - 防火墙需另外放行 TCP 8080，以及 TCP 和 UDP 7842。
 - 面向公网的进程拿不到 M 的密钥；只有 `arduiserver-control` 和 HTTPS 前端持有（见 [ROLES.md](ROLES.md)）。
 - ArdFerry 节点用你的 M 提供的一键脚本加入：Linux 上 `curl -fsSL https://你的域名/ardferry.sh | sudo bash`，Windows 上 `& ([scriptblock]::Create((irm https://你的域名/ardferry.ps1)))`。任何人也可以用 `f.visnova.cn` 以同样方式为官方网络增加 ArdFerry。

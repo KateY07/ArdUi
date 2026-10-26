@@ -144,7 +144,7 @@ sealed partial class MainWindow : Window
             Children={new Logo(72){Animate=true,HorizontalAlignment=HorizontalAlignment.Center},T_("正在连接网络…")}};
         connectingOverlay.IsVisible=!previewMode;
         titleBar=bar;SetupAttention(!previewMode&&Motion.Enabled);
-        Content=new Grid{Children={Chrome.Backdrop(!previewMode),scrim,pageArea,connectingOverlay,bar,inviteOverlay,BuildChat(),BuildCallBanner(),approvalOverlay,toastHost}};
+        Content=new Grid{Children={Chrome.Backdrop(!previewMode),scrim,pageArea,connectingOverlay,bar,inviteOverlay,BuildChat(),BuildCallBanner(),BuildUpdate(),approvalOverlay,toastHost}};
         ToolTip.SetTip(endpoint,"本机永久 EndpointId，用于首次连接时核对身份。");
         Opened += async (_,_) =>
         {
@@ -168,7 +168,7 @@ sealed partial class MainWindow : Window
                 directory.ConfirmSession=async(pair,ct)=>await Dispatcher.UIThread.InvokeAsync(()=>ConfirmSession(pair,ct));
                 directory.Changed+=RequestRefresh;
                 directory.Notice+=message=>Dispatcher.UIThread.Post(()=>Say(message));
-                StartIsland();
+                StartIsland();StartUpdater(settings);
                 allow.IsChecked=directory.Enabled;identityCard.IsVisible=directory.Enabled;allow.OnContent=allow.OffContent="允许被控";allow.IsEnabled=true;ready=true;directory.Start();passwordTimer.Start();UpdatePassword();Say("正在连接网络…");
             });
         };
@@ -178,7 +178,7 @@ sealed partial class MainWindow : Window
             if(!previewMode&&!exiting&&!closing&&e.CloseReason==WindowCloseReason.WindowClosing)
             {e.Cancel=true;HideToTray();return;}
             e.Cancel=true;if(closing)return;closing=true;IsEnabled=false;
-            try{island?.Shutdown();LocalInput.Stop();passwordTimer.Stop();undoTimer.Stop();if(directory!=null)await directory.DisposeAsync();if(engine!=null)await engine.DisposeAsync();}
+            try{island?.Shutdown();LocalInput.Stop();passwordTimer.Stop();undoTimer.Stop();if(updater!=null)await updater.DisposeAsync();if(directory!=null)await directory.DisposeAsync();if(engine!=null)await engine.DisposeAsync();}
             finally{closed=true;Close();}
         };
         if(preview)
@@ -572,6 +572,7 @@ sealed partial class MainWindow : Window
             netDot.Fill=directory.Online?Online:directory.Outdated!=null?Look.Accent:Relay;
             netText.Text=directory.Online?"在线":directory.Outdated!=null?"版本过旧，请升级 ArdUi":"正在连接网络…";
             ToolTip.SetTip(netText,directory.Outdated);
+            UpdateUpdate();
             RefreshHost();
             UpdatePassword();UpdateConnecting();
             Title="ArdUi "+Program.Version+(directory.Enabled&&directory.Code.Length!=0?" · "+directory.Code:"");

@@ -20,7 +20,7 @@ High-performance remote access for Windows. Peer-to-peer and end-to-end encrypte
 
 **[Website](https://katey07.github.io/ArdUi/)** · **[Download](https://github.com/KateY07/ArdUi/releases)** · [Self-hosting](#self-hosting) · [Historical design notes (Chinese)](docs/DESIGN-v2.md)
 
-Current version: v6.2. The official server refuses clients older than v6.2 (v6.pre2): since v6.2 both sides of a session meet on one ArdFerry chosen by the controller, which roughly halves the time to connect again on slow networks.
+Current version: v6.3. The official server refuses clients older than v6.2 (v6.pre2): since v6.2 both sides of a session meet on one ArdFerry chosen by the controller, which roughly halves the time to connect again on slow networks.
 
 ## Why ArdUi
 
@@ -80,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | su
 - `/etc/ardui/network.json`, which tells clients and ArdFerry nodes where all of this is.
 
 Details:
-- These parts come from the **M package** attached to the release, `ardui-m-linux-x86_64.tar.gz`: static builds of `ard-relay` and `ard-relay-admission` (any x86_64 Linux) with `master.py` and `ferry_identity.py`. The script downloads it and accepts it only if its SHA-256 is the one pinned in the script. Servers that cannot reach GitHub: download it elsewhere and add `--m-package FILE`.
+- These parts come from the **M package** attached to the release, `ardui-m-linux-x86_64.tar.gz`: static builds of `ard-relay` and `ard-relay-admission` (any x86_64 Linux) with `master.py` and `ferry_identity.py`, and the ArdUi installer of the same release, which M offers its clients: when a new version is out, ArdUi downloads it from M in the background, checks its size and SHA-256, and asks before installing (nothing is installed by itself). The script downloads it and accepts it only if its SHA-256 is the one pinned in the script. Servers that cannot reach GitHub: download it elsewhere and add `--m-package FILE`.
 - Open TCP 8080 and TCP+UDP 7842 as well.
 - The processes facing the public never hold M's key; only `arduiserver-control` and the HTTPS front do (see [ROLES.md](ROLES.md)).
 - ArdFerry nodes join your network in one step, with the installer your M hands out: `curl -fsSL https://your-domain/ardferry.sh | sudo bash` on Linux, `& ([scriptblock]::Create((irm https://your-domain/ardferry.ps1)))` on Windows. Anyone can add capacity to the official network the same way with `f.visnova.cn`.

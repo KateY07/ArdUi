@@ -68,6 +68,8 @@ static class Program
                 return RtcTests.Host(args).GetAwaiter().GetResult();
             if (args.Contains("--rtc-join"))
                 return RtcTests.Join(args).GetAwaiter().GetResult();
+            if (args.Contains("--update-test"))
+                return UpdateTests.Run();
             if (args.Contains("--i18n-test"))
                 return LocTests.Run();
             if (args.Contains("--voice-test"))
@@ -98,6 +100,8 @@ static class Program
                 return FrdTest.Run(args).GetAwaiter().GetResult();
             if (args.Length == 2 && args[0] == "--render-preview")
                 return Preview.Render(args[1]);
+            if (args.Length == 2 && args[0] == "--render-update-preview")
+                return Preview.RenderUpdate(args[1]);
             if (args.Length == 2 && args[0] == "--render-island")
                 return IslandPreview.Render(args[1]);
             if (args.Length == 2 && args[0] == "--render-host-preview")

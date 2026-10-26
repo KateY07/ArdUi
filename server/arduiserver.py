@@ -25,7 +25,7 @@ CODE = re.compile(r'[A-Z0-9]{6}\Z')
 ENDPOINT = re.compile(r'[0-9a-f]{64}\Z')
 TICKET = re.compile(r'[0-9a-f]{32}\Z')
 COMPUTER_NAME = re.compile(r'[^\x00-\x1f\x7f]{1,64}\Z')
-VERSION = 'v6.pre2'
+VERSION = 'v6.3'
 # Network probe (see probe_udp.py): this server only mints short-lived tokens, each bound to the caller's IP address.
 PROBE_KEY = os.environ.get('ARDUI_PROBE_KEY', DB + '.probe-key')
 PROBE_HOST = os.environ.get('ARDUI_PROBE_HOST', '')
@@ -145,6 +145,81 @@ def ferry_download(path, environ, start_response):
         return wrapper(source, 1 << 16)
     with source:
         return [source.read()]
+
+# The newest ArdUi installer, for guided updates: ArdUi asks GET /api/v1/release, downloads the file from this M in the background
+# (GET /api/v1/release/<file>, resumable), checks size and SHA-256 and asks the person before installing. selfhost.sh puts the
+# installer and release.json ({"version", "file", "size", "sha256"}) here; without them M announces nothing. M is trusted (HTTPS).
+CLIENT_FILES = os.environ.get('ARDUI_CLIENT_FILES', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'client'))
+CLIENT_RELEASE = re.compile(r'v\d{1,3}\.(?:pre)?\d{1,3}')
+CLIENT_DOWNLOADS = int(os.environ.get('ARDUI_CLIENT_DOWNLOADS', '16'))   # at once; more are asked to come back later
+_client_checked = {}
+_client_active = [0]
+_client_lock = threading.Lock()
+
+def client_release():
+    """The installer M offers, or None: release.json is checked against the file itself (size and SHA-256, cached per size and mtime)."""
+    try:
+        with open(os.path.join(CLIENT_FILES, 'release.json'), encoding='utf-8') as source:
+            info = json.load(source)
+        version, name, size, digest = info['version'], info['file'], info['size'], info['sha256']
+        if (not isinstance(version, str) or not CLIENT_RELEASE.fullmatch(version) or name != f'ArdUi-{version}_setup.exe'
+                or type(size) is not int or not 0 < size <= 1 << 28 or not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest)):
+            return None
+        file = os.path.join(CLIENT_FILES, name)
+        stat = os.stat(file)
+        if stat.st_size != size: return None
+        if _client_checked.get(name) != (stat.st_size, stat.st_mtime, digest):
+            hash = hashlib.sha256()
+            with open(file, 'rb') as source:
+                for chunk in iter(lambda: source.read(1 << 20), b''): hash.update(chunk)
+            if hash.hexdigest() != digest: return None
+            _client_checked[name] = (stat.st_size, stat.st_mtime, digest)
+        return {'version': version, 'file': name, 'size': size, 'sha256': digest}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+class FileChunks:
+    """A part of a file, read in 64 KiB pieces: WSGI iterates it, the asynchronous front streams it (see asgi)."""
+    def __init__(self, source, start, length):
+        self.source, self.left, self.closed = source, length, False
+        source.seek(start)
+    def read(self):
+        if self.left <= 0: return b''
+        chunk = self.source.read(min(1 << 16, self.left)); self.left -= len(chunk)
+        if not chunk: self.left = 0
+        return chunk
+    def __iter__(self):
+        while chunk := self.read(): yield chunk
+    def close(self):
+        if self.closed: return
+        self.closed = True
+        self.source.close()
+        with _client_lock: _client_active[0] -= 1
+
+def client_download(name, environ, start_response):
+    limit('client:' + (environ.get('HTTP_X_REAL_IP') or environ.get('REMOTE_ADDR', 'unknown')), 120, 3600)   # resumed pieces count too
+    release = client_release()
+    if release is None or name != release['file']: raise ApiError(404, '没有这个文件。')
+    size = release['size']; start = 0; end = size - 1
+    match = re.fullmatch(r'bytes=(\d{1,12})-(\d{0,12})', environ.get('HTTP_RANGE', ''))
+    if match:
+        start = int(match.group(1)); end = min(int(match.group(2)), size - 1) if match.group(2) else size - 1
+        if start >= size or end < start:
+            start_response('416 Range Not Satisfiable', [('Content-Range', f'bytes */{size}'), ('Content-Length', '0')])
+            return [b'']
+    with _client_lock:
+        if _client_active[0] >= CLIENT_DOWNLOADS: raise ApiError(503, '下载的人较多，请稍后再试。')
+        _client_active[0] += 1
+    try: source = open(os.path.join(CLIENT_FILES, name), 'rb')
+    except OSError:
+        with _client_lock: _client_active[0] -= 1
+        raise ApiError(404, '没有这个文件。')
+    headers = [('Content-Type', 'application/vnd.microsoft.portable-executable'), ('Content-Length', str(end - start + 1)),
+               ('Accept-Ranges', 'bytes'), ('Cache-Control', 'no-store'), ('X-Content-Type-Options', 'nosniff'),
+               ('Content-Disposition', f'attachment; filename="{name}"')]
+    if match: headers.append(('Content-Range', f'bytes {start}-{end}/{size}'))
+    start_response('206 Partial Content' if match else '200 OK', headers)
+    return FileChunks(source, start, end - start + 1)
 
 def check_grant(value, controller, target):
     try:
@@ -729,6 +804,13 @@ def application(environ,start_response):
                 start_response('200 OK',[('Content-Type','text/html; charset=utf-8'),('Content-Length',str(len(body))),('Cache-Control','no-store'),('X-Content-Type-Options','nosniff')])
                 return [body]
             result=view
+        elif path=='/api/v1/release' and environ['REQUEST_METHOD']=='GET':
+            # not behind the version gate: a client refused for being too old must still find the new one
+            limit('release:'+(environ.get('HTTP_X_REAL_IP') or environ.get('REMOTE_ADDR','unknown')),60,3600)
+            release=client_release()
+            result={'available':False} if release is None else dict(release,available=True,url='/api/v1/release/'+release['file'])
+        elif path.startswith('/api/v1/release/') and environ['REQUEST_METHOD']=='GET':
+            return client_download(path[len('/api/v1/release/'):],environ,start_response)
         elif (path in FERRY_SCRIPTS or path.startswith('/ardferry/')) and environ['REQUEST_METHOD']=='GET':
             return ferry_download(path,environ,start_response)
         elif environ['REQUEST_METHOD']!='POST': raise ApiError(405,'此接口仅接受 POST。')
@@ -818,14 +900,24 @@ async def asgi(scope, receive, send):
     reply = {}
     def run():
         chunks = application(environ, lambda line, headers: reply.update(status=line, headers=headers))
-        return b''.join(chunks)
+        return chunks if isinstance(chunks, FileChunks) else b''.join(chunks)
+    loop = asyncio.get_running_loop()
     try:
-        payload = await asyncio.get_running_loop().run_in_executor(_pool, run)
+        payload = await loop.run_in_executor(_pool, run)
     except Wait as wait:
         payload, reply = await _waited(wait, environ)
-    await send({'type': 'http.response.start', 'status': int(reply['status'].split()[0]),
-                'headers': [(k.lower().encode('latin-1'), v.encode('latin-1')) for k, v in reply['headers']]})
-    await send({'type': 'http.response.body', 'body': payload})
+    try:
+        await send({'type': 'http.response.start', 'status': int(reply['status'].split()[0]),
+                    'headers': [(k.lower().encode('latin-1'), v.encode('latin-1')) for k, v in reply['headers']]})
+        if not isinstance(payload, FileChunks):
+            await send({'type': 'http.response.body', 'body': payload})
+            return
+        # an installer: streamed piece by piece, never held in memory as a whole
+        while chunk := await loop.run_in_executor(_pool, payload.read):
+            await send({'type': 'http.response.body', 'body': chunk, 'more_body': True})
+        await send({'type': 'http.response.body', 'body': b''})
+    finally:
+        if isinstance(payload, FileChunks): payload.close()
 
 initialize()
 if __name__=='__main__':
