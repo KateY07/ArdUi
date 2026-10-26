@@ -679,7 +679,7 @@ sealed partial class MainWindow : Window
             _=FrdRuntime.Resolve(engine!.Settings.FrdPath);
             await directory!.Connect(peer.Code,"",enrolling:false);
             if(!engine.Outgoing[peer.Id].Perms.HasFlag(Perm.Frd))throw new IOException("被控端未允许 FRD。");
-            await engine.Outgoing[peer.Id].OpenFrd(CancellationToken.None);
+            await engine.Outgoing[peer.Id].OpenFrd(CancellationToken.None,title:PeerLabel(peer)+" · "+Loc.T("远程桌面")+" - ArdUi");   // FRD gets the language ArdUi shows
             Say("FRD 已启动，正在通过加密连接建立桌面。");
         }));
         launchers.Add(frd);

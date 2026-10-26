@@ -171,16 +171,25 @@ sealed class FrdOpened : IAsyncDisposable
     FrdOpened(FrdProcess process,FrdForwarder proxy,Session session,FrdOffer offer)
     {this.process=process;this.proxy=proxy;this.session=session;this.offer=offer;proxy.Failed=Report;Completion=Monitor();}
     void Report(string message){if(Interlocked.Exchange(ref failed,1)==0)session.ReportFrdError(message);}
-    public static async Task<FrdOpened> Start(Session session,string exe,FrdOffer offer,int testSeconds,string? report)
+    public static async Task<FrdOpened> Start(Session session,string exe,FrdOffer offer,int testSeconds,string? report,string? title=null)
     {
         var proxy=new FrdForwarder(session,offer.Port,session.Token);
         try
         {
             var args=new List<string>{"--connect","127.0.0.1","--port",proxy.Port.ToString()};
+            if(WindowTitle(title) is{}text)args.AddRange(["--title",text]);   // FRD v5.5 and later: the viewer window says which device it shows
             if(testSeconds>0){args.AddRange(["--test-seconds",testSeconds.ToString(),"--report",Path.GetFullPath(report!)]);}
             return new(new FrdProcess(exe,offer.Token,args.ToArray()),proxy,session,offer);
         }
         catch{await FrdRuntime.Cleanup("关闭 FRD 主控代理",proxy.DisposeAsync,session.ReportFrdError);throw;}
+    }
+    // What FRD accepts for --title: 1–200 characters, no control characters.
+    internal static string? WindowTitle(string? title)
+    {
+        if(title==null)return null;
+        var text=new string(title.Where(c=>!char.IsControl(c)).ToArray()).Trim();
+        if(text.Length>200)text=text[..200];
+        return text.Length==0?null:text;
     }
     async Task Monitor()
     {

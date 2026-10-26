@@ -129,7 +129,7 @@ sealed class Session : IAsyncDisposable
         }
         finally{frdGate.Release();}
     }
-    public async Task<FrdOpened> OpenFrd(CancellationToken ct,int testSeconds=0,string? report=null)
+    public async Task<FrdOpened> OpenFrd(CancellationToken ct,int testSeconds=0,string? report=null,string? title=null)
     {
         if(Host||Overlay==null)throw new IOException("请先建立已授权连接。");
         using var lifetime=CancellationTokenSource.CreateLinkedTokenSource(ct,Token);ct=lifetime.Token;
@@ -144,7 +144,7 @@ sealed class Session : IAsyncDisposable
             if(offer.Port is <1 or >65535||!Regex.IsMatch(offer.Id,@"\A[0-9a-f]{32}\z")||!Regex.IsMatch(offer.Token,@"\A[0-9a-f]{64}\z"))
                 throw new IOException("FRD 会话参数无效。");
             Volatile.Write(ref frdPort,offer.Port);
-            try{frdClient=await FrdOpened.Start(this,executable,offer,testSeconds,report);return frdClient;}
+            try{frdClient=await FrdOpened.Start(this,executable,offer,testSeconds,report,title);return frdClient;}
             catch
             {
                 Volatile.Write(ref frdPort,0);
