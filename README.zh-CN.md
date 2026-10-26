@@ -20,7 +20,7 @@
 
 **[网页介绍与演示](https://katey07.github.io/ArdUi/)** · **[下载](https://github.com/KateY07/ArdUi/releases)** · [自托管](#自托管) · [历史设计文档](docs/DESIGN-v2.md)
 
-当前版本：v6.pre2（预览版）。官方服务器拒绝 v6.pre2 以下的客户端：从 v6.pre2 起，会话双方使用主控端选定的同一个 ArdFerry，在慢速网络上建立连接的时间再缩短约一半。
+当前版本：v6.2。官方服务器拒绝 v6.2（v6.pre2）以下的客户端：从 v6.2 起，会话双方使用主控端选定的同一个 ArdFerry，在慢速网络上建立连接的时间再缩短约一半。
 
 ## 简介
 

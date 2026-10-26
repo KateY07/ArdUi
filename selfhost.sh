@@ -131,7 +131,7 @@ fi
 # Static builds of ard-relay (signaling, address discovery) and ard-relay-admission (the ArdFerry probe), with master.py and
 # ferry_identity.py, built from the ard2 sources of this release. The SHA-256 is pinned here, so a download is accepted only if it
 # is exactly the published package.
-M_RELEASE=v6.pre2
+M_RELEASE=v6.2
 M_PACKAGE_NAME=ardui-m-linux-x86_64.tar.gz
 M_PACKAGE_SHA256=b423f6c5a8480537f542e2774ebfbba22c18dfb8b21bfa4fb62ee86382c9b163
 if ! $NO_M && [ -z "$M_BUNDLE" ]; then

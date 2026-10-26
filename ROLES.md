@@ -111,7 +111,7 @@ ArdUi 程序，加它使用的传输层 ard，加 FRD 等应用。
 - **NJ 也用这个安装器**：`server/deploy.sh` 调用 `selfhost.sh`。
 - **M 包随版本发布**：`ardui-m-linux-x86_64.tar.gz`（静态编译），`selfhost.sh` 自动下载并按固定的 SHA-256 校验。
 - **ArdFerry 一键加入**：M 提供 `https://域名/ardferry.sh`（Windows：`ardferry.ps1`），脚本里已填好该 M 的域名。
-- **"兜底"（fallback）角色已去掉**：所有 ArdFerry 都是候选，由 iroh 按实测延迟挑选。
+- **"兜底"（fallback）角色已去掉**：所有 ArdFerry 都是候选。每个会话由主控端按自己最近一次实测的延迟选定一个 ArdFerry，写进签名的连接请求，被控端校验后用同一个；会话中途不换中继（v6.pre2 起）。
 - **ArdTransit 已退役**：客户端和服务端的代码都已删除；服务端启动时删除旧表。
 - **`relay`/`relayKey` 不再使用**：客户端从 M 的 `/api/v1/network` 获取。
 
