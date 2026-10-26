@@ -25,6 +25,16 @@ sealed class OverlayLink : IAsyncDisposable
     public bool CanServeBandwidth(long now)=>ServedAt==0||now-ServedAt>=30000||now-ServedAt>=5000&&RttChangedFrom(ServedRttMs);
     readonly ConcurrentQueue<double?> samples=new();
     public PathQuality Quality=>PathQuality.From(samples.ToArray(),BandwidthMbps);
+    // What the person sees: the median of the last three answered probes (one every 500 ms), current within about a second
+    // without jumping on a single late answer. The 16-sample Quality window stays for choosing paths.
+    public double? RecentRttMs
+    {
+        get
+        {
+            var recent=samples.ToArray().Where(s=>s.HasValue).Select(s=>s!.Value).TakeLast(3).OrderBy(s=>s).ToArray();
+            return recent.Length==0?null:recent[recent.Length/2];
+        }
+    }
     public bool RecoverySlowerThan(OverlayLink baseline)
     {
         var reference=baseline.Quality;

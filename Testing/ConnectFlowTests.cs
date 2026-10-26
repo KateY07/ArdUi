@@ -46,7 +46,7 @@ static class ConnectFlowTests
         Check(FrdOpened.WindowTitle("办公电脑 · K4DD0B · 远程桌面 - ArdUi") == "办公电脑 · K4DD0B · 远程桌面 - ArdUi" && FrdOpened.WindowTitle("a\r\nb\t") == "ab"
               && FrdOpened.WindowTitle(new string('x', 300))!.Length == 200 && FrdOpened.WindowTitle(" \n ") == null && FrdOpened.WindowTitle(null) == null,
             "the FRD window title is 1–200 characters without control characters, or none");
-        Check(Program.Version == "v6.4" && Program.WireVersion == "v6.pre4" && ClientVersion.Allowed(Program.WireVersion), "this build is v6.4 and announces itself as v6.pre4, the form the version gate reads");
+        Check(Program.Version == "v6.5" && Program.WireVersion == "v6.pre5" && ClientVersion.Allowed(Program.WireVersion), "this build is v6.5 and announces itself as v6.pre5, the form the version gate reads");
 
         // The relays come from M, never from config.json: a config written before v5.5 still loads, and its relay lines change nothing.
         var old = JsonSerializer.Deserialize<Settings>("{\"server\":\"https://bob.example/\",\"relay\":\"http://175.27.160.144:8080\",\"relayKey\":\"spki:00\",\"tcpPorts\":[3389],\"udpPorts\":[3389]}", Wire.Json)!;

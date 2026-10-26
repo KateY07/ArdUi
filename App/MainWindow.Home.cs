@@ -469,7 +469,8 @@ sealed partial class MainWindow
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Say(ex.Message); }
         };
         var askNote = new TextBlock { Text = "开启后，已信任的设备每次连接也要等你点“允许”；没有点允许就不会被控。", Foreground = Muted, FontSize = 12, TextWrapping = TextWrapping.Wrap };
-        var accessTab = new StackPanel { Spacing = 8, Children = { incomingArea, Section("确认方式", Card(new StackPanel { Spacing = 6, Children = { askEverySession, askNote } })), Section("可访问本机的设备", controllers), Section("审计记录", BuildAuditCard()) } };
+        var sharedCard = BuildSharedFolder();
+        var accessTab = new StackPanel { Spacing = 8, Children = { incomingArea, Section("确认方式", Card(new StackPanel { Spacing = 6, Children = { askEverySession, askNote } })), Section("共享文件夹", sharedCard), Section("可访问本机的设备", controllers), Section("审计记录", BuildAuditCard()) } };
         var logButton = Button("打开日志", OpenLogFile); var exportButton = Button("导出诊断包", () => { var path = Diagnostics.Export(Program.DataRoot, engine); Say("诊断包已导出：" + path); return Task.CompletedTask; });
         var copyEndpoint = Button("复制 EndpointId", async () => { await Clipboard!.SetTextAsync(engine?.Id ?? ""); Toast("已复制本机 EndpointId"); });
         logButton.Content = Look.IconText(Look.DocumentPath, "打开日志"); exportButton.Content = Look.IconText(Look.DownloadPath, "导出诊断包"); copyEndpoint.Content = Look.IconText(Look.CopyPath, "复制 EndpointId");

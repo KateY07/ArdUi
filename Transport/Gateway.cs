@@ -54,6 +54,10 @@ sealed class Gateway : IAsyncDisposable
     public Perm Perms => perms;
     public bool Once { get; private set; }
     public bool FrdAllowed => perms.HasFlag(Perm.Frd);
+    // The shared folder: its loopback port once the controller asked for it, and whether the session's path is direct right now.
+    public int FilesPort;
+    public Func<bool>? DirectPath;
+    bool FilesOpen(int port) => port != 0 && port == Volatile.Read(ref FilesPort) && perms.HasFlag(Perm.Files) && DirectPath?.Invoke() == true;
     void Apply(Perm value)
     {
         perms = value; tcpAllowed = Permissions.TcpPorts(settings, value); udpAllowed = Permissions.UdpPorts(settings, value);
@@ -131,7 +135,8 @@ sealed class Gateway : IAsyncDisposable
                     var block=new byte[8192];for(var sent=0;sent<Wire.BandwidthProbeSize;sent+=block.Length)await stream.WriteAsync(block,handshake.Token);
                     return;
                 }
-                if (command != 1 || !tcpAllowed.Contains((int)port)&&!frdTcp.ContainsKey(port))
+                var shared = command == 1 && FilesOpen(port);
+                if (command != 1 || !tcpAllowed.Contains((int)port)&&!frdTcp.ContainsKey(port)&&!shared)
                 { await stream.WriteAsync(new byte[] { 2 }, handshake.Token); return; }
                 using var target = new TcpClient { NoDelay = true };
                 try { await target.ConnectAsync(IPAddress.Loopback, port, handshake.Token); }
@@ -139,6 +144,15 @@ sealed class Gateway : IAsyncDisposable
                 client.NoDelay = true;
                 await stream.WriteAsync(new byte[] { 0 }, handshake.Token);
                 handshake.CancelAfter(Timeout.InfiniteTimeSpan);
+                if (shared)
+                {
+                    // the path turning to a relay ends the transfer (a download resumes later); so does losing the permission
+                    using var relayed = CancellationTokenSource.CreateLinkedTokenSource(stop.Token);
+                    var watch = Task.Run(async () => { while (!relayed.IsCancellationRequested) { await Task.Delay(1000, relayed.Token); if (!FilesOpen(port)) { relayed.Cancel(); return; } } });
+                    try { await Wire.Bridge(client, target, relayed.Token); }
+                    finally { relayed.Cancel(); try { await watch; } catch (OperationCanceledException) { } }
+                    return;
+                }
                 var rdp = !frdTcp.ContainsKey(port);   // anything that is not FRD is a desktop (RDP)
                 if (rdp) { Interlocked.Increment(ref rdpBridges); UpdateActivity(); }
                 try { await Wire.Bridge(client, target, stop.Token); }

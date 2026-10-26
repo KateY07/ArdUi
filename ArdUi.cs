@@ -68,6 +68,8 @@ static class Program
                 return RtcTests.Host(args).GetAwaiter().GetResult();
             if (args.Contains("--rtc-join"))
                 return RtcTests.Join(args).GetAwaiter().GetResult();
+            if (args.Contains("--files-test"))
+                return FilesTests.Run();
             if (args.Contains("--update-test"))
                 return UpdateTests.Run();
             if (args.Contains("--i18n-test"))

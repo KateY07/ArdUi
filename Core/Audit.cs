@@ -225,6 +225,17 @@ sealed class AuditSession : IAsyncDisposable
         FileLog.Write("audit", $"停止录屏：{Code}");
     }
 
+    // ---- the shared folder ----------------------------------------------------------------------------------------------------
+    // Every change and download in the shared folder, one line each (who, when, what, which file, how big) in files.jsonl.
+    public void Files(object entry)
+    {
+        try
+        {
+            var target = EnsureFolder();
+            lock (gate) File.AppendAllText(Path.Combine(target, "files.jsonl"), JsonSerializer.Serialize(entry, AuditStore.Line) + "\n");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { FileLog.Write("audit", "文件操作记录失败：" + ex.Message); }
+    }
     // ---- the conversation ---------------------------------------------------------------------------------------------------
     // Transcript, files and pictures go into the session's folder (created by the first message).
     public void Attach(ChatChannel channel, CallChannel? calls = null)
@@ -312,6 +323,9 @@ sealed class AuditService : IAsyncDisposable
         session.Failure += reason => Failure?.Invoke(endpoint, reason);
         if (!sessions.TryAdd(endpoint, session)) { _ = session.DisposeAsync().AsTask(); }
     }
+
+    // A shared-folder operation of this controller (see FileShareServer).
+    public void Files(string endpoint, object entry) { if (sessions.TryGetValue(endpoint, out var session)) session.Files(entry); }
 
     // The screen is being used (FRD running or an RDP connection open) or not.
     public void ScreenActivity(string endpoint, bool active)

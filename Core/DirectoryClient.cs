@@ -39,6 +39,20 @@ sealed class DirectoryClient : IAsyncDisposable
     public bool Enabled { get { lock (sync) return access.Enabled; } }
     public bool AlwaysAsk { get { lock (sync) return access.AlwaysAsk; } }
     public void SetAlwaysAsk(bool value) { lock (sync) { access.AlwaysAsk = value; Save(); } Changed?.Invoke(); }
+    public string? SharedFolder { get { lock (sync) return access.SharedFolder; } }
+    // The shared folder for "文件" (null: none). It must exist; the server follows at once.
+    public void SetSharedFolder(string? folder)
+    {
+        if (folder != null)
+        {
+            folder = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder));
+            if (!Directory.Exists(folder)) throw new IOException("文件夹不存在：" + folder);
+            if (Path.GetPathRoot(folder) == folder + Path.DirectorySeparatorChar || Path.GetPathRoot(folder) == folder) throw new IOException("不能共享整个磁盘，请选择一个文件夹。");
+        }
+        lock (sync) { access.SharedFolder = folder; Save(); }
+        engine.Files.Root = folder;
+        Changed?.Invoke();
+    }
     // Asked before every session when AlwaysAsk is on: does the person at this machine let this controller in now?
     public Func<Pairing, CancellationToken, Task<bool>>? ConfirmSession;
     public double SideWidth { get { lock(sync)return Math.Clamp(access.SideWidth,180,360); } }
@@ -65,6 +79,7 @@ sealed class DirectoryClient : IAsyncDisposable
         access = File.Exists(path) ? JsonSerializer.Deserialize<AccessSettings>(File.ReadAllText(path), Wire.Json)!
             : new AccessSettings();
         if (access == null || access.Controllers == null || access.Targets == null) throw new InvalidDataException("访问配置损坏。");
+        engine.Files.Root = access.SharedFolder is { } shared && Directory.Exists(shared) ? shared : null;
         if(access.EnrollmentSecret==null)
         {
             var secret=RandomNumberGenerator.GetBytes(32);

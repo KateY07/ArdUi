@@ -92,4 +92,5 @@ sealed class AccessSettings
     public Dictionary<string, ControllerGrant> Controllers { get; set; } = new();
     public Dictionary<string, string> Targets { get; set; } = new();
     public double SideWidth { get; set; } = 240;
+    public string? SharedFolder { get; set; }   // the folder an authorised controller with "文件" may read and write (none until chosen)
 }

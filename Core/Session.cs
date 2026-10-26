@@ -24,6 +24,9 @@ sealed class Session : IAsyncDisposable
     public string? RelayName { get; set; }
     public double? TcpRtt { get; set; }
     public double? UdpRtt { get; set; }
+    // The latency shown for the session: what the end-to-end layer measures on the path in use (probed every 500 ms anyway, so
+    // showing it costs nothing), or this side's own 5-second probe where there is no such layer.
+    public double? LatencyMs => Overlay?.Link(Overlay.Selected)?.RecentRttMs ?? UdpRtt;
     public double? BandwidthMbps { get; set; }
     public double? BandwidthLowerBoundMbps { get; set; }
     public ForwardHub? Hub { get; }
@@ -60,24 +63,63 @@ sealed class Session : IAsyncDisposable
     // What the other side may ask of this one over the control channel, with the side that answers and the permission it needs. The
     // permissions are the ones the host granted for this session, on both sides: a host that does not allow files neither takes nor sends them.
     internal ControlRegistry? Controls { get; private set; }
-    public void ConfigureControls(string frd, ChatChannel chat, CallChannel call)
+    public void ConfigureControls(string frd, ChatChannel chat, CallChannel call, Func<string, (string Root, string Actor, Action<object> Audit)>? filesRoot = null)
     {
-        frdPath = frd; Chat = chat;
+        frdPath = frd; Chat = chat; this.filesRoot = filesRoot;
         var link = new SessionCallLink(this);
         var registry = new ControlRegistry(Host, () => Perms)
             .Add("bye", ControlRole.Either, Perm.None, (_, data, _) => HandleBye(data))
             .Add("frd-start", ControlRole.Host, Perm.Frd, HandleFrd)
             .Add("frd-stop", ControlRole.Host, Perm.None, HandleFrd)
             .Add("chat-text", ControlRole.Either, Perm.Chat, chat.Handle)
-            .Add("chat-file-begin", ControlRole.Either, Perm.Files, chat.Handle)
-            .Add("chat-file-chunk", ControlRole.Either, Perm.Files, chat.Handle)
-            .Add("chat-file-end", ControlRole.Either, Perm.Files, chat.Handle)
+            .Add("chat-file-begin", ControlRole.Either, Perm.Chat, chat.Handle)
+            .Add("chat-file-chunk", ControlRole.Either, Perm.Chat, chat.Handle)
+            .Add("chat-file-end", ControlRole.Either, Perm.Chat, chat.Handle)
             .Add("chat-file-cancel", ControlRole.Either, Perm.None, chat.Handle)   // stopping a transfer is always allowed
-            .Add("call-offer", ControlRole.Either, Perm.Voice, (method, data, ct) => call.Handle(link, method, data, ct))
-            .Add("call-answer", ControlRole.Either, Perm.Voice, (method, data, ct) => call.Handle(link, method, data, ct))
+            .Add("call-offer", ControlRole.Either, Perm.Chat, (method, data, ct) => call.Handle(link, method, data, ct))
+            .Add("call-answer", ControlRole.Either, Perm.Chat, (method, data, ct) => call.Handle(link, method, data, ct))
+            .Add("files-open", ControlRole.Host, Perm.Files, HandleFiles)
             .Add("call-end", ControlRole.Either, Perm.None, (method, data, ct) => call.Handle(link, method, data, ct));
         Controls = registry;
         Overlay!.Control = registry.Dispatch;
+    }
+    Func<string, (string Root, string Actor, Action<object> Audit)>? filesRoot;
+    FileShareServer? files;
+    readonly object filesSync = new();
+    // A relayed session runs over a volunteer ArdFerry node: the shared folder is for direct paths only, so its traffic does not use them.
+    public bool Direct => !Network.Contains("中继", StringComparison.Ordinal);
+    // The host's side of "文件": this session's own WebDAV server on the folder the host chose, or (none chosen) the controller's own
+    // folder named after its computer name and device code; its loopback port is opened to this session's gateway, which also checks the path.
+    Task<object> HandleFiles(string method, JsonElement data, CancellationToken ct)
+    {
+        if (!Host || gateway == null || filesRoot == null) throw new IOException("共享文件夹只能由已授权主控请求。");
+        if (!Direct) throw new IOException("当前经 ArdFerry 中继连接：共享文件夹只在直连时可用。");
+        var name = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("name", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
+        var (root, actor, audit) = filesRoot(name);
+        Directory.CreateDirectory(root);
+        int port;
+        lock (filesSync) { files ??= new FileShareServer(); files.Root = root; files.Actor = actor; files.Audit = audit; port = files.Port; }
+        gateway.FilesPort = port;
+        return Task.FromResult<object>(new { port });
+    }
+    // The controller's side: the host's shared folder as a local address (http://127.0.0.1:port/, the same port for this device every time).
+    int filesPort;
+    public async Task<int> OpenFiles(CancellationToken ct)
+    {
+        await FilesTarget(ct);
+        return (Hub ?? throw new IOException("被控会话不提供本地转发入口。")).ForwardFiles(PeerId).Port;
+    }
+    // The host's port for this session's shared folder, asked for once per session (after a reconnect, by the first request).
+    internal async Task<int> FilesTarget(CancellationToken ct)
+    {
+        if (Volatile.Read(ref filesPort) is var known and > 0) return known;
+        if (Host || Overlay == null) throw new IOException("请先建立已授权连接。");
+        if (!Perms.HasFlag(Perm.Files)) throw new IOException("被控端未允许访问共享文件夹。");
+        if (!Direct) throw new IOException("当前经 ArdFerry 中继连接：共享文件夹只在直连时可用。");
+        var reply = await Overlay.Request("files-open", new { name = Environment.MachineName }, ct);
+        var port = reply.TryGetProperty("port", out var value) && value.TryGetInt32(out var number) && number is > 0 and <= 65535 ? number : throw new IOException("共享文件夹响应无效。");
+        Volatile.Write(ref filesPort, port);
+        return port;
     }
     internal CallMedia OpenVoiceHost()
     {
@@ -195,7 +237,7 @@ sealed class Session : IAsyncDisposable
     async Task<TcpClient> OpenTcpCore(int port,bool frd,CancellationToken ct)
     {
         if (!Live) throw new IOException("设备连接已断开。");
-        if (!frd&&port != 0 && !TcpPorts.Contains(port)) throw new IOException("被控端未授权此 TCP 端口。");
+        if (!frd&&port != 0 && !TcpPorts.Contains(port) && port != Volatile.Read(ref filesPort)) throw new IOException("被控端未授权此 TCP 端口。");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, Token);
         timeout.CancelAfter(TimeSpan.FromSeconds(15));
         var tcp = new TcpClient { NoDelay = true };
@@ -220,6 +262,12 @@ sealed class Session : IAsyncDisposable
     public void StartMetrics(Action changed)
     {
         if (Host || metrics != Task.CompletedTask) return;
+        // the latency on screen follows the path's own probes once a second; bandwidth stays on the slower loop below
+        _ = Task.Run(async () =>
+        {
+            try { while (!stop.IsCancellationRequested) { await Task.Delay(1000, stop.Token); if (Overlay != null) changed(); } }
+            catch (OperationCanceledException) { }
+        });
         metrics = Task.Run(async () =>
         {
             var failures=0;var round=0;
@@ -244,6 +292,7 @@ sealed class Session : IAsyncDisposable
                             ? watch.Elapsed.TotalMilliseconds : null;
                     }
                     catch (TimeoutException) { UdpRtt = null; }
+                    changed();   // the latency is known now; a bandwidth measurement must not hold it back
                     if(round++%12==0)
                     {
                         try{BandwidthMbps=await MeasureBandwidth(stop.Token);}
@@ -268,6 +317,8 @@ sealed class Session : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+        FileShareServer? shared; lock (filesSync) { shared = files; files = null; }
+        if (shared != null) try { await shared.DisposeAsync(); } catch (Exception ex) { Diagnostics.Log("files-close", ex.Message); }
         var errors=new List<string>();
         async ValueTask Cleanup(string name,Func<ValueTask> close)
         {

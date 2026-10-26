@@ -11,9 +11,8 @@ sealed class PermissionPicker : Border
     [
         (Perm.Frd, "远程桌面（FRD）", "FRD", "推荐：加密、可调画质"),
         (Perm.Rdp, "RDP 远程桌面", "RDP", "Windows 原生，端口 3389"),
-        (Perm.Chat, "文字对话", "对话", "双方互发消息"),
-        (Perm.Files, "文件与图片", "文件", "双方互传文件，保存到本机"),
-        (Perm.Voice, "语音通话", "通话", "双方都可以发起"),
+        (Perm.Chat, "对话", "对话", "文字、文件与图片、语音通话"),
+        (Perm.Files, "共享文件夹", "文件", "读写本机设置的共享文件夹，仅限直连"),
     ];
     Perm value;
     public event Action<Perm>? Changed;

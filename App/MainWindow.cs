@@ -358,16 +358,17 @@ sealed partial class MainWindow : Window
     {
         // the conversation needs the host's permission for messages or files (the same permissions apply to both sides of the session)
         var session=engine==null?null:engine.Outgoing.TryGetValue(peer.Id,out var outgoing)?outgoing:engine.Incoming.GetValueOrDefault(peer.Id);
-        view.Chat.IsVisible=live&&(session==null||(session.Perms&(Perm.Chat|Perm.Files))!=Perm.None);
+        view.Chat.IsVisible=live&&(session==null||session.Perms.HasFlag(Perm.Chat));
         if(!view.Chat.IsVisible||engine==null)return;
         var unread=engine.ChatFor(peer.Id).Unread>0;
         if((bool)(view.Chat.Tag??false)!=unread){view.Chat.Tag=unread;view.Chat.Content=ChatBadge(unread);}
         WatchChat(peer.Id,PeerLabel(peer).Split(" · ")[0]);
     }
-    // FRD appears only when the controlled machine allowed it.
+    // FRD and the shared folder appear only when the controlled machine allowed them.
     static void ShowLaunchers(DeviceDisplay view,bool live,Perm perms)
     {
         view.Launchers[0].IsVisible=live&&perms.HasFlag(Perm.Frd);
+        if(view.Launchers.Length>1)view.Launchers[1].IsVisible=live&&perms.HasFlag(Perm.Files);
     }
     // Status text of a device row. For a live session the path kind (IPv6 / IPv4 / Relay) is highlighted, then speed and latency.
     static string StatusOf(TextBlock t)=>t.Tag as string??t.Text??"";
@@ -683,6 +684,15 @@ sealed partial class MainWindow : Window
             Say("FRD 已启动，正在通过加密连接建立桌面。");
         }));
         launchers.Add(frd);
+        // the other side's shared folder in the browser (its page: upload, new folder, rename, delete); direct paths only
+        var files=Add("文件",()=>Connecting(peer,async()=>
+        {
+            await directory!.Connect(peer.Code,"",enrolling:false);
+            var port=await engine!.Outgoing[peer.Id].OpenFiles(CancellationToken.None);
+            await OpenUrl($"http://127.0.0.1:{port}/");
+            Say($"已在浏览器中打开对方的共享文件夹（也可在资源管理器中打开 \\\\127.0.0.1@{port}\\DavWWWRoot）。");
+        }));
+        launchers.Add(files);
         // the conversation with this device (only while connected); a red dot marks unread messages
         var chat=new Button{Width=36,Height=30,MinHeight=30,Padding=new Thickness(0),IsVisible=false,Tag=false};chat.Content=ChatBadge(false);ToolTip.SetTip(chat,"对话：文字、图片、文件");
         chat.Click+=(_,_)=>OpenChat(peer.Id,PeerLabel(peer).Split(" · ")[0]);actions.Children.Add(chat);
@@ -716,6 +726,7 @@ sealed partial class MainWindow : Window
         var stack=new StackPanel{Spacing=0,Children={row,moreRow}};var card=Card(stack);card.Padding=new Thickness(14,6);
         card.PointerEntered+=(_,_)=>card.Background=Look.CardHover;card.PointerExited+=(_,_)=>card.Background=Look.Card;
         Look.IconOnly(launchers[0],Look.MonitorPath,"远程桌面（FRD）；两端需安装支持 FRD 的新版 ArdUi");
+        Look.IconOnly(launchers[1],Look.FolderPath,"文件：对方的共享文件夹（浏览、下载、上传；仅限直连）");
         foreach(var launcher in launchers)launcher.IsVisible=false;
         return new DeviceDisplay(card,indicator,title,state,connect,launchers.ToArray(),pause,actions,chat);
     }
@@ -818,6 +829,7 @@ sealed partial class MainWindow : Window
         dialog.Content=new StackPanel{Margin=new Thickness(24),Spacing=16,Children={input,button}};
         return await dialog.ShowDialog<string?>(this) ?? throw new OperationCanceledException();
     }
+    static Task OpenUrl(string url){Process.Start(new ProcessStartInfo(url){UseShellExecute=true});return Task.CompletedTask;}
     static Task Launch(string file,string argument)
     { var start=new ProcessStartInfo(file) { UseShellExecute=true };start.ArgumentList.Add(argument);Process.Start(start);return Task.CompletedTask; }
 }

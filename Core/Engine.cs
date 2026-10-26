@@ -13,6 +13,21 @@ sealed class Engine : IAsyncDisposable
     public event Action? Changed;
     public event Action<string>? Notice;
     public DirectoryClient? DirectoryApi { get; set; }
+    // The shared folder chosen in the settings, served on loopback for this machine's own browser (DirectoryClient keeps the choice
+    // in access.json); controllers get a server of their own per session (see Session.HandleFiles).
+    public FileShareServer Files { get; } = new();
+    // Where a controller's "文件" lives without a chosen folder: Documents\ArdUi 文件\<its computer name>-<its device code>.
+    public static string DefaultFilesBase => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "ArdUi 文件");
+    (string Root, string Actor, Action<object> Audit) FilesRoot(Session session, string computer)
+    {
+        var code = DirectoryApi?.CodeOf(session.PeerId) ?? session.PeerId[..8];
+        var name = new string(computer.Where(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.').Take(40).ToArray()).Trim('.');
+        var actor = name.Length == 0 ? code : $"{name} ({code})";
+        void Record(object entry) => Audit.Files(session.PeerId, entry);
+        if (DirectoryApi?.SharedFolder is { } chosen && Directory.Exists(chosen)) return (chosen, actor, Record);
+        var folder = string.Join("-", new[] { name, code }.Where(p => p.Length != 0));
+        return (Path.Combine(DefaultFilesBase, folder), actor, Record);
+    }
     readonly OperationGate operations=new();
     readonly ConcurrentDictionary<string,ForwardHub> hubs = new();
     // The audit of controllers (screen + conversation). It cannot be switched off: if it cannot record, the session is ended.
@@ -66,7 +81,7 @@ sealed class Engine : IAsyncDisposable
         var parts=new List<string>{path};
         if(session.BandwidthMbps is{} bandwidth)parts.Add(Speed(bandwidth));
         else if(session.BandwidthLowerBoundMbps is{} minimum)parts.Add("≥"+Speed(minimum));
-        if(session.UdpRtt is{} udp)parts.Add($"{udp:F0} ms");
+        if(session.LatencyMs is{} latency)parts.Add($"{latency:F0} ms");
         return string.Join(" · ",parts);
     }
     void Observe(Session session, bool host)
@@ -137,7 +152,7 @@ sealed class Engine : IAsyncDisposable
         if(session.Overlay==null||DirectoryApi==null||session.Controls!=null)return;   // once per session
         session.Notice+=message=>{Update(session.PeerId,message);Notice?.Invoke(message);};
         var call=CallFor(session.PeerId);
-        session.ConfigureControls(Settings.FrdPath,ChatFor(session.PeerId),call);
+        session.ConfigureControls(Settings.FrdPath,ChatFor(session.PeerId),call,session.Host?name=>FilesRoot(session,name):null);
         _=session.Completion.ContinueWith(_=>call.Close(session),TaskScheduler.Default);
         session.PeerEnded+=reason=>OnPeerEnded(session,reason);
         var conversation = ChatFor(session.PeerId); _ = session.Completion.ContinueWith(_ => conversation.Close(), TaskScheduler.Default);
@@ -300,6 +315,7 @@ sealed class Engine : IAsyncDisposable
             });
             child = await StartArdWithRetry(peer.Id,dir,true,gateway.Port,ticket.ClientSessionId,"relay online",ferry,ct);
             session = new Session(peer.Id, peer.Address, gateway.Port, capability, Settings.TcpPorts, Settings.UdpPorts, child, dir, Identity(peer.Id), gateway);
+            var served = session; gateway.DirectPath = () => served.Direct;
             session.OverlayReady+=()=>ConfigureOverlay(session);
             var attached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var auditStarted = 0;
@@ -384,6 +400,7 @@ sealed class Engine : IAsyncDisposable
         await GoodbyeAll();   // quitting ArdUi is on purpose too: the other side must not wait for this one to come back
         await operations.Close();
         await Audit.DisposeAsync();
+        await Files.DisposeAsync();
             foreach(var session in Outgoing.Values.Concat(Incoming.Values)) await session.DisposeAsync();
             Outgoing.Clear(); Incoming.Clear(); State.Dispose();
             foreach(var hub in hubs.Values)await hub.DisposeAsync();hubs.Clear();
