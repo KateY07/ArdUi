@@ -198,6 +198,12 @@ class FileChunks:
         self.source.close()
         with _client_lock: _client_active[0] -= 1
 
+# The newest installer's version, in the replies devices get all the time (poll, presence): a newer one is found within seconds
+# of being put in place, not at the next planned look.
+def latest_release():
+    release = client_release()
+    return release['version'] if release else None
+
 def client_download(name, environ, start_response):
     limit('client:' + (environ.get('HTTP_X_REAL_IP') or environ.get('REMOTE_ADDR', 'unknown')), 120, 3600)   # resumed pieces count too
     release = client_release()
@@ -1032,7 +1038,7 @@ def dispatch(path, endpoint, data, ip, envelope):
               r.client_session AS clientSessionId,r.expires,r.proof FROM requests r JOIN devices d ON d.endpoint=r.caller
               WHERE r.target=? AND r.status='pending' AND r.epoch=? AND r.expires>=? ORDER BY r.rowid LIMIT 16''',
               (endpoint,row['epoch'],int(time.time()))).fetchall() if active else []
-            return {'enabled':active,'tickets':[{**dict(r),'proof':json.loads(r['proof'])} for r in tickets]}
+            return {'enabled':active,'tickets':[{**dict(r),'proof':json.loads(r['proof'])} for r in tickets],'release':latest_release()}
         with database() as db:
             db.execute('BEGIN IMMEDIATE')
             row=registered(db,endpoint)
@@ -1060,7 +1066,7 @@ def dispatch(path, endpoint, data, ip, envelope):
                 row=db.execute('SELECT enabled,seen,name FROM devices WHERE endpoint=?',(target,)).fetchone()
                 if row is None: continue
                 answer[target]={'online':bool(row['enabled'] and row['seen']>=now-20),'name':row['name']}
-        return {'peers':answer}
+        return {'peers':answer,'release':latest_release()}
     if path == '/api/v1/connect':
         code=text(data,'code',CODE)
         session=text(data,'sessionId',ENDPOINT)

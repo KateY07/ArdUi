@@ -88,7 +88,10 @@ static class UpdateTests
 
             await using var updater = new Updater(m.Url, root, "v6.pre2", allowLoopbackHttp: true);
             var target = Path.Combine(updates, "ArdUi-v6.3_setup.exe");
+            var started = 0; updater.DownloadStarted += _ => started++;
             await updater.Once(CancellationToken.None);
+            Check(started == 1 && updater.Progress is { State: TransferState.Done } progress && progress.Transferred == m.Body.Length,
+                "a download is announced and shows its progress (the island takes it from here)");
             Check(updater.State == Updater.Phase.Ready && updater.ReadyPath == target && File.ReadAllBytes(target).SequenceEqual(m.Body) && m.Downloads == 1,
                 "a newer version is downloaded, checked and offered");
             Check(!File.Exists(target + ".partial"), "no partial file is left behind");

@@ -40,6 +40,7 @@ sealed class IslandWindow : Window
     int shift;   // how far the island stands aside (to the left, in pixels) so that it does not sit under another window's card
     string[] live = [];
 
+    public Func<ChatTransfer?>? UpdateDownload;   // ArdUi's own update, downloading: shown like a file on its way
     public IslandWindow(Engine engine, Func<string, string> labelOf, Func<string, bool> chatIsOpen, Action<string> openChat, Action showMain)
     {
         this.engine = engine; this.labelOf = labelOf; this.chatIsOpen = chatIsOpen; this.openChat = openChat; this.showMain = showMain;
@@ -164,6 +165,7 @@ sealed class IslandWindow : Window
             var chat = engine.ChatFor(peer); unread += chat.Unread;
             foreach (var t in chat.ActiveTransfers) { active.Add(t); owners[t] = peer; seen.Add(t); }
         }
+        if (UpdateDownload?.Invoke() is { State: TransferState.Active } update) { active.Add(update); seen.Add(update); }
         // a finished file keeps its place a moment, with a check, before the island goes back to rest
         foreach (var t in seen.ToArray())
         {

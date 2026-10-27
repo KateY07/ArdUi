@@ -174,3 +174,7 @@ assert web('POST', '/api/account/password', {'name': 'dave', 'old': 'dave-passwo
 start2 = newcomer.call('/api/v1/account/login-start', {})[1]
 assert web('POST', '/api/account/login', {'login': start2['token'], 'name': 'dave', 'password': 'dave-password-2'})[0] == 200
 print('PASS: the password is changed on the page')
+
+status, polled = host.call('/api/v1/poll', {'enabled': True})
+assert status == 200 and 'release' in polled, polled
+print('PASS: the poll reply names the newest installer (None when M offers none)')

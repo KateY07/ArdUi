@@ -41,6 +41,10 @@ sealed partial class MainWindow
         try { updater = new Updater(settings.Server, Program.DataRoot, Program.WireVersion); }
         catch (Exception ex) { Diagnostics.Log("update", ex.Message); return; }
         updater.Changed += () => Dispatcher.UIThread.Post(UpdateUpdate);
+        // a download is never silent: a note when it starts, and its progress on the island
+        updater.DownloadStarted += offer => Dispatcher.UIThread.Post(() => Toast($"发现新版本 ArdUi {offer.Version}，正在后台下载（进度见屏幕右下角）"));
+        if (island != null) island.UpdateDownload = () => updater?.Progress;
+        if (directory != null) directory.NewRelease += _ => updater?.CheckNow();
         updater.Start();
     }
 

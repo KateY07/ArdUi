@@ -10,7 +10,8 @@ sealed class Updater : IAsyncDisposable
     public sealed record Offer(string Version, string File, long Size, string Sha256);
     public enum Phase { Idle, Downloading, Ready, Failed }
 
-    static readonly TimeSpan CheckEvery = TimeSpan.FromHours(6), FirstWait = TimeSpan.FromMinutes(1), LongestWait = TimeSpan.FromHours(1);
+    // M also names its newest version in its poll and presence replies, which brings a look within seconds (CheckNow); this is the fallback
+    static readonly TimeSpan CheckEvery = TimeSpan.FromHours(1), FirstWait = TimeSpan.FromMinutes(1), LongestWait = TimeSpan.FromHours(1);
     static readonly TimeSpan Stall = TimeSpan.FromSeconds(60);   // no byte for this long ends a download attempt (it resumes later)
     const long Largest = 1L << 28;
     readonly HttpClient http;
@@ -28,6 +29,10 @@ sealed class Updater : IAsyncDisposable
     public string? Error { get; private set; }
     public string? ReadyPath { get; private set; }
     public event Action? Changed;
+    // The download as a transfer (the island shows its progress; stopping it ends this attempt, the next look continues it), and its start.
+    public ChatTransfer? Progress { get; private set; }
+    public event Action<Offer>? DownloadStarted;
+    CancellationTokenSource? downloading;
 
     public Updater(string server, string dataRoot, string current, bool allowLoopbackHttp = false)
     {
@@ -121,6 +126,13 @@ sealed class Updater : IAsyncDisposable
         if (have > offer.Size) { File.Delete(partial); have = 0; }
         lock (sync) Received = have;
         Set(Phase.Downloading);
+        var outer = ct;
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct); downloading = stop; ct = stop.Token;
+        var shown = new ChatTransfer("update-" + offer.Version, $"ArdUi {offer.Version} 更新", ChatKind.File, offer.Size, true, () => { try { stop.Cancel(); } catch (ObjectDisposedException) { } });
+        Progress = shown; shown.Report(have);
+        DownloadStarted?.Invoke(offer);
+        try
+        {
         if (have < offer.Size)
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, "/api/v1/release/" + offer.File);
@@ -146,6 +158,7 @@ sealed class Updater : IAsyncDisposable
                     if (have > offer.Size) { output.Close(); File.Delete(partial); throw new InvalidDataException("下载的文件比服务器说的大，已删除。"); }
                     await output.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
                     lock (sync) Received = have;
+                    shown.Report(have);
                     if (reported.ElapsedMilliseconds >= 250) { reported.Restart(); Changed?.Invoke(); }
                 }
             }
@@ -153,6 +166,12 @@ sealed class Updater : IAsyncDisposable
         }
         if (!Matches(partial, offer)) { File.Delete(partial); throw new InvalidDataException("下载的文件校验失败，已删除，稍后重新下载。"); }
         File.Move(partial, target, true);
+        shown.Finish(TransferState.Done);
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested && !outer.IsCancellationRequested) { shown.Finish(TransferState.Cancelled, "已暂停，稍后继续"); throw new IOException("下载已暂停，稍后继续。"); }
+        catch (OperationCanceledException) { shown.Finish(TransferState.Cancelled, "已暂停，稍后继续"); throw; }
+        catch (Exception ex) { shown.Finish(TransferState.Failed, ex.Message); throw; }
+        finally { downloading = null; }
     }
 
     static bool Matches(string path, Offer offer)

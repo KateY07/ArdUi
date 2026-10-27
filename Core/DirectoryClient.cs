@@ -223,6 +223,9 @@ sealed class DirectoryClient : IAsyncDisposable
         if (username.Length == 0 || string.IsNullOrEmpty(password)) throw new InvalidOperationException("请输入用户名和密码。");
         Apply(await Call<AccountReply>("/api/v1/account/login", new { username, password }, ct));
     }
+    // M names its newest installer in the replies devices get all the time: a newer one than this is looked at once (see Updater).
+    public event Action<string>? NewRelease;
+    void Announced(string? release) { if (release != null && Updater.Newer(release, Program.WireVersion)) NewRelease?.Invoke(release); }
     public event Action? LoginNeeded;   // a connection the person started needs this device signed in
     // Signing in (and registering) happens on this M's account page in a browser: the device gets a one-time request, the page is
     // opened with it, and the device waits until the person signed it in there (or the request ran out).
@@ -267,6 +270,7 @@ sealed class DirectoryClient : IAsyncDisposable
         Peer[] peers;lock(engine.State.Peers)peers=engine.State.Peers.Where(p=>p.Grant!=null).Take(64).ToArray();
         if(peers.Length==0)return;
         var reply=await Call<PresenceReply>("/api/v1/presence",new{peers=peers.Select(p=>new{endpoint=p.Id,grant=p.Grant}).ToArray()},ct);
+        Announced(reply.Release);
         var now=DateTimeOffset.UtcNow;var changed=false;
         foreach(var peer in peers)
         {
@@ -392,6 +396,7 @@ sealed class DirectoryClient : IAsyncDisposable
         {
             var known = seen.Keys.Take(16).ToArray();
             var reply = await Call<PollReply>("/api/v1/poll", new { enabled = Enabled, name = Environment.MachineName, known }, ct);
+            Announced(reply.Release);
             if (!Enabled) return;
             var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             foreach (var old in seen.Where(p => p.Value < now).Select(p => p.Key).ToArray()) seen.Remove(old);
