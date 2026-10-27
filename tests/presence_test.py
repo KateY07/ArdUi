@@ -110,7 +110,7 @@ assert seen['status'] == 426, seen
 health = {}
 environ = {'PATH_INFO': '/api/health', 'REQUEST_METHOD': 'GET', 'REMOTE_ADDR': '127.0.0.1'}
 body = b''.join(arduiserver.application(environ, lambda status, headers: health.update(status=int(status.split()[0]))))
-assert health['status'] == 200 and json.loads(body)['minClient'] == 'v6.pre7' and json.loads(body)['version'] == 'v6.8', body
+assert health['status'] == 200 and json.loads(body)['minClient'] == 'v6.pre7' and json.loads(body)['version'] == 'v6.9', body
 # The connection request carries the controller's version, signed with the rest of the request.
 req = {'code': 'AAAAAA', 'sessionId': 'a' * 64, 'targetEndpoint': 'b' * 64, 'requestId': 'c' * 32, 'expires': int(time.time()) + 200,
        'ferry': {'node': '805c40bca7e89af2', 'key': 'spki:3059', 'addresses': ['175.27.160.144:18443']}}
