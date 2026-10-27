@@ -22,11 +22,12 @@ static class PermissionTests
         Check(Permissions.TcpPorts(settings, Perm.Rdp).SequenceEqual([3389]) && Permissions.UdpPorts(settings, Perm.Rdp).SequenceEqual([3389]), "RDP opens 3389 tcp+udp");
         var old = new Settings { TcpPorts = [3389, 445], UdpPorts = [3389] };   // a config.json from before SMB was removed
         Check(Permissions.TcpPorts(old, Perm.All).SequenceEqual([3389]), "the SMB port stays closed even when an old config still lists it");
-        Check(Permissions.Default == (Perm.Frd | Perm.Chat | Perm.Files | Perm.Voice), "default: FRD and the conversation, files, calls; not RDP");
+        Check(Permissions.Default == (Perm.Frd | Perm.Chat | Perm.Files), "default: FRD, the conversation (with files and calls) and the shared folder; not RDP");
         Check(Permissions.Parse(Permissions.Store(Perm.Frd)) == Perm.Frd, "a stored FRD-only grant stays FRD only");
-        Check(Permissions.Parse(Permissions.Store(Perm.Frd | Perm.Voice)) == (Perm.Frd | Perm.Voice), "stored values round-trip");
-        Check(Permissions.Parse(1) == (Perm.Frd | Perm.Chat | Perm.Files | Perm.Voice), "an older FRD-only grant keeps the conversation it always had");
-        Check(Permissions.Parse(4) == (Perm.Chat | Perm.Files | Perm.Voice), "the retired SMB bit grants nothing");
+        Check(Permissions.Parse(Permissions.Store(Perm.Frd | Perm.Chat | Perm.Files)) == (Perm.Frd | Perm.Chat | Perm.Files), "stored values round-trip");
+        Check(Permissions.Parse(Permissions.Store(Perm.Frd | Perm.Voice)) == Perm.Frd, "the retired calls bit (calls are part of the conversation now) grants nothing");
+        Check(Permissions.Parse(1) == (Perm.Frd | Perm.Chat), "an older FRD-only grant keeps the conversation it always had (not the shared folder, which did not exist)");
+        Check(Permissions.Parse(4) == Perm.Chat, "the retired SMB bit grants nothing");
         Check(Permissions.Parse(0x1FF) == Perm.All, "unknown bits are dropped");
         Check(Permissions.Describe(Perm.Frd | Perm.Files) == "FRD / 文件", "description lists what is allowed");
     }
@@ -34,11 +35,11 @@ static class PermissionTests
     static void JsonCompatibility()
     {
         var legacyGrant = JsonSerializer.Deserialize<ControllerGrant>("{\"code\":\"ABC123\",\"receipt\":{\"endpoint\":\"e\",\"issuedAt\":1,\"nonce\":\"n\",\"payload\":\"p\",\"signature\":\"s\"}}", Wire.Json)!;
-        Check(Permissions.Parse(legacyGrant.Perms) == Perm.All, "a grant stored before permissions existed keeps all permissions");
+        Check(Permissions.Parse(legacyGrant.Perms) == (Perm.Frd | Perm.Rdp | Perm.Chat), "a grant stored before permissions existed keeps what that version knew");
         var restricted = JsonSerializer.Deserialize<ControllerGrant>(JsonSerializer.Serialize(legacyGrant with { Perms = Permissions.Store(Perm.Frd) }, Wire.Json), Wire.Json)!;
         Check(Permissions.Parse(restricted.Perms) == Perm.Frd, "permissions survive a save and load");
         var legacyReply = JsonSerializer.Deserialize<AdmissionReply>("{\"accepted\":true,\"token\":\"00112233445566778899aabbccddeeff\",\"tcpPorts\":[3389],\"udpPorts\":[]}", Wire.Json)!;
-        Check(Permissions.Parse(legacyReply.Perms) == Perm.All && !legacyReply.Once, "an old host's reply means everything, not once");
+        Check(Permissions.Parse(legacyReply.Perms) == (Perm.Frd | Perm.Rdp | Perm.Chat) && !legacyReply.Once, "an old host's reply means what it knew, not once");
     }
 
     static void TemporaryPeers()

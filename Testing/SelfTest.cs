@@ -1,4 +1,3 @@
-using System.Net.Http.Json;
 namespace ArdUi;
 
 static class SelfTest
@@ -57,7 +56,8 @@ static class SelfTest
                 var (token, _, until) = await cd.StartWebLogin(ct);
                 using var web = new HttpClient();
                 using var signIn = new HttpRequestMessage(HttpMethod.Post, new Uri(cd.AccountPage(), "/api/account/login"))
-                { Content = JsonContent.Create(new { login = token, name = testUser, password = Environment.GetEnvironmentVariable("ARDUI_TEST_PASSWORD") ?? "" }) };
+                // a plain JSON body with its length (the account page refuses a body without one)
+                { Content = new StringContent(JsonSerializer.Serialize(new { login = token, name = testUser, password = Environment.GetEnvironmentVariable("ARDUI_TEST_PASSWORD") ?? "" }), Encoding.UTF8, "application/json") };
                 signIn.Headers.Add("X-ArdUi-Web", "1");
                 using (var signed = await web.SendAsync(signIn, ct)) if (!signed.IsSuccessStatusCode) throw new Exception("Test account sign-in failed: " + await signed.Content.ReadAsStringAsync(ct));
                 if (!await cd.WaitWebLogin(token, until, ct)) throw new Exception("The device did not learn that it was signed in.");
