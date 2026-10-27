@@ -13,6 +13,7 @@ enum ConnectFailure
     Declined,          // the user did not confirm the fingerprint
     Yourself,          // own device code
     Outdated,          // this or the other ArdUi is too old for the directory
+    NeedLogin,         // this device is anonymous: only signed-in devices may connect to others
     Network,           // our own network or the directory service
     Other,
 }
@@ -51,6 +52,8 @@ static class ConnectFlow
             return new(ConnectFailure.SecurityWarning, "设备身份与上次不一致", "这可能是对方重装了系统，也可能有人冒充。请通过电话等独立渠道核对后再处理，不要继续连接。", false);
         if (text.Contains(RejectedText, StringComparison.Ordinal) || text.Contains("访问未获批准", StringComparison.Ordinal) || text.Contains("未接受连接", StringComparison.Ordinal))
             return new(ConnectFailure.NoPermission, "没有权限", "密码不正确或已过期，或对方已关闭“允许被控”。请向对方索取新的连接密码。", true);
+        if (text.Contains("请先登录", StringComparison.Ordinal))
+            return new(ConnectFailure.NeedLogin, "需要登录", "只有注册用户可以连接其他设备。请在 设置 → 通用 → 账号 中登录（账号由网络管理员创建）；被控不需要登录。", false);
         if (text.Contains("版本过旧", StringComparison.Ordinal))
             return new(ConnectFailure.Outdated, "需要升级 ArdUi", text, false);
         if (text.Contains("编号不存在", StringComparison.Ordinal) || text.Contains("机器编号不匹配", StringComparison.Ordinal))

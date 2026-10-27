@@ -203,6 +203,31 @@ sealed class DirectoryClient : IAsyncDisposable
         }
         File.WriteAllText(saved, JsonSerializer.Serialize(info, Wire.Json));
         code = info.Code; online = true; Changed?.Invoke();
+        try { await RefreshAccount(ct); } catch (Exception ex) when (ex is not OperationCanceledException) { Diagnostics.Log("account", ex.Message); }
+    }
+
+    // ---- the account -------------------------------------------------------------------------------------------------
+    // A device is anonymous until it signs in with a user an administrator of this M made. Only a signed-in device may connect to
+    // (control) another one; M refuses an anonymous controller too. Being controlled needs no account.
+    sealed record AccountReply(string? Username, bool Admin);
+    public string? Username { get; private set; }
+    // false until this M answered the account question: an M without accounts (older) lets every device connect, and this side
+    // does not stop its own connections then
+    public bool AccountsKnown { get; private set; }
+    void Apply(AccountReply reply) { Username = reply.Username; AccountsKnown = true; Changed?.Invoke(); }
+    public const string LoginFirst = "请先登录：只有注册用户可以连接其他设备（账号由管理员创建）。";
+    public async Task RefreshAccount(CancellationToken ct) => Apply(await Call<AccountReply>("/api/v1/account", new { }, ct));
+    public async Task Login(string username, string password, CancellationToken ct = default)
+    {
+        username = (username ?? "").Trim();
+        if (username.Length == 0 || string.IsNullOrEmpty(password)) throw new InvalidOperationException("请输入用户名和密码。");
+        Apply(await Call<AccountReply>("/api/v1/account/login", new { username, password }, ct));
+    }
+    public async Task Logout(CancellationToken ct = default) => Apply(await Call<AccountReply>("/api/v1/account/logout", new { }, ct));
+    public async Task ChangePassword(string old, string password, CancellationToken ct = default)
+    {
+        if ((password ?? "").Length < 8) throw new InvalidOperationException("新密码至少 8 个字符。");
+        await Call<JsonElement>("/api/v1/account/password", new { old, @new = password }, ct);
     }
     // The loop (network calls, signing, file writes) runs on the thread pool; UI code only receives its events.
     public void Start(){engine.Events.Add("INFO","服务器","正在连接可信服务器 "+engine.Settings.Server);loop=Task.Run(Run);}
@@ -558,6 +583,7 @@ sealed class DirectoryClient : IAsyncDisposable
         if (code.Length == 0) await Register(ct);
         if (machine == Code) throw new InvalidOperationException("不能连接本机。");
         await EnsureNetwork(ct);
+        if (AccountsKnown && Username == null) throw new InvalidOperationException(LoginFirst);   // M refuses it too; saying so here saves the round trips
         Report(machine,ConnectStage.Lookup);
         var target = await Call<MachineInfo>("/api/v1/lookup", new { code = machine }, ct);
         if (target.Code != machine) throw new InvalidDataException("机器编号不匹配。");

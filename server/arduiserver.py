@@ -26,7 +26,7 @@ CODE = re.compile(r'[A-Z0-9]{6}\Z')
 ENDPOINT = re.compile(r'[0-9a-f]{64}\Z')
 TICKET = re.compile(r'[0-9a-f]{32}\Z')
 COMPUTER_NAME = re.compile(r'[^\x00-\x1f\x7f]{1,64}\Z')
-VERSION = 'v6.6'
+VERSION = 'v6.7'
 # Network probe (see probe_udp.py): this server only mints short-lived tokens, each bound to the caller's IP address.
 PROBE_KEY = os.environ.get('ARDUI_PROBE_KEY', DB + '.probe-key')
 PROBE_HOST = os.environ.get('ARDUI_PROBE_HOST', '')
@@ -34,10 +34,10 @@ PROBE_PORT = int(os.environ.get('ARDUI_PROBE_PORT', '7843'))
 # Clients older than this are refused with 426 (the header is "v<major>.pre<n>", sent by ArdUi since v5.pre1; older clients send none).
 # v6 waits for news instead of polling every few seconds (WAIT_SECONDS below); since v6.pre2 the controller names the session's
 # ArdFerry in its signed request (both sides use it); since v6.6 (v6.pre6) the permissions mean what they say now (the conversation carries
-# files and calls, "文件" is the shared folder). Older clients are not supported: they are refused, and find the new one at /api/v1/release. ARDUI_MIN_CLIENT=v<major>.pre<n> overrides it (e.g. while a release is rolling out).
+# files and calls, "文件" is the shared folder); since v6.7 only signed-in devices start sessions. Older clients are not supported: they are refused, and find the new one at /api/v1/release. ARDUI_MIN_CLIENT=v<major>.pre<n> overrides it (e.g. while a release is rolling out).
 CLIENT = re.compile(r'v(\d{1,3})\.pre(\d{1,3})\Z')
-_min = CLIENT.fullmatch(os.environ.get('ARDUI_MIN_CLIENT', 'v6.pre6'))
-MIN_CLIENT = (int(_min.group(1)), int(_min.group(2))) if _min else (6, 6)
+_min = CLIENT.fullmatch(os.environ.get('ARDUI_MIN_CLIENT', 'v6.pre7'))
+MIN_CLIENT = (int(_min.group(1)), int(_min.group(2))) if _min else (6, 7)
 MIN_TEXT = 'v%d.pre%d' % MIN_CLIENT
 # What this network's clients need besides this server: where M's relay directory and address discovery are, and M's key.
 # Written by the operator (selfhost.sh / deploy.sh); see ROLES.md.
@@ -273,10 +273,17 @@ def initialize():
           probes INTEGER NOT NULL, ok INTEGER NOT NULL, rtt REAL, sessions INTEGER NOT NULL, session_rtt REAL, mbps REAL,
           PRIMARY KEY(minute,node,device));
         CREATE INDEX IF NOT EXISTS ferry_reports_minute ON ferry_reports(minute);
+        CREATE TABLE IF NOT EXISTS users(
+          id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL COLLATE NOCASE, salt BLOB NOT NULL, hash BLOB NOT NULL,
+          admin INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS device_users(
+          endpoint TEXT PRIMARY KEY, user INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, since INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS admin_sessions(token TEXT PRIMARY KEY, user INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires INTEGER NOT NULL);
         ''')
         # Computer name shown to controllers that hold a signed grant; added after the first release.
         if 'name' not in {row[1] for row in db.execute('PRAGMA table_info(devices)')}:
             db.execute("ALTER TABLE devices ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+
     os.chmod(DB, 0o600)
 
 def limit(name, count, seconds):
@@ -609,8 +616,182 @@ def ferry_page(view):
     data = json.dumps(view, ensure_ascii=False).replace('</', '<\\/')
     return FERRY_PAGE.replace('__DATA__', data)
 
+# ---- accounts -----------------------------------------------------------------------------------------------------------------------
+# Users exist only because an administrator made them (the first one on the server: arduiserver.py --add-user NAME --admin). A device
+# signs in with a user's name and password and is then that user's. Only a signed-in device may start a session (control another
+# device): M refuses an anonymous controller's connection request, so its traffic never reaches this network's ArdFerry nodes. The
+# controlled side never needs an account.
+USER_NAME = re.compile(r'[A-Za-z0-9_.@-]{2,40}\Z|[\u4e00-\u9fff\w.@-]{2,40}\Z')
+
+def password_hash(password, salt):
+    return hashlib.scrypt(password.encode(), salt=salt, n=1 << 14, r=8, p=1, dklen=32)
+
+def check_password(password):
+    if not isinstance(password, str) or not 8 <= len(password) <= 200: raise ApiError(400, '密码需要 8 到 200 个字符。')
+    return password
+
+def set_password(db, user, password):
+    salt = secrets.token_bytes(16)
+    db.execute('UPDATE users SET salt=?, hash=? WHERE id=?', (salt, password_hash(check_password(password), salt), user))
+
+def add_user(name, password=None, admin=False):
+    if not isinstance(name, str) or not USER_NAME.fullmatch(name): raise ApiError(400, '用户名需要 2 到 40 个字符（字母、数字、汉字、. _ @ -）。')
+    password = password or secrets.token_urlsafe(12)
+    salt = secrets.token_bytes(16)
+    with database() as db:
+        try:
+            db.execute('INSERT INTO users(name,salt,hash,admin,created) VALUES(?,?,?,?,?)',
+                       (name, salt, password_hash(check_password(password), salt), int(admin), int(time.time())))
+        except sqlite3.IntegrityError: raise ApiError(409, '用户名已存在。')
+    return password
+
+def verify_user(db, name, password):
+    row = db.execute('SELECT * FROM users WHERE name=?', (name,)).fetchone() if isinstance(name, str) else None
+    import hmac
+    if row is None or not isinstance(password, str) or not hmac.compare_digest(password_hash(password, row['salt']), row['hash']):
+        raise ApiError(403, '用户名或密码不正确。')
+    if row['disabled']: raise ApiError(403, '该账号已被停用，请联系管理员。')
+    return row
+
+def member_of(db, endpoint):
+    """The active user a device is signed in as (None: anonymous)."""
+    return db.execute('SELECT users.* FROM device_users JOIN users ON users.id=device_users.user WHERE device_users.endpoint=? AND users.disabled=0',
+                      (endpoint,)).fetchone()
+
+def account(path, endpoint, data, ip, now):
+    if path == '/api/v1/account':
+        with database() as db:
+            row = member_of(db, endpoint)
+        return {'username': row['name'] if row else None, 'admin': bool(row and row['admin'])}
+    if path == '/api/v1/account/login':
+        limit('login:' + ip, 10, 600)
+        name = data.get('username'); limit('login-user:' + str(name).lower()[:40], 10, 600)
+        with database() as db:
+            db.execute('BEGIN IMMEDIATE')
+            registered(db, endpoint)
+            row = verify_user(db, name, data.get('password'))
+            db.execute('INSERT INTO device_users VALUES(?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user=excluded.user, since=excluded.since', (endpoint, row['id'], now))
+        return {'username': row['name'], 'admin': bool(row['admin'])}
+    if path == '/api/v1/account/logout':
+        with database() as db: db.execute('DELETE FROM device_users WHERE endpoint=?', (endpoint,))
+        return {'username': None}
+    if path == '/api/v1/account/password':
+        limit('password:' + endpoint, 10, 600)
+        with database() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = member_of(db, endpoint)
+            if row is None: raise ApiError(403, '请先登录。')
+            verify_user(db, row['name'], data.get('old'))
+            set_password(db, row['id'], data.get('new'))
+        return {'ok': True}
+    return None
+
+# ---- the administration page ------------------------------------------------------------------------------------------------------
+# /api/admin: administrators make users (a name is required), reset passwords, stop users (which takes away their right to start
+# sessions), and change their own password. The page signs in with an administrator's name and password; the session is an HttpOnly, Secure,
+# SameSite=Strict cookie limited to /api/admin, and every request that reads or changes anything must carry X-ArdUi-Admin: 1 (a
+# page on another site cannot add that header without this server allowing it, which it never does).
+ADMIN_SESSION_SECONDS = 12 * 3600
+
+def admin_reply(start_response, status, result, cookie=None):
+    body = json.dumps(result, ensure_ascii=False).encode()
+    headers = [('Content-Type', 'application/json; charset=utf-8'), ('Content-Length', str(len(body))), ('Cache-Control', 'no-store'), ('X-Content-Type-Options', 'nosniff')]
+    if cookie is not None: headers.append(('Set-Cookie', cookie))
+    start_response(f'{status} {HTTPStatus(status).phrase}', headers)
+    return [body]
+
+def admin_user(environ):
+    if environ.get('HTTP_X_ARDUI_ADMIN') != '1': raise ApiError(403, '请求缺少管理标记。')
+    token = ''
+    for part in environ.get('HTTP_COOKIE', '').split(';'):
+        name, _, value = part.strip().partition('=')
+        if name == 'ardui_admin': token = value
+    if not re.fullmatch(r'[0-9a-f]{64}', token): raise ApiError(401, '请先登录。')
+    digest = hashlib.sha256(token.encode()).hexdigest(); now = int(time.time())
+    with database() as db:
+        db.execute('DELETE FROM admin_sessions WHERE expires<?', (now,))
+        row = db.execute('SELECT users.* FROM admin_sessions JOIN users ON users.id=admin_sessions.user WHERE token=? AND expires>=?', (digest, now)).fetchone()
+    if row is None or not row['admin'] or row['disabled']: raise ApiError(401, '请先登录。')
+    return row, digest
+
+def admin_api(path, environ, start_response):
+    method = environ['REQUEST_METHOD']
+    if path in ('/api/admin', '/api/admin/') and method == 'GET':
+        body = ADMIN_PAGE.encode()
+        start_response('200 OK', [('Content-Type', 'text/html; charset=utf-8'), ('Content-Length', str(len(body))), ('Cache-Control', 'no-store'),
+                                  ('X-Content-Type-Options', 'nosniff'), ('X-Frame-Options', 'DENY'), ('Content-Security-Policy', "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'")])
+        return [body]
+    ip = environ.get('HTTP_X_REAL_IP') or environ.get('REMOTE_ADDR', 'unknown')
+    try: length = int(environ.get('CONTENT_LENGTH') or 0)
+    except ValueError: raise ApiError(400, '无效内容长度。')
+    if length > 8192: raise ApiError(413, '请求过大。')
+    data = {}
+    if length:
+        try: data = json.loads(environ['wsgi.input'].read(length))
+        except ValueError: raise ApiError(400, '请求格式无效。')
+        if not isinstance(data, dict): raise ApiError(400, '请求格式无效。')
+    if path == '/api/admin/login' and method == 'POST':
+        if environ.get('HTTP_X_ARDUI_ADMIN') != '1': raise ApiError(403, '请求缺少管理标记。')
+        limit('admin-login:' + ip, 10, 600)
+        with database() as db:
+            row = verify_user(db, data.get('name'), data.get('password'))
+            if not row['admin']: raise ApiError(403, '这个账号不是管理员。')
+            token = secrets.token_hex(32)
+            db.execute('INSERT INTO admin_sessions VALUES(?,?,?)', (hashlib.sha256(token.encode()).hexdigest(), row['id'], int(time.time()) + ADMIN_SESSION_SECONDS))
+        return admin_reply(start_response, 200, {'name': row['name']},
+                           f'ardui_admin={token}; Path=/api/admin; HttpOnly; Secure; SameSite=Strict; Max-Age={ADMIN_SESSION_SECONDS}')
+    me, session = admin_user(environ)
+    if path == '/api/admin/logout' and method == 'POST':
+        with database() as db: db.execute('DELETE FROM admin_sessions WHERE token=?', (session,))
+        return admin_reply(start_response, 200, {'ok': True}, 'ardui_admin=; Path=/api/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=0')
+    if path == '/api/admin/me' and method == 'GET':
+        return admin_reply(start_response, 200, {'name': me['name']})
+    if path == '/api/admin/users' and method == 'GET':
+        with database() as db:
+            rows = db.execute('SELECT users.id, users.name, users.admin, users.disabled, users.created, '
+                              'count(device_users.endpoint) AS devices, max(devices.seen) AS seen '
+                              'FROM users LEFT JOIN device_users ON device_users.user=users.id LEFT JOIN devices ON devices.endpoint=device_users.endpoint '
+                              'GROUP BY users.id ORDER BY users.name COLLATE NOCASE').fetchall()
+        return admin_reply(start_response, 200, {'users': [dict(row) for row in rows], 'me': me['id']})
+    if path == '/api/admin/users' and method == 'POST':
+        limit('admin-change:' + str(me['id']), 120, 600)
+        password = data.get('password') or None
+        made = add_user(data.get('name'), password, bool(data.get('admin')))
+        return admin_reply(start_response, 200, {'name': data.get('name'), 'password': None if password else made})
+    match = re.fullmatch(r'/api/admin/users/(\d{1,9})', path)
+    if match and method in ('POST', 'DELETE'):
+        limit('admin-change:' + str(me['id']), 120, 600)
+        user = int(match.group(1)); result = {'ok': True}
+        with database() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM users WHERE id=?', (user,)).fetchone()
+            if row is None: raise ApiError(404, '没有这个用户。')
+            if user == me['id'] and (method == 'DELETE' or data.get('disabled') or data.get('admin') is False):
+                raise ApiError(400, '不能停用、删除或降级自己。')
+            if method == 'DELETE':
+                db.execute('DELETE FROM users WHERE id=?', (user,))
+            else:
+                for field in ('disabled', 'admin'):
+                    if field in data: db.execute(f'UPDATE users SET {field}=? WHERE id=?', (int(bool(data[field])), user))
+                if data.get('resetPassword'):
+                    password = secrets.token_urlsafe(12); set_password(db, user, password); result['password'] = password
+                if data.get('disabled') or data.get('resetPassword'):
+                    db.execute('DELETE FROM device_users WHERE user=?', (user,))   # signed out everywhere
+                    db.execute('DELETE FROM admin_sessions WHERE user=?', (user,))
+        return admin_reply(start_response, 200, result)
+    if path == '/api/admin/password' and method == 'POST':
+        limit('admin-change:' + str(me['id']), 120, 600)
+        with database() as db:
+            verify_user(db, me['name'], data.get('old'))
+            set_password(db, me['id'], data.get('new'))
+        return admin_reply(start_response, 200, {'ok': True})
+    raise ApiError(404, '接口不存在。')
+
 def dispatch(path, endpoint, data, ip, envelope):
     now=int(time.time())
+    if path.startswith('/api/v1/account'):
+        answer=account(path,endpoint,data,ip,now)
+        if answer is not None: return answer
     if path == '/api/v1/ferry-report':
         return ferry_report(endpoint, data, now)
     if path == '/api/v1/register':
@@ -729,6 +910,7 @@ def dispatch(path, endpoint, data, ip, envelope):
         with database() as db:
             db.execute('BEGIN IMMEDIATE')
             registered(db,endpoint)
+            if member_of(db,endpoint) is None: raise ApiError(403,'请先登录：只有注册用户可以连接其他设备（账号由管理员创建）。')
             target=db.execute('SELECT * FROM devices WHERE code=? AND endpoint=?',(code,target_id)).fetchone()
             if target is None or not target['enabled'] or target['seen']<now-20:
                 raise ApiError(403,'对端离线或未开放远程访问。')
@@ -806,6 +988,8 @@ def application(environ,start_response):
                 start_response('200 OK',[('Content-Type','text/html; charset=utf-8'),('Content-Length',str(len(body))),('Cache-Control','no-store'),('X-Content-Type-Options','nosniff')])
                 return [body]
             result=view
+        elif path=='/api/admin' or path.startswith('/api/admin/') and not path.startswith('/api/admin/upload'):
+            return admin_api(path,environ,start_response)
         elif path=='/api/v1/release' and environ['REQUEST_METHOD']=='GET':
             # not behind the version gate: a client refused for being too old must still find the new one
             limit('release:'+(environ.get('HTTP_X_REAL_IP') or environ.get('REMOTE_ADDR','unknown')),60,3600)
@@ -871,6 +1055,83 @@ async def _waited(wait, environ):
             status, result = 500, {'error': '服务暂时不可用。'}
         return b''.join(json_reply(status, result, lambda line, headers: reply.update(status=line, headers=headers)))
     return await loop.run_in_executor(_pool, again), reply
+
+ADMIN_PAGE = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>管理 · ArdUi</title>
+<style>
+:root{--bg:#fafaf8;--card:#fff;--line:#ecebe6;--text:#1f1e1d;--muted:#8a877f;--accent:#c96442;--hover:#f6f5f1;--ok:#2f7d4f;--bad:#b3261e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 "Segoe UI","Microsoft YaHei UI",system-ui,sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:28px 20px 60px}
+header{display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+.logo{width:34px;height:34px;border-radius:9px;background:var(--accent);color:#fff;display:grid;place-items:center;font-weight:700}
+h1{font-size:18px;margin:0;font-weight:600} h2{font-size:15px;margin:0 0 12px;font-weight:600}
+.sub{color:var(--muted);font-size:12px}
+.bar{margin-left:auto;display:flex;gap:8px;align-items:center}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
+input{font:inherit;border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:#fff;min-width:0}
+input:focus{outline:none;border-color:var(--accent)}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:8px;padding:7px 14px;cursor:pointer}
+button:hover{background:var(--hover)} button.primary{background:var(--accent);border-color:var(--accent);color:#fff} button.danger:hover{color:var(--bad)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+table{width:100%;border-collapse:collapse}
+th{font-weight:500;color:var(--muted);font-size:12px;text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+.tag{display:inline-block;font-size:11px;padding:1px 8px;border-radius:10px;background:var(--hover);color:var(--muted);margin-left:6px}
+.tag.on{background:#eaf4ee;color:var(--ok)} .tag.off{background:#fbeaea;color:var(--bad)}
+td.ops{text-align:right;white-space:nowrap} td.ops button{padding:3px 10px;font-size:12px}
+.muted{color:var(--muted);font-size:12px}
+.note{background:#fbeee8;border-radius:10px;padding:10px 14px;margin-top:12px;font-size:13px;word-break:break-all}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1f1e1d;color:#fff;padding:9px 16px;border-radius:10px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none}
+.toast.show{opacity:.95}
+.login{max-width:360px;margin:80px auto}
+.login input{width:100%;margin-bottom:10px}
+</style></head><body>
+<div class="wrap">
+ <div id="login" class="card login" hidden>
+  <header><div class="logo">A</div><div><h1>ArdUi 管理</h1><div class="sub">只有管理员可以登录</div></div></header>
+  <input id="ln" placeholder="管理员用户名" autocomplete="username"><input id="lp" type="password" placeholder="密码" autocomplete="current-password">
+  <button class="primary" id="lb" style="width:100%">登录</button>
+ </div>
+ <div id="app" hidden>
+  <header><div class="logo">A</div><div><h1>ArdUi 管理</h1><div class="sub" id="who"></div></div>
+   <div class="bar"><button id="logout">退出登录</button></div></header>
+  <div class="card"><h2>新建用户</h2>
+   <div class="row"><input id="nn" placeholder="用户名（必填）" maxlength="40"><input id="np" type="password" placeholder="初始密码（留空自动生成）"><label class="muted"><input type="checkbox" id="na"> 管理员</label><button class="primary" id="nb">创建</button></div>
+   <div id="made"></div>
+  </div>
+  <div class="card"><h2>用户</h2><table><thead><tr><th>用户名</th><th>设备</th><th>最近在线</th><th>创建</th><th></th></tr></thead><tbody id="users"></tbody></table>
+   <p class="muted" id="limits"></p></div>
+  <div class="card"><h2>修改我的密码</h2><div class="row"><input id="po" type="password" placeholder="当前密码"><input id="pn" type="password" placeholder="新密码（至少 8 个字符）"><button id="pb">修改</button></div></div>
+ </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const $=id=>document.getElementById(id);
+function toast(t){const e=$('toast');e.textContent=t;e.classList.add('show');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),3000)}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function day(t){return t?new Date(t*1000).toLocaleString('zh-CN',{hour12:false}).slice(0,16):'—'}
+async function api(method,path,body){const r=await fetch('/api/admin'+path,{method,headers:{'X-ArdUi-Admin':'1','Content-Type':'application/json'},body:body?JSON.stringify(body):undefined,credentials:'same-origin'});
+  const j=await r.json().catch(()=>({}));if(r.status===401){show(false);throw new Error(j.error||'请先登录')}if(!r.ok)throw new Error(j.error||r.status);return j}
+function show(app){$('login').hidden=app;$('app').hidden=!app}
+async function load(){const me=await api('GET','/me');$('who').textContent='已登录：'+me.name;$('limits').textContent='只有已登录的设备可以连接（控制）其他设备；未登录的设备（匿名用户）只能被控。被控的一方不需要账号。停用用户即收回其连接权限。';
+  const d=await api('GET','/users');$('users').innerHTML=d.users.map(u=>'<tr><td>'+esc(u.name)+(u.admin?'<span class="tag on">管理员</span>':'')+(u.disabled?'<span class="tag off">已停用</span>':'')+'</td><td>'+u.devices+'</td><td>'+day(u.seen)+'</td><td>'+day(u.created)+'</td>'+
+   '<td class="ops"><button data-a="reset" data-i="'+u.id+'">重置密码</button>'+
+   (u.id===d.me?'':'<button data-a="admin" data-v="'+(u.admin?0:1)+'" data-i="'+u.id+'">'+(u.admin?'取消管理员':'设为管理员')+'</button><button data-a="disable" data-v="'+(u.disabled?0:1)+'" data-i="'+u.id+'">'+(u.disabled?'启用':'停用')+'</button><button class="danger" data-a="delete" data-i="'+u.id+'">删除</button>')+'</td></tr>').join('');show(true)}
+$('lb').onclick=async()=>{try{await api('POST','/login',{name:$('ln').value.trim(),password:$('lp').value});$('lp').value='';await load()}catch(x){toast(x.message)}};
+$('lp').onkeydown=e=>{if(e.key==='Enter')$('lb').click()};
+$('logout').onclick=async()=>{try{await api('POST','/logout')}catch(x){}show(false)};
+$('nb').onclick=async()=>{try{const r=await api('POST','/users',{name:$('nn').value.trim(),password:$('np').value||null,admin:$('na').checked});
+  $('made').innerHTML='<div class="note">已创建 <b>'+esc(r.name)+'</b>'+(r.password?'，初始密码：<b>'+esc(r.password)+'</b>（只显示这一次，请转告用户并让其登录后修改）':'')+'</div>';$('nn').value=$('np').value='';$('na').checked=false;load()}catch(x){toast(x.message)}};
+$('users').onclick=async e=>{const b=e.target.closest('button');if(!b)return;const id=b.dataset.i,a=b.dataset.a,v=b.dataset.v==='1';
+  try{if(a==='delete'){if(!confirm('删除这个用户？它的设备会变回匿名用户。'))return;await api('DELETE','/users/'+id)}
+   else if(a==='reset'){if(!confirm('重置密码？该用户的设备会被登出。'))return;const r=await api('POST','/users/'+id,{resetPassword:true});$('made').innerHTML='<div class="note">新密码：<b>'+esc(r.password)+'</b>（只显示这一次）</div>'}
+   else await api('POST','/users/'+id,{[a==='disable'?'disabled':a]:v});load()}catch(x){toast(x.message)}};
+$('pb').onclick=async()=>{try{await api('POST','/password',{old:$('po').value,new:$('pn').value});$('po').value=$('pn').value='';toast('密码已修改')}catch(x){toast(x.message)}};
+load().catch(()=>show(false));
+</script></body></html>"""
 
 # ---- one-time uploads ------------------------------------------------------------------------------------------------------------
 # The operator brings a release file (the ArdUi installer, the M package) to this M from any machine with a fast connection, without
@@ -991,6 +1252,18 @@ async def asgi(scope, receive, send):
         if isinstance(payload, FileChunks): payload.close()
 
 initialize()
+if __name__=='__main__' and sys.argv[1:2] == ['--add-user'] and len(sys.argv) in (3, 4):
+    # as the service's user: sudo -u arduiserver python3 arduiserver.py --add-user NAME [--admin]; prints the password once
+    try: print(add_user(sys.argv[2], admin=sys.argv[3:] == ['--admin']))
+    except ApiError as ex: raise SystemExit(ex.message)
+    raise SystemExit
+if __name__=='__main__' and sys.argv[1:2] == ['--reset-password'] and len(sys.argv) == 3:
+    password = secrets.token_urlsafe(12)
+    with database() as db:
+        row = db.execute('SELECT id FROM users WHERE name=?', (sys.argv[2],)).fetchone()
+        if row is None: raise SystemExit('没有这个用户。')
+        set_password(db, row['id'], password)
+    print(password); raise SystemExit
 if __name__=='__main__' and sys.argv[1:] == ['--upload-token']:
     print(make_upload_token())   # as the service's user: sudo -u arduiserver python3 arduiserver.py --upload-token
     raise SystemExit

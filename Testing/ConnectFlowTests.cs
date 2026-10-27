@@ -23,6 +23,8 @@ static class ConnectFlowTests
         Check(ConnectFlow.Classify(new IOException(ConnectFlow.RejectedText)).AskPassword, "NoPermission asks for the password again");
         Check(Kind(new IOException("对端未接受连接，请检查允许访问开关。")) == ConnectFailure.NoPermission, "ticket rejected → NoPermission");
         Check(Kind(new IOException("机器编号不存在。")) == ConnectFailure.NotFound, "unknown code → NotFound");
+        Check(Kind(new InvalidOperationException(DirectoryClient.LoginFirst)) == ConnectFailure.NeedLogin && Kind(new IOException("请先登录：只有注册用户可以连接其他设备（账号由管理员创建）。")) == ConnectFailure.NeedLogin,
+            "an anonymous controller (refused here or by M) → NeedLogin");
         Check(Kind(new IOException("对端离线或未开放远程访问。")) == ConnectFailure.Offline, "offline → Offline");
         Check(!ConnectFlow.Classify(new IOException("对端离线或未开放远程访问。")).AskPassword, "Offline does not ask for the password");
         Check(Kind(new InvalidDataException("该机器的 EndpointId 已改变！已阻止连接，请通过独立渠道核对。")) == ConnectFailure.SecurityWarning, "endpoint changed → SecurityWarning");
@@ -41,12 +43,12 @@ static class ConnectFlowTests
         Check(ConnectFlow.NormaliseCode("ＡＢＣ１２３") == null, "full-width letters are not a code");
         Check(ConnectFlow.NormaliseCode("设备A7B2K9") == "A7B2K9", "non-ASCII characters are ignored");
         Check(Kind(new IOException("客户端版本过旧，请升级到 ArdUi v5.pre1 或更高版本。")) == ConnectFailure.Outdated, "an outdated client is told to upgrade");
-        Check(ClientVersion.Allowed("v6.pre6") && ClientVersion.Allowed("v6.pre12") && ClientVersion.Allowed("v7.pre1") && !ClientVersion.Allowed("v6.pre5") && !ClientVersion.Allowed("v6.pre2") && !ClientVersion.Allowed("v5.pre5"), "v6.pre6 (v6.6) and newer are allowed: older ones read the permissions differently");
+        Check(ClientVersion.Allowed("v6.pre7") && ClientVersion.Allowed("v6.pre12") && ClientVersion.Allowed("v7.pre1") && !ClientVersion.Allowed("v6.pre6") && !ClientVersion.Allowed("v6.pre5") && !ClientVersion.Allowed("v6.pre2") && !ClientVersion.Allowed("v5.pre5"), "v6.pre7 (v6.7) and newer are allowed: older ones cannot sign in");
         Check(!ClientVersion.Allowed("v4.pre9") && !ClientVersion.Allowed("v3.pre17") && !ClientVersion.Allowed(null) && !ClientVersion.Allowed("") && !ClientVersion.Allowed("5.0.0-pre.1") && !ClientVersion.Allowed("v5.pre"), "older, missing and malformed versions are refused");
         Check(FrdOpened.WindowTitle("办公电脑 · K4DD0B · 远程桌面 - ArdUi") == "办公电脑 · K4DD0B · 远程桌面 - ArdUi" && FrdOpened.WindowTitle("a\r\nb\t") == "ab"
               && FrdOpened.WindowTitle(new string('x', 300))!.Length == 200 && FrdOpened.WindowTitle(" \n ") == null && FrdOpened.WindowTitle(null) == null,
             "the FRD window title is 1–200 characters without control characters, or none");
-        Check(Program.Version == "v6.6" && Program.WireVersion == "v6.pre6" && ClientVersion.Allowed(Program.WireVersion), "this build is v6.6 and announces itself as v6.pre6, the form the version gate reads");
+        Check(Program.Version == "v6.7" && Program.WireVersion == "v6.pre7" && ClientVersion.Allowed(Program.WireVersion), "this build is v6.7 and announces itself as v6.pre7, the form the version gate reads");
 
         // The relays come from M, never from config.json: a config written before v5.5 still loads, and its relay lines change nothing.
         var old = JsonSerializer.Deserialize<Settings>("{\"server\":\"https://bob.example/\",\"relay\":\"http://175.27.160.144:8080\",\"relayKey\":\"spki:00\",\"tcpPorts\":[3389],\"udpPorts\":[3389]}", Wire.Json)!;

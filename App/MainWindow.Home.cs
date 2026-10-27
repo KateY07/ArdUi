@@ -518,7 +518,7 @@ sealed partial class MainWindow
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Say(ex.Message); }
         };
         var languageNote = new TextBlock { Text = "界面语言（更改后重新启动 ArdUi 生效）", Foreground = Look.Muted, FontSize = 12 };
-        var generalTab = new StackPanel { Spacing = 8, Children = { Section("语言 / Language", Card(new StackPanel { Spacing = 6, Children = { languageNote, languageBox } })), Section("启动", Card(startupBox)), Section("界面", Card(new StackPanel { Spacing = 6, Children = { motionBox, islandBox, islandFull } })), Section("语音", Card(voiceBox)), Section("对话", Card(receiptsBox)) } };
+        var generalTab = new StackPanel { Spacing = 8, Children = { Section("账号", BuildAccount()), Section("语言 / Language", Card(new StackPanel { Spacing = 6, Children = { languageNote, languageBox } })), Section("启动", Card(startupBox)), Section("界面", Card(new StackPanel { Spacing = 6, Children = { motionBox, islandBox, islandFull } })), Section("语音", Card(voiceBox)), Section("对话", Card(receiptsBox)) } };
         var tabs = new WrapPanel { ItemSpacing = 6, LineSpacing = 6 };
         var pages = new (string Name, Control Body)[] { ("通用", generalTab), ("设备管理", devicesTab), ("被控与授权", accessTab), ("网络诊断", BuildNetDiagTab()), ("麦克风诊断", BuildMicDiagTab()), ("日志与关于", aboutTab) };
         var tabButtons = new List<Button>();

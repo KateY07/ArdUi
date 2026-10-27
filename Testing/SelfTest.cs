@@ -49,6 +49,10 @@ static class SelfTest
             };
             hd.Notice += message => Console.WriteLine("HOST: " + message);
             await hd.Register(ct); await cd.Register(ct);
+            // only a signed-in device may start a session: the controller signs in with the network's test account
+            // (ARDUI_TEST_USER / ARDUI_TEST_PASSWORD; an administrator makes it: arduiserver.py --add-user NAME)
+            if (Environment.GetEnvironmentVariable("ARDUI_TEST_USER") is { Length: > 0 } testUser)
+                await cd.Login(testUser, Environment.GetEnvironmentVariable("ARDUI_TEST_PASSWORD") ?? "", ct);
             var original = cd.Code; await cd.Register(ct);
             if (original != cd.Code || hd.Enabled) throw new Exception("Registration/default access failure.");
             Console.WriteLine("PASS: HTTPS registration, stable machine code, host disabled by default.");

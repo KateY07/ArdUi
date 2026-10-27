@@ -111,7 +111,10 @@ sealed partial class MainWindow : Window
         }
         // Title bar: one status capsule (logo, device code, connection state) on the left; window controls as glass discs on the right.
         machine.FontFamily=new FontFamily("Consolas");machine.FontSize=14;machine.Foreground=Ink;machine.LetterSpacing=2;
-        var capsule=Chrome.Capsule(new StackPanel{Orientation=Orientation.Horizontal,Spacing=12,Margin=new Thickness(12,2),Children={titleLogo,machine,Chrome.Divider(),netDot,netText}});
+        var capsule=Chrome.Capsule(new StackPanel{Orientation=Orientation.Horizontal,Spacing=12,Margin=new Thickness(12,2),Children={titleLogo,machine,Chrome.Divider(),netDot,netText,Chrome.Divider(),accountLabel}});
+        // who this device is: "匿名用户" or the signed-in user; a click leads to the account in the settings
+        accountLabel.Cursor=new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand);ToolTip.SetTip(accountLabel,"账号：点击登录或管理");
+        accountLabel.PointerPressed+=(_,e)=>{e.Handled=true;ShowSettings(true);selectSettingsTab?.Invoke(0);};
         capsule.HorizontalAlignment=HorizontalAlignment.Left;capsule.Cursor=new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand);
         ToolTip.SetTip(capsule,"本机设备 ID；点击复制");
         capsule.PointerPressed+=async(_,e)=>
@@ -574,6 +577,7 @@ sealed partial class MainWindow : Window
             netDot.Fill=directory.Online?Online:directory.Outdated!=null?Look.Accent:Relay;
             netText.Text=directory.Online?"在线":directory.Outdated!=null?"版本过旧，请升级 ArdUi":"正在连接网络…";
             ToolTip.SetTip(netText,directory.Outdated);
+            UpdateAccount();
             UpdateUpdate();
             RefreshHost();
             UpdatePassword();UpdateConnecting();
