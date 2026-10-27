@@ -217,12 +217,6 @@ sealed class DirectoryClient : IAsyncDisposable
     void Apply(AccountReply reply) { Username = reply.Username; AccountsKnown = true; Changed?.Invoke(); }
     public const string LoginFirst = "请先登录：只有注册用户可以连接其他设备（账号由管理员创建）。";
     public async Task RefreshAccount(CancellationToken ct) => Apply(await Call<AccountReply>("/api/v1/account", new { }, ct));
-    public async Task Login(string username, string password, CancellationToken ct = default)
-    {
-        username = (username ?? "").Trim();
-        if (username.Length == 0 || string.IsNullOrEmpty(password)) throw new InvalidOperationException("请输入用户名和密码。");
-        Apply(await Call<AccountReply>("/api/v1/account/login", new { username, password }, ct));
-    }
     // M names its newest installer in the replies devices get all the time: a newer one than this is looked at once (see Updater).
     public event Action<string>? NewRelease;
     void Announced(string? release) { if (release != null && Updater.Newer(release, Program.WireVersion)) NewRelease?.Invoke(release); }
@@ -251,11 +245,6 @@ sealed class DirectoryClient : IAsyncDisposable
     // The account page (registering: "#register", changing the password: "#password").
     public Uri AccountPage(string part = "") => new(http.BaseAddress!, "/api/account" + part);
     public async Task Logout(CancellationToken ct = default) => Apply(await Call<AccountReply>("/api/v1/account/logout", new { }, ct));
-    public async Task ChangePassword(string old, string password, CancellationToken ct = default)
-    {
-        if ((password ?? "").Length < 8) throw new InvalidOperationException("新密码至少 8 个字符。");
-        await Call<JsonElement>("/api/v1/account/password", new { old, @new = password }, ct);
-    }
     // The loop (network calls, signing, file writes) runs on the thread pool; UI code only receives its events.
     public void Start(){engine.Events.Add("INFO","服务器","正在连接可信服务器 "+engine.Settings.Server);loop=Task.Run(Run);}
     // null = unknown (server unreachable, old server, or no fresh answer yet).

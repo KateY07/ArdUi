@@ -630,7 +630,7 @@ def ferry_page(view):
 # ---- accounts -----------------------------------------------------------------------------------------------------------------------
 # Users are made by an administrator (the first one on the server: arduiserver.py --add-user NAME --admin), or register themselves
 # (name, e-mail, password) and wait until an administrator approves them; until then they cannot sign in. A device
-# signs in with a user's name and password and is then that user's. Only a signed-in device may start a session (control another
+# is signed in on the account page in a browser (with a user's name and password) and is then that user's. Only a signed-in device may start a session (control another
 # device): M refuses an anonymous controller's connection request, so its traffic never reaches this network's ArdFerry nodes. The
 # controlled side never needs an account.
 USER_NAME = re.compile(r'[A-Za-z0-9_.@-]{2,40}\Z|[\u4e00-\u9fff\w.@-]{2,40}\Z')
@@ -682,15 +682,6 @@ def account(path, endpoint, data, ip, now):
         with database() as db:
             row = member_of(db, endpoint)
         return {'username': row['name'] if row else None, 'admin': bool(row and row['admin'])}
-    if path == '/api/v1/account/login':
-        limit('login:' + ip, 10, 600)
-        name = data.get('username'); limit('login-user:' + str(name).lower()[:40], 10, 600)
-        with database() as db:
-            db.execute('BEGIN IMMEDIATE')
-            registered(db, endpoint)
-            row = verify_user(db, name, data.get('password'))
-            db.execute('INSERT INTO device_users VALUES(?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user=excluded.user, since=excluded.since', (endpoint, row['id'], now))
-        return {'username': row['name'], 'admin': bool(row['admin'])}
     if path == '/api/v1/account/login-start':
         # signing in happens on the account page in a browser: this device gets a one-time request (10 minutes) to open there
         limit('login-start:' + endpoint, 10, 600)
@@ -717,15 +708,6 @@ def account(path, endpoint, data, ip, now):
     if path == '/api/v1/account/logout':
         with database() as db: db.execute('DELETE FROM device_users WHERE endpoint=?', (endpoint,))
         return {'username': None}
-    if path == '/api/v1/account/password':
-        limit('password:' + endpoint, 10, 600)
-        with database() as db:
-            db.execute('BEGIN IMMEDIATE')
-            row = member_of(db, endpoint)
-            if row is None: raise ApiError(403, '请先登录。')
-            verify_user(db, row['name'], data.get('old'))
-            set_password(db, row['id'], data.get('new'))
-        return {'ok': True}
     return None
 
 # ---- the account page -----------------------------------------------------------------------------------------------------------

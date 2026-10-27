@@ -73,7 +73,9 @@ async def main():
     assert (await controller.call('/api/v1/register', {}))[0] == 200
     # only a signed-in device may start a session
     password = arduiserver.add_user('poller')
-    assert (await controller.call('/api/v1/account/login', {'username': 'poller', 'password': password}))[0] == 200
+    with arduiserver.database() as db:   # (signing in happens on the account page; here the device is simply made that user's)
+        user = db.execute("SELECT id FROM users WHERE name='poller'").fetchone()['id']
+        db.execute('INSERT INTO device_users VALUES(?,?,?)', (controller.id, user, int(time.time())))
     assert (await host.call('/api/v1/access', {'enabled': True}))[0] == 200
 
     # 1. the host waits; a connection request reaches it at once, not at the end of the wait

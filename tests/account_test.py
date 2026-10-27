@@ -39,6 +39,25 @@ class Device:
         return int(out['status'].split()[0]), json.loads(reply)
 
 
+def web(method, path, data=None, marked=True, query=''):
+    import io
+    body = json.dumps(data).encode() if data is not None else b''
+    out = {}
+    environ = {'REQUEST_METHOD': method, 'PATH_INFO': path, 'QUERY_STRING': query, 'CONTENT_LENGTH': str(len(body)), 'wsgi.input': io.BytesIO(body),
+               'REMOTE_ADDR': '203.0.113.' + str(secrets.randbelow(200) + 1)}
+    if marked: environ['HTTP_X_ARDUI_WEB'] = '1'
+    reply = b''.join(arduiserver.application(environ, lambda status, headers: out.update(status=status, headers=dict(headers))))
+    return int(out['status'].split()[0]), (json.loads(reply) if out['headers'].get('Content-Type', '').startswith('application/json') else reply)
+
+
+def sign_in(device, name, password):
+    """What a person does: the device asks for a sign-in request, the account page takes the name and password, the device learns it."""
+    token = device.call('/api/v1/account/login-start', {})[1]['token']
+    status, answer = web('POST', '/api/account/login', {'login': token, 'name': name, 'password': password})
+    if status != 200: return status, answer
+    return device.call('/api/v1/account/login-wait', {'token': token})
+
+
 def request(controller, host, code, session):
     ticket = secrets.token_hex(16)
     data = {'code': code, 'sessionId': session, 'targetEndpoint': host.id, 'requestId': ticket, 'expires': int(time.time()) + 200,
@@ -58,11 +77,12 @@ except arduiserver.ApiError as ex: assert ex.status == 409
 print('PASS: users are made by an administrator; names are unique')
 
 assert member.call('/api/v1/account', {})[1]['username'] is None
-assert member.call('/api/v1/account/login', {'username': 'alice', 'password': 'wrong-password'})[0] == 403
-status, answer = member.call('/api/v1/account/login', {'username': 'ALICE', 'password': password})
+assert sign_in(member, 'alice', 'wrong-password')[0] == 403
+status, answer = sign_in(member, 'ALICE', password)
 assert status == 200 and answer['username'] == 'alice', answer
 assert member.call('/api/v1/account', {})[1]['username'] == 'alice'
-print('PASS: a device signs in with name and password and is then that user')
+assert member.call('/api/v1/account/login', {'username': 'alice', 'password': password})[0] == 404   # no password through ArdUi
+print('PASS: a device is signed in on the account page and is then that user')
 
 (status, answer), _ = request(anonymous, host, code, secrets.token_hex(32))
 assert status == 403 and '请先登录' in answer['error'], (status, answer)
@@ -70,17 +90,18 @@ assert status == 403 and '请先登录' in answer['error'], (status, answer)
 assert status == 200, status
 print('PASS: only a signed-in device may start a session; the controlled side needs no account')
 
-assert member.call('/api/v1/account/password', {'old': 'wrong-password', 'new': 'new-password-1'})[0] == 403
-assert member.call('/api/v1/account/password', {'old': password, 'new': 'short'})[0] == 400
-assert member.call('/api/v1/account/password', {'old': password, 'new': 'new-password-1'})[0] == 200
-assert anonymous.call('/api/v1/account/login', {'username': 'alice', 'password': password})[0] == 403
-assert anonymous.call('/api/v1/account/login', {'username': 'alice', 'password': 'new-password-1'})[0] == 200
+assert member.call('/api/v1/account/password', {'old': password, 'new': 'new-password-1'})[0] == 404   # never through the device API
+assert web('POST', '/api/account/password', {'name': 'alice', 'old': 'wrong-password', 'new': 'new-password-1'})[0] == 403
+assert web('POST', '/api/account/password', {'name': 'alice', 'old': password, 'new': 'short'})[0] == 400
+assert web('POST', '/api/account/password', {'name': 'alice', 'old': password, 'new': 'new-password-1'})[0] == 200
+assert sign_in(anonymous, 'alice', password)[0] == 403
+assert sign_in(anonymous, 'alice', 'new-password-1')[0] == 200
 print('PASS: a user changes the password; the old one stops working')
 
 with arduiserver.database() as db: db.execute("UPDATE users SET disabled=1 WHERE name='alice'")
 assert member.call('/api/v1/account', {})[1]['username'] is None
 assert request(member, host, code, secrets.token_hex(32))[0][0] == 403
-assert member.call('/api/v1/account/login', {'username': 'alice', 'password': 'new-password-1'})[0] == 403
+assert sign_in(member, 'alice', 'new-password-1')[0] == 403
 with arduiserver.database() as db: db.execute("UPDATE users SET disabled=0 WHERE name='alice'")
 assert member.call('/api/v1/account/logout', {})[0] == 200 and member.call('/api/v1/account', {})[1]['username'] is None
 print('PASS: a disabled user or a signed-out device is anonymous')
@@ -114,10 +135,10 @@ assert status == 200 and made['password'] and panel('POST', '/api/admin/users', 
 assert panel('POST', '/api/admin/users', {'name': ''}, cookie=cookie)[0] == 400
 users = panel('GET', '/api/admin/users', cookie=cookie)[1]
 carol = next(u for u in users['users'] if u['name'] == 'carol')
-assert anonymous.call('/api/v1/account/login', {'username': 'carol', 'password': made['password']})[0] == 200
+assert sign_in(anonymous, 'carol', made['password'])[0] == 200
 status, reset, _ = panel('POST', f"/api/admin/users/{carol['id']}", {'resetPassword': True}, cookie=cookie)
 assert status == 200 and reset['password'] and anonymous.call('/api/v1/account', {})[1]['username'] is None
-assert anonymous.call('/api/v1/account/login', {'username': 'carol', 'password': reset['password']})[0] == 200
+assert sign_in(anonymous, 'carol', reset['password'])[0] == 200
 me = users['me']
 assert panel('DELETE', f'/api/admin/users/{me}', cookie=cookie)[0] == 400 and panel('POST', f'/api/admin/users/{me}', {'disabled': True}, cookie=cookie)[0] == 400
 assert panel('DELETE', f"/api/admin/users/{carol['id']}", cookie=cookie)[0] == 200 and anonymous.call('/api/v1/account', {})[1]['username'] is None
@@ -125,17 +146,6 @@ assert panel('POST', '/api/admin/logout', cookie=cookie)[0] == 200 and panel('GE
 print('PASS: the panel makes users (name required), resets passwords (signing them out), deletes; not itself')
 
 # the account page in a browser: register (pending until an administrator approves), sign a device in, change the password
-def web(method, path, data=None, marked=True, query=''):
-    import io
-    body = json.dumps(data).encode() if data is not None else b''
-    out = {}
-    environ = {'REQUEST_METHOD': method, 'PATH_INFO': path, 'QUERY_STRING': query, 'CONTENT_LENGTH': str(len(body)), 'wsgi.input': io.BytesIO(body),
-               'REMOTE_ADDR': '203.0.113.' + str(secrets.randbelow(200) + 1)}
-    if marked: environ['HTTP_X_ARDUI_WEB'] = '1'
-    reply = b''.join(arduiserver.application(environ, lambda status, headers: out.update(status=status, headers=dict(headers))))
-    return int(out['status'].split()[0]), (json.loads(reply) if out['headers'].get('Content-Type', '').startswith('application/json') else reply)
-
-
 status, page = web('GET', '/api/account', marked=False)
 assert status == 200 and b'ArdUi' in page
 assert web('POST', '/api/account/register', {'name': 'dave', 'email': 'dave@example.com', 'password': 'dave-password-1'}, marked=False)[0] == 403
