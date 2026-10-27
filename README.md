@@ -20,7 +20,7 @@ High-performance remote access for Windows. Peer-to-peer and end-to-end encrypte
 
 **[Website](https://katey07.github.io/ArdUi/)** · **[Download](https://github.com/KateY07/ArdUi/releases)** · [Self-hosting](#self-hosting) · [Historical design notes (Chinese)](docs/DESIGN-v2.md)
 
-Current version: v6.3. The official server refuses clients older than v6.2 (v6.pre2): since v6.2 both sides of a session meet on one ArdFerry chosen by the controller, which roughly halves the time to connect again on slow networks.
+Current version: v6.10. The official server refuses clients older than v6.10; only signed-in devices can connect to others (sign in and register on the server's account page).
 
 ## Why ArdUi
 
