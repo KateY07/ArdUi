@@ -45,7 +45,7 @@ class Device:
         return dict(endpoint=self.id, issuedAt=issued, nonce=nonce, payload=payload,
                     signature=base64.b64encode(self.key.sign(message)).decode())
 
-    def call(self, path, data, client='v6.pre7'):
+    def call(self, path, data, client='v6.pre10'):
         body = json.dumps(self.sign(path, data)).encode()
         environ = {'PATH_INFO': path, 'REQUEST_METHOD': 'POST', 'CONTENT_LENGTH': str(len(body)),
                    'wsgi.input': io.BytesIO(body), 'REMOTE_ADDR': '127.0.0.1', 'HTTP_X_ARDUI_CLIENT': client}
@@ -95,11 +95,11 @@ assert answer['peers'][host.id]['online'] is False, answer
 assert controller.call('/api/v1/presence', {'peers': 'x'})[0] == 400
 assert controller.call('/api/v1/presence', {'peers': [{'endpoint': host.id}]})[0] == 400
 assert controller.call('/api/v1/presence', {'peers': [], 'extra': 1})[0] == 400
-# Clients older than v6.pre7 are refused: no version header (every early release), an older one, or a malformed one.
-for header in ('', 'v4.pre9', 'v3.pre17', 'v5.pre0', 'v5.pre5', 'v5.pre9', 'v6.pre0', 'v6.pre1', 'v6.pre2', 'v6.pre5', 'v6.pre6', 'v6.pre', '6.0.0-pre.2', 'x' * 40):
+# Clients older than v6.pre10 are refused: no version header (every early release), an older one, or a malformed one.
+for header in ('', 'v4.pre9', 'v3.pre17', 'v5.pre0', 'v5.pre5', 'v5.pre9', 'v6.pre0', 'v6.pre1', 'v6.pre2', 'v6.pre5', 'v6.pre6', 'v6.pre7', 'v6.pre9', 'v6.pre', '6.0.0-pre.2', 'x' * 40):
     status, answer = controller.call('/api/v1/poll', {'enabled': True}, client=header)
     assert status == 426 and '版本过旧' in answer['error'], (header, status, answer)
-for header in ('v6.pre7', 'v6.pre8', 'v6.pre10', 'v7.pre1'):
+for header in ('v6.pre10', 'v6.pre11', 'v6.pre20', 'v7.pre1'):
     assert controller.call('/api/v1/register', {}, client=header)[0] == 200, header
 # The refusal comes before anything is checked or consumed: an unsigned body with an old header is 426, not 401.
 environ = {'PATH_INFO': '/api/v1/poll', 'REQUEST_METHOD': 'POST', 'CONTENT_LENGTH': '2', 'wsgi.input': io.BytesIO(b'{}'), 'REMOTE_ADDR': '127.0.0.1'}
@@ -110,18 +110,18 @@ assert seen['status'] == 426, seen
 health = {}
 environ = {'PATH_INFO': '/api/health', 'REQUEST_METHOD': 'GET', 'REMOTE_ADDR': '127.0.0.1'}
 body = b''.join(arduiserver.application(environ, lambda status, headers: health.update(status=int(status.split()[0]))))
-assert health['status'] == 200 and json.loads(body)['minClient'] == 'v6.pre7' and json.loads(body)['version'] == 'v6.9', body
+assert health['status'] == 200 and json.loads(body)['minClient'] == 'v6.pre10' and json.loads(body)['version'] == 'v6.10', body
 # The connection request carries the controller's version, signed with the rest of the request.
 req = {'code': 'AAAAAA', 'sessionId': 'a' * 64, 'targetEndpoint': 'b' * 64, 'requestId': 'c' * 32, 'expires': int(time.time()) + 200,
        'ferry': {'node': '805c40bca7e89af2', 'key': 'spki:3059', 'addresses': ['175.27.160.144:18443']}}
 assert controller.call('/api/v1/connect', dict(req))[0] == 400, 'a request without the version is invalid'
 assert controller.call('/api/v1/connect', dict(req, client='v5.pre5'))[0] == 426, 'an old version in the request is refused'
-assert controller.call('/api/v1/connect', dict(req, client='v6.pre7'))[0] != 400, 'a request with the version passes validation'
+assert controller.call('/api/v1/connect', dict(req, client='v6.pre10'))[0] != 400, 'a request with the version passes validation'
 for bad in (None, {}, dict({'node': '805c40bca7e89af2', 'key': 'spki:3059', 'addresses': ['175.27.160.144:18443']}, key='3059'), dict({'node': '805c40bca7e89af2', 'key': 'spki:3059', 'addresses': ['175.27.160.144:18443']}, addresses=[]), dict({'node': '805c40bca7e89af2', 'key': 'spki:3059', 'addresses': ['175.27.160.144:18443']}, node='a b'), dict({'node': '805c40bca7e89af2', 'key': 'spki:3059', 'addresses': ['175.27.160.144:18443']}, extra=1)):
-    assert controller.call('/api/v1/connect', dict(req, client='v6.pre7', ferry=bad))[0] == 400, ('the session ArdFerry is required and checked', bad)
-print('PASS: client version gate (v6.pre7); the request names a well-formed ArdFerry')
+    assert controller.call('/api/v1/connect', dict(req, client='v6.pre10', ferry=bad))[0] == 400, ('the session ArdFerry is required and checked', bad)
+print('PASS: client version gate (v6.pre10); the request names a well-formed ArdFerry')
 # What clients learn about this network: M's relay directory, address discovery and key, from the operator's file.
-def network(client='v6.pre7'):
+def network(client='v6.pre10'):
     seen = {}
     environ = {'PATH_INFO': '/api/v1/network', 'REQUEST_METHOD': 'GET', 'REMOTE_ADDR': '127.0.0.1', 'HTTP_X_ARDUI_CLIENT': client}
     body = b''.join(arduiserver.application(environ, lambda status, headers: seen.update(status=int(status.split()[0]))))

@@ -42,7 +42,7 @@ class Device:
 
 async def request(method, path, body=b'', ip='127.0.0.1'):
     scope = {'type': 'http', 'method': method, 'path': path, 'query_string': b'', 'client': ('127.0.0.1', 1),
-             'headers': [(b'content-length', str(len(body)).encode()), (b'x-ardui-client', b'v6.pre7'), (b'x-real-ip', ip.encode())]}
+             'headers': [(b'content-length', str(len(body)).encode()), (b'x-ardui-client', b'v6.pre10'), (b'x-real-ip', ip.encode())]}
     given = False
 
     async def receive():
@@ -84,7 +84,7 @@ async def main():
     assert not poll.done(), 'a poll with nothing new waits'
     ticket = secrets.token_hex(16)
     request_body = {'code': registered['code'], 'sessionId': secrets.token_hex(32), 'targetEndpoint': host.id,
-                    'requestId': ticket, 'expires': int(time.time()) + 200, 'client': 'v6.pre7',
+                    'requestId': ticket, 'expires': int(time.time()) + 200, 'client': 'v6.pre10',
                     'ferry': {'node': '805c40bca7e89af2', 'key': 'spki:3059', 'addresses': ['175.27.160.144:18443']}}
     status, answer = await controller.call('/api/v1/connect', request_body)
     assert status == 200, answer

@@ -34,7 +34,7 @@ class Device:
         import io
         out = {}
         environ = {'REQUEST_METHOD': 'POST', 'PATH_INFO': path, 'CONTENT_LENGTH': str(len(body)), 'wsgi.input': io.BytesIO(body),
-                   'HTTP_X_ARDUI_CLIENT': 'v6.pre7', 'REMOTE_ADDR': '198.51.100.' + str(secrets.randbelow(200) + 1)}
+                   'HTTP_X_ARDUI_CLIENT': 'v6.pre10', 'REMOTE_ADDR': '198.51.100.' + str(secrets.randbelow(200) + 1)}
         reply = b''.join(arduiserver.application(environ, lambda status, headers: out.update(status=status)))
         return int(out['status'].split()[0]), json.loads(reply)
 
@@ -61,7 +61,7 @@ def sign_in(device, name, password):
 def request(controller, host, code, session):
     ticket = secrets.token_hex(16)
     data = {'code': code, 'sessionId': session, 'targetEndpoint': host.id, 'requestId': ticket, 'expires': int(time.time()) + 200,
-            'client': 'v6.pre7', 'ferry': {'node': 'n1-m', 'key': 'spki:00', 'addresses': ['192.0.2.1:443']}}
+            'client': 'v6.pre10', 'ferry': {'node': 'n1-m', 'key': 'spki:00', 'addresses': ['192.0.2.1:443']}}
     return controller.call('/api/v1/connect', data), ticket
 
 

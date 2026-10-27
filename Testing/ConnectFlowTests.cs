@@ -43,7 +43,7 @@ static class ConnectFlowTests
         Check(ConnectFlow.NormaliseCode("ＡＢＣ１２３") == null, "full-width letters are not a code");
         Check(ConnectFlow.NormaliseCode("设备A7B2K9") == "A7B2K9", "non-ASCII characters are ignored");
         Check(Kind(new IOException("客户端版本过旧，请升级到 ArdUi v5.pre1 或更高版本。")) == ConnectFailure.Outdated, "an outdated client is told to upgrade");
-        Check(ClientVersion.Allowed("v6.pre7") && ClientVersion.Allowed("v6.pre12") && ClientVersion.Allowed("v7.pre1") && !ClientVersion.Allowed("v6.pre6") && !ClientVersion.Allowed("v6.pre5") && !ClientVersion.Allowed("v6.pre2") && !ClientVersion.Allowed("v5.pre5"), "v6.pre7 (v6.7) and newer are allowed: older ones cannot sign in");
+        Check(ClientVersion.Allowed("v6.pre10") && ClientVersion.Allowed("v6.pre12") && ClientVersion.Allowed("v7.pre1") && !ClientVersion.Allowed("v6.pre9") && !ClientVersion.Allowed("v6.pre7") && !ClientVersion.Allowed("v6.pre6") && !ClientVersion.Allowed("v6.pre5") && !ClientVersion.Allowed("v6.pre2") && !ClientVersion.Allowed("v5.pre5"), "v6.pre10 (v6.10) and newer are allowed: older ones sign in where M no longer accepts it");
         Check(!ClientVersion.Allowed("v4.pre9") && !ClientVersion.Allowed("v3.pre17") && !ClientVersion.Allowed(null) && !ClientVersion.Allowed("") && !ClientVersion.Allowed("5.0.0-pre.1") && !ClientVersion.Allowed("v5.pre"), "older, missing and malformed versions are refused");
         Check(FrdOpened.WindowTitle("办公电脑 · K4DD0B · 远程桌面 - ArdUi") == "办公电脑 · K4DD0B · 远程桌面 - ArdUi" && FrdOpened.WindowTitle("a\r\nb\t") == "ab"
               && FrdOpened.WindowTitle(new string('x', 300))!.Length == 200 && FrdOpened.WindowTitle(" \n ") == null && FrdOpened.WindowTitle(null) == null,
