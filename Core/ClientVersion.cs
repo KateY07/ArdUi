@@ -5,7 +5,9 @@
 // v5.5 (announced as v5.pre5) signs each session's key exchange with the device keys; older versions cannot, so they are turned away early.
 static class ClientVersion
 {
-    public const int MinMajor = 6, MinPre = 2;
+    // v6.6 (announced as v6.pre6): the conversation carries files and calls, "文件" is the shared folder (older versions read the
+    // permissions differently), messages are acknowledged, resumed and marked read.
+    public const int MinMajor = 6, MinPre = 6;
     public static string Minimum => $"v{MinMajor}.pre{MinPre}";
 
     public static bool Allowed(string? version)

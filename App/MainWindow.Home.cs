@@ -507,6 +507,8 @@ sealed partial class MainWindow
         islandBox.IsCheckedChanged += (_, _) => SaveIsland(); islandFull.IsCheckedChanged += (_, _) => SaveIsland(); islandFull.IsEnabled = islandBox.IsChecked == true;
         var voiceBox = new ToggleSwitch { OnContent = "允许语音通话（对方呼叫时响铃；建议戴耳机，避免回声）", OffContent = "允许语音通话（已关闭：自动拒绝来电）", IsChecked = !Motion.NoVoice };
         voiceBox.IsCheckedChanged += (_, _) => { try { Motion.SetVoice(voiceBox.IsChecked == true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Say(ex.Message); } };
+        var receiptsBox = new ToggleSwitch { OnContent = "发送已读回执（对方能看到你已读了哪些消息）", OffContent = "发送已读回执（已关闭：对方只看到“已送达”）", IsChecked = !Motion.NoReadReceipts };
+        receiptsBox.IsCheckedChanged += (_, _) => { try { Motion.SetReadReceipts(receiptsBox.IsChecked == true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Say(ex.Message); } };
         var languageBox = new ComboBox { ItemsSource = new[] { "自动（跟随 Windows）", "简体中文", "English" }, SelectedIndex = Motion.Language == "zh" ? 1 : Motion.Language == "en" ? 2 : 0, MinWidth = 220, HorizontalAlignment = HorizontalAlignment.Left };
         languageBox.SelectionChanged += (_, _) =>
         {
@@ -516,7 +518,7 @@ sealed partial class MainWindow
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Say(ex.Message); }
         };
         var languageNote = new TextBlock { Text = "界面语言（更改后重新启动 ArdUi 生效）", Foreground = Look.Muted, FontSize = 12 };
-        var generalTab = new StackPanel { Spacing = 8, Children = { Section("语言 / Language", Card(new StackPanel { Spacing = 6, Children = { languageNote, languageBox } })), Section("启动", Card(startupBox)), Section("界面", Card(new StackPanel { Spacing = 6, Children = { motionBox, islandBox, islandFull } })), Section("语音", Card(voiceBox)) } };
+        var generalTab = new StackPanel { Spacing = 8, Children = { Section("语言 / Language", Card(new StackPanel { Spacing = 6, Children = { languageNote, languageBox } })), Section("启动", Card(startupBox)), Section("界面", Card(new StackPanel { Spacing = 6, Children = { motionBox, islandBox, islandFull } })), Section("语音", Card(voiceBox)), Section("对话", Card(receiptsBox)) } };
         var tabs = new WrapPanel { ItemSpacing = 6, LineSpacing = 6 };
         var pages = new (string Name, Control Body)[] { ("通用", generalTab), ("设备管理", devicesTab), ("被控与授权", accessTab), ("网络诊断", BuildNetDiagTab()), ("麦克风诊断", BuildMicDiagTab()), ("日志与关于", aboutTab) };
         var tabButtons = new List<Button>();

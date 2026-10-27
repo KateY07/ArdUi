@@ -42,6 +42,21 @@ static class FilesTests
             Check(kept.Any(f => new FileInfo(f).Length == data.Length) && kept.Any(f => new FileInfo(f).Length == 3) && new DirectoryInfo(trash).Attributes.HasFlag(FileAttributes.Hidden),
                 "deleted and overwritten content is kept in the hidden recycle folder");
             Check(!(await (await Send("PROPFIND", "/", null, ("Depth", "1"))).Content.ReadAsStringAsync()).Contains(FileShareServer.Trash), "the recycle folder is not listed");
+            // the page's uploads: in pieces, continuing where they stopped
+            var big = RandomNumberGenerator.GetBytes(250_000);
+            (string, string)[] Up(long offset) => [("X-ArdUi-Upload-Key", "k0123456789abcdef"), ("X-ArdUi-Upload-Total", big.Length.ToString()), ("X-ArdUi-Upload-Offset", offset.ToString())];
+            static long Have(HttpResponseMessage r) => long.Parse(r.Headers.GetValues("X-ArdUi-Upload-Have").First());
+            var probe = await Send("PUT", "/big.bin", new ByteArrayContent([]), [("X-ArdUi-Upload-Key", "k0123456789abcdef"), ("X-ArdUi-Upload-Total", big.Length.ToString()), ("X-ArdUi-Upload-Probe", "1")]);
+            Check(probe.StatusCode == HttpStatusCode.OK && Have(probe) == 0, "a new upload has nothing yet");
+            var first = await Send("PUT", "/big.bin", new ByteArrayContent(big[..100_000]), Up(0));
+            Check(first.StatusCode == HttpStatusCode.Accepted && Have(first) == 100_000 && !File.Exists(Path.Combine(root, "big.bin")), "a piece is kept, the file does not appear yet");
+            var wrong = await Send("PUT", "/big.bin", new ByteArrayContent(big[50_000..]), Up(50_000));
+            Check(wrong.StatusCode == HttpStatusCode.Conflict && Have(wrong) == 100_000, "a piece at the wrong place is refused and told where to go on");
+            var rest = await Send("PUT", "/big.bin", new ByteArrayContent(big[100_000..]), Up(100_000));
+            Check(rest.StatusCode == HttpStatusCode.Created && File.ReadAllBytes(Path.Combine(root, "big.bin")).SequenceEqual(big)
+                  && !Directory.GetFiles(root).Any(f => Path.GetFileName(f).StartsWith(".ardui-upload-")), "the last piece completes the file, nothing is left over");
+            using (var listed = JsonDocument.Parse(await (await Send("GET", "/?json")).Content.ReadAsStringAsync()))
+                Check(listed.RootElement.GetProperty("entries").EnumerateArray().Any(e => e.GetProperty("name").GetString() == "big.bin" && e.GetProperty("by").GetString() == "本机"), "the uploader is recorded");
             var page = await (await Send("GET", "/")).Content.ReadAsStringAsync();
             Check(page.Contains("共享文件夹") && page.Contains("\"entries\""), "a browser gets the folder page");
 

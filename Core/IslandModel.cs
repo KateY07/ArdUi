@@ -20,6 +20,8 @@ sealed class IslandModel
     public string? BubbleText { get; private set; }
     public string? BubblePeer { get; private set; }
     public string? UnreadPeer { get; private set; }   // the device whose message came last: where a click on the unread badge leads
+    public bool BubbleSticky { get; private set; }    // "抖一抖": the bubble stays until it is clicked or closed
+    public int Nudges { get; private set; }           // counts nudges, so the island shakes once for each
     // A voice call, if one is ringing or running: it takes the island over until it ends.
     public CallState Call { get; private set; }
     public string? CallPeer { get; private set; }
@@ -64,15 +66,24 @@ sealed class IslandModel
     // A message from the other side: shown for four seconds as a bubble, then it is only an unread count.
     public void MessageArrived(string peer, string sender, string text)
     {
-        BubblePeer = peer; BubbleSender = sender; BubbleText = text; UnreadPeer = peer; bubbleUntil = now() + BubbleTime;
+        UnreadPeer = peer;
+        if (BubbleSticky) { Changed?.Invoke(); return; }   // a nudge waiting to be seen keeps its place
+        BubblePeer = peer; BubbleSender = sender; BubbleText = text; bubbleUntil = now() + BubbleTime;
         Changed?.Invoke();
     }
 
-    // Opening the conversation: the bubble goes at once.
-    public void DismissBubble() { if (BubbleText == null) return; BubbleText = null; BubbleSender = null; Changed?.Invoke(); }
+    // "xxx 发送了抖一抖": shown until it is clicked or closed, never timed out.
+    public void NudgeArrived(string peer, string sender)
+    {
+        BubblePeer = peer; BubbleSender = null; BubbleText = sender + " 发送了抖一抖"; UnreadPeer = peer; BubbleSticky = true; Nudges++;
+        Changed?.Invoke();
+    }
+
+    // Opening the conversation or closing the bubble: it goes at once.
+    public void DismissBubble() { if (BubbleText == null) return; BubbleText = null; BubbleSender = null; BubbleSticky = false; Changed?.Invoke(); }
 
     public void Tick()
     {
-        if (BubbleText != null && now() >= bubbleUntil) DismissBubble();
+        if (BubbleText != null && !BubbleSticky && now() >= bubbleUntil) DismissBubble();
     }
 }

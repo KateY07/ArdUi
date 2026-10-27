@@ -278,13 +278,13 @@ sealed class AuditSession : IAsyncDisposable
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { FileLog.Write("audit", "对话记录失败：" + ex.Message); }
             };
-            channel.MessageAdded += chatHook;
+            channel.MessageCompleted += chatHook;
         }
     }
 
     public async ValueTask DisposeAsync()
     {
-        lock (gate) { if (chat != null && chatHook != null) chat.MessageAdded -= chatHook; if (call != null && callHook != null) call.Ended -= callHook; }
+        lock (gate) { if (chat != null && chatHook != null) chat.MessageCompleted -= chatHook; if (call != null && callHook != null) call.Ended -= callHook; }
         await EndVideo();
         string? target; lock (gate) target = folder;
         if (target == null) return;   // nothing was recorded or said: nothing to keep

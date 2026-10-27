@@ -72,6 +72,8 @@ sealed class Session : IAsyncDisposable
             .Add("frd-start", ControlRole.Host, Perm.Frd, HandleFrd)
             .Add("frd-stop", ControlRole.Host, Perm.None, HandleFrd)
             .Add("chat-text", ControlRole.Either, Perm.Chat, chat.Handle)
+            .Add("chat-nudge", ControlRole.Either, Perm.Chat, chat.Handle)
+            .Add("chat-read", ControlRole.Either, Perm.Chat, chat.Handle)
             .Add("chat-file-begin", ControlRole.Either, Perm.Chat, chat.Handle)
             .Add("chat-file-chunk", ControlRole.Either, Perm.Chat, chat.Handle)
             .Add("chat-file-end", ControlRole.Either, Perm.Chat, chat.Handle)

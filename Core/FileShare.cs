@@ -341,6 +341,7 @@ sealed class FileShareServer : IAsyncDisposable
             {
                 if (isDirectory) throw Error(405, "Method Not Allowed", "这是一个文件夹。");
                 if (segments.Length == 0 || !Directory.Exists(Path.GetDirectoryName(full))) throw Error(409, "Conflict", "上级文件夹不存在。");
+                if (request.Header("X-ArdUi-Upload-Key") is { } key) return await Resumable(request, body, segments, full, isFile, key, ct);
                 var temp = Path.Combine(Path.GetDirectoryName(full)!, UploadPrefix + Guid.NewGuid().ToString("N"));
                 try
                 {
@@ -418,6 +419,46 @@ sealed class FileShareServer : IAsyncDisposable
             default:
                 throw Error(405, "Method Not Allowed", "不支持的操作。");
         }
+    }
+
+    // The page's uploads go in pieces and continue where they stopped: X-ArdUi-Upload-Key names the upload (the page derives it from
+    // the file's name, size and time), -Total its size, -Offset where this piece starts; -Probe asks how much has arrived. What arrived
+    // is kept in a hidden .ardui-upload-r-<key> next to the target until the last piece completes it. A plain PUT (Explorer, WinSCP)
+    // is not affected.
+    static readonly ConcurrentDictionary<string, SemaphoreSlim> uploads = new(StringComparer.OrdinalIgnoreCase);
+    async Task<Reply> Resumable(Request request, Body body, string[] segments, string full, bool isFile, string key, CancellationToken ct)
+    {
+        if (!Regex.IsMatch(key, @"\A[A-Za-z0-9_-]{8,80}\z")) throw Error(400, "Bad Request", "上传标识无效。");
+        if (!long.TryParse(request.Header("X-ArdUi-Upload-Total"), out var total) || total < 0) throw Error(400, "Bad Request", "缺少文件大小。");
+        var temp = Path.Combine(Path.GetDirectoryName(full)!, UploadPrefix + "r-" + key);
+        var gate = uploads.GetOrAdd(temp, _ => new SemaphoreSlim(1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            var have = File.Exists(temp) ? new FileInfo(temp).Length : 0;
+            Reply Have(int status, string reason, long bytes) { var reply = new Reply(status, reason); reply.Headers.Add(("X-ArdUi-Upload-Have", bytes.ToString())); return reply; }
+            if (request.Header("X-ArdUi-Upload-Probe") == "1") return Have(200, "OK", have);
+            if (!long.TryParse(request.Header("X-ArdUi-Upload-Offset"), out var offset) || offset != have) return Have(409, "Conflict", have);
+            if (have > total) { File.Delete(temp); return Have(409, "Conflict", 0); }
+            try
+            {
+                await using var output = new FileStream(temp, FileMode.Append, FileAccess.Write, FileShare.None, 1 << 16, true);
+                if (have == 0) File.SetAttributes(temp, FileAttributes.Hidden);
+                await body.CopyToAsync(output, 1 << 16, ct);
+            }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException) { }   // what arrived stays; the page asks again and continues
+            have = new FileInfo(temp).Length;
+            if (have > total) { File.Delete(temp); throw Error(400, "Bad Request", "上传的内容比文件大。"); }
+            if (have < total) return Have(202, "Accepted", have);
+            File.SetAttributes(temp, FileAttributes.Normal);
+            var replaced = File.Exists(full) && new FileInfo(full).Length > 0;
+            if (replaced) ToTrash(full);
+            File.Move(temp, full, true);
+            Stamp(full);
+            Record(replaced ? "上传（覆盖，旧文件在回收文件夹）" : "上传", Shown(segments), total);
+            return Have(isFile ? 200 : 201, isFile ? "OK" : "Created", have);
+        }
+        finally { gate.Release(); }
     }
 
     static bool Listed(FileSystemInfo entry, bool atRoot) =>
@@ -506,6 +547,8 @@ sealed class FileShareServer : IAsyncDisposable
     // dropping files, new folder, rename, delete into the recycle folder), all done with the same WebDAV requests a client would send.
     Reply Listing(string[] segments, string full, bool json)
     {
+        foreach (var stale in new DirectoryInfo(full).EnumerateFiles(UploadPrefix + "*").Where(f => f.LastWriteTimeUtc < DateTime.UtcNow.AddDays(-7)))
+            try { stale.Delete(); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         var entries = new DirectoryInfo(full).EnumerateFileSystemInfos().Where(e => Listed(e, segments.Length == 0))
             .OrderBy(e => e is FileInfo).ThenBy(e => e.Name, StringComparer.CurrentCultureIgnoreCase)
             .Select(e => new { name = e.Name, dir = e is DirectoryInfo, size = (e as FileInfo)?.Length ?? 0, modified = e.LastWriteTime.ToString("yyyy-MM-dd HH:mm"),
@@ -662,13 +705,13 @@ function add(files){
 }
 function draw(it){
   const pct=it.file.size?Math.floor(it.sent/it.file.size*100):(it.state==='done'?100:0);
-  const st={wait:'等待中',run:pct+'%'+(it.speed?' · '+size(it.speed)+'/s · 剩余 '+time((it.file.size-it.sent)/it.speed):''),done:'已完成',failed:'失败：'+(it.error||''),cancel:'已取消'}[it.state];
+  const st={wait:'等待中',run:it.error?pct+'% · '+it.error:pct+'%'+(it.speed?' · '+size(it.speed)+'/s · 剩余 '+time((it.file.size-it.sent)/it.speed):''),done:'已完成',failed:'失败：'+(it.error||''),cancel:'已取消'}[it.state];
   it.el.className='item'+(it.state==='done'?' done':it.state==='failed'||it.state==='cancel'?' failed':'');
   it.el.innerHTML='<div class="item-top"><span class="item-name" title="'+esc(it.file.name)+'">'+esc(it.file.name)+'</span><span class="item-size">'+size(it.file.size)+'</span>'+
     (it.state==='wait'||it.state==='run'?'<button data-a="cancel" title="取消">×</button>':it.state==='failed'||it.state==='cancel'?'<button data-a="retry">重试</button>':'')+'</div>'+
     '<div class="track"><i style="width:'+(it.state==='done'?100:pct)+'%"></i></div><div class="item-state">'+esc(st)+'</div>';
   it.el.onclick=ev=>{const a=ev.target.closest('button')?.dataset.a;if(a==='cancel'){if(it.xhr)it.xhr.abort();it.state='cancel';draw(it);summary();if(running===it){running=null;next()}}
-    if(a==='retry'){it.state='wait';it.sent=0;it.error='';draw(it);summary();next()}};
+    if(a==='retry'){it.state='wait';it.error='';draw(it);summary();next()}};
 }
 function summary(){
   const all=queue.length,done=queue.filter(i=>i.state==='done').length,failed=queue.filter(i=>i.state==='failed').length;
@@ -679,15 +722,35 @@ function summary(){
   const speed=running?.speed;
   $('upSum').textContent=done+'/'+all+' 个'+(active&&speed?' · '+size(speed)+'/s · 剩余 '+time((total-sent)/speed):'');
 }
-function next(){
+// Each file goes in 8 MB pieces; the server keeps what arrived, so a break (or a retry later) continues where it stopped.
+const PIECE=8*1024*1024;
+async function keyOf(f){const d=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(f.name+'|'+f.size+'|'+f.lastModified));return [...new Uint8Array(d)].slice(0,16).map(b=>b.toString(16).padStart(2,'0')).join('')}
+function piece(it,url,key,start,end,probe){return new Promise((ok,fail)=>{
+  const x=new XMLHttpRequest();it.xhr=x;x.open('PUT',url);
+  x.setRequestHeader('X-ArdUi-Upload-Key',key);x.setRequestHeader('X-ArdUi-Upload-Total',String(it.file.size));
+  if(probe)x.setRequestHeader('X-ArdUi-Upload-Probe','1');else x.setRequestHeader('X-ArdUi-Upload-Offset',String(start));
+  x.upload.onprogress=p=>{if(!probe)progress(it,start+p.loaded)};
+  x.onload=()=>{const have=+(x.getResponseHeader('X-ArdUi-Upload-Have')??NaN);if(x.status<300||x.status===409&&!isNaN(have))ok(isNaN(have)?end:have);else fail(new Error(x.responseText||String(x.status)))};
+  x.onerror=()=>fail(new Error('连接中断'));x.onabort=()=>fail(new Error('已取消'));
+  x.send(probe?null:it.file.slice(start,end))})}
+function progress(it,bytes){it.sent=bytes;const now=performance.now();const l=it.last||(it.last={t:now,b:bytes});
+  if(now-l.t>400){const s=(bytes-l.b)/((now-l.t)/1000);if(s>=0)it.speed=it.speed?it.speed*.6+s*.4:s;it.last={t:now,b:bytes}}draw(it);summary()}
+async function upload(it){
+  const url=base+enc(it.file.name),key=await keyOf(it.file),size=it.file.size;
+  let have=await piece(it,url,key,0,0,true);if(have>0)progress(it,have);
+  let tries=0;
+  do{
+    if(it.state!=='run')return;
+    try{have=await piece(it,url,key,have,Math.min(size,have+PIECE),false);tries=0}
+    catch(x){if(it.state!=='run')return;if(++tries>3)throw x;it.error='连接中断，'+(2*tries)+' 秒后自动继续';draw(it);await new Promise(r=>setTimeout(r,2000*tries));it.error='';have=await piece(it,url,key,0,0,true)}
+  }while(have<size);
+}
+async function next(){
   if(running)return;const it=queue.find(i=>i.state==='wait');if(!it){summary();return}
-  running=it;it.state='run';it.sent=0;it.speed=0;let last={t:performance.now(),b:0};
-  const x=new XMLHttpRequest();it.xhr=x;x.open('PUT',base+enc(it.file.name));
-  x.upload.onprogress=p=>{it.sent=p.loaded;const now=performance.now();if(now-last.t>400){const s=(p.loaded-last.b)/((now-last.t)/1000);it.speed=it.speed?it.speed*.6+s*.4:s;last={t:now,b:p.loaded}}draw(it);summary()};
-  x.onload=()=>{if(x.status<300){it.state='done';it.sent=it.file.size;fresh.add(it.file.name);reload()}else{it.state='failed';it.error=x.responseText||String(x.status)}finish(it)};
-  x.onerror=()=>{if(it.state!=='cancel'){it.state='failed';it.error='连接中断'}finish(it)};
-  x.onabort=()=>{};
-  draw(it);x.send(it.file);
+  running=it;it.state='run';it.speed=0;it.last=null;draw(it);
+  try{await upload(it);if(it.state==='run'){it.state='done';it.sent=it.file.size;fresh.add(it.file.name);reload()}}
+  catch(x){if(it.state==='run'){it.state='failed';it.error=x.message+'（已上传的部分保留，重试会继续）'}}
+  finish(it);
 }
 function finish(it){it.xhr=null;draw(it);if(running===it)running=null;summary();next()}
 $('upMin').onclick=()=>$('up').classList.toggle('min');

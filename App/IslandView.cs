@@ -30,6 +30,10 @@ sealed class IslandView : Grid
     bool pressed;
     public event Action? PillDown, PillMove, PillUp;
     public event Action<ChatTransfer>? CancelClicked;
+    public event Action? BubbleClicked, BubbleClosed;   // a nudge's bubble: open the conversation / put it away
+    readonly Border bubbleClose = new();
+    readonly StackPanel stack = new();
+    int shaken;
     public event Action? CallAccept, CallHang, CallMute;
 
     public IslandView(IslandModel model, bool animated = true)
@@ -46,19 +50,42 @@ sealed class IslandView : Grid
         pill.PointerMoved += (_, _) => { if (pressed) PillMove?.Invoke(); };
         pill.PointerReleased += (_, e) => { if (!pressed) return; pressed = false; e.Pointer.Capture(null); PillUp?.Invoke(); };
 
-        bubble.Child = new StackPanel { Spacing = 2, Children = { bubbleSender, bubbleText } };
+        // [x] on a nudge's bubble (it does not go by itself); the rest of the bubble opens the conversation
+        bubbleClose.Child = Look.Icon(Look.CrossPath, 9, Dim, 2.2); bubbleClose.Width = 22; bubbleClose.Height = 22; bubbleClose.CornerRadius = new CornerRadius(11);
+        bubbleClose.Background = Soft; bubbleClose.VerticalAlignment = VerticalAlignment.Center; bubbleClose.Margin = new Thickness(10, 0, -4, 0); bubbleClose.IsVisible = false;
+        bubbleClose.Cursor = new Cursor(StandardCursorType.Hand);
+        bubbleClose.PointerPressed += (_, e) => { e.Handled = true; BubbleClosed?.Invoke(); };
+        var bubbleBody = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        bubbleBody.Children.Add(new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center, Children = { bubbleSender, bubbleText } });
+        Grid.SetColumn(bubbleClose, 1); bubbleBody.Children.Add(bubbleClose);
+        bubble.Child = bubbleBody;
+        bubble.PointerPressed += (_, e) => { if (model.BubbleSticky) { e.Handled = true; BubbleClicked?.Invoke(); } };
         bubble.CornerRadius = new CornerRadius(20); bubble.Background = BubbleInk; bubble.Padding = new Thickness(15, 9, 15, 10); bubble.MaxWidth = 400;
         bubble.HorizontalAlignment = HorizontalAlignment.Right; bubble.Margin = new Thickness(0, 0, 0, 9); bubble.IsHitTestVisible = false;
         bubble.BoxShadow = BoxShadows.Parse("0 8 22 0 #4A000000, 0 0 0 1 #1FFFFFFF");
         bubble.RenderTransformOrigin = new RelativePoint(.5, 1, RelativeUnit.Relative);
         bubbleText.TextWrapping = TextWrapping.Wrap; bubbleText.MaxLines = 2; bubbleText.TextTrimming = TextTrimming.CharacterEllipsis;
         Hidden(pill); Hidden(bubble);
-        Children.Add(new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(14, 0, 14, 12), Children = { bubble, pill } });
+        stack.VerticalAlignment = VerticalAlignment.Bottom; stack.HorizontalAlignment = HorizontalAlignment.Right; stack.Margin = new Thickness(14, 0, 14, 12);
+        stack.Children.Add(bubble); stack.Children.Add(pill); stack.RenderTransform = new TranslateTransform();
+        Children.Add(stack);
         model.Changed += Apply;
     }
 
     public bool Interactive => shown;
     public Rect PillRect => pill.TranslatePoint(default, this) is { } p ? new Rect(p, pill.Bounds.Size) : default;
+    public Rect BubbleRect => model.BubbleSticky && bubbleKey != "" && bubble.TranslatePoint(default, this) is { } p ? new Rect(p, bubble.Bounds.Size) : default;
+
+    // "抖一抖": the island shakes side to side for a moment.
+    void Shake()
+    {
+        if (stack.RenderTransform is not TranslateTransform move) return;
+        double[] steps = Motion.Enabled ? [-9, 9, -8, 8, -6, 6, -4, 4, -2, 2, 0] : [0];
+        var at = 0;
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(45) };
+        timer.Tick += (_, _) => { move.X = steps[at++]; if (at >= steps.Length) timer.Stop(); };
+        timer.Start();
+    }
 
     static TextBlock Say(TextBlock block, string text) { block.Text = text; return block; }
     static TextBlock Label(double size, IBrush brush, bool bold) => new() { FontSize = size, Foreground = brush, FontWeight = bold ? FontWeight.SemiBold : FontWeight.Normal, VerticalAlignment = VerticalAlignment.Center };
@@ -119,8 +146,12 @@ sealed class IslandView : Grid
 
     void Message()
     {
+        if (model.Nudges != shaken) { shaken = model.Nudges; if (model.BubbleVisible) Dispatcher.UIThread.Post(Shake, DispatcherPriority.Render); }
+        bubble.IsHitTestVisible = model.BubbleSticky; bubbleClose.IsVisible = model.BubbleSticky;
+        bubble.Cursor = model.BubbleSticky ? new Cursor(StandardCursorType.Hand) : null;
+        bubbleSender.IsVisible = model.BubbleSender != null;
         if (!model.BubbleVisible) { if (bubbleKey != "") { bubbleKey = ""; Vanish(bubble); } return; }
-        var key = model.BubblePeer + "\n" + model.BubbleText + "\n" + model.BubbleSender;
+        var key = model.BubblePeer + "\n" + model.BubbleText + "\n" + model.BubbleSender + "\n" + model.Nudges;
         if (key == bubbleKey) return;
         var again = bubbleKey != "";
         bubbleKey = key;

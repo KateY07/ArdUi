@@ -25,17 +25,18 @@ CODE = re.compile(r'[A-Z0-9]{6}\Z')
 ENDPOINT = re.compile(r'[0-9a-f]{64}\Z')
 TICKET = re.compile(r'[0-9a-f]{32}\Z')
 COMPUTER_NAME = re.compile(r'[^\x00-\x1f\x7f]{1,64}\Z')
-VERSION = 'v6.3'
+VERSION = 'v6.6'
 # Network probe (see probe_udp.py): this server only mints short-lived tokens, each bound to the caller's IP address.
 PROBE_KEY = os.environ.get('ARDUI_PROBE_KEY', DB + '.probe-key')
 PROBE_HOST = os.environ.get('ARDUI_PROBE_HOST', '')
 PROBE_PORT = int(os.environ.get('ARDUI_PROBE_PORT', '7843'))
 # Clients older than this are refused with 426 (the header is "v<major>.pre<n>", sent by ArdUi since v5.pre1; older clients send none).
 # v6 waits for news instead of polling every few seconds (WAIT_SECONDS below); since v6.pre2 the controller names the session's
-# ArdFerry in its signed request (both sides use it). Older clients are not supported. ARDUI_MIN_CLIENT=v<major>.pre<n> overrides it (e.g. while a release is rolling out).
+# ArdFerry in its signed request (both sides use it); since v6.6 (v6.pre6) the permissions mean what they say now (the conversation carries
+# files and calls, "文件" is the shared folder). Older clients are not supported: they are refused, and find the new one at /api/v1/release. ARDUI_MIN_CLIENT=v<major>.pre<n> overrides it (e.g. while a release is rolling out).
 CLIENT = re.compile(r'v(\d{1,3})\.pre(\d{1,3})\Z')
-_min = CLIENT.fullmatch(os.environ.get('ARDUI_MIN_CLIENT', 'v6.pre2'))
-MIN_CLIENT = (int(_min.group(1)), int(_min.group(2))) if _min else (6, 2)
+_min = CLIENT.fullmatch(os.environ.get('ARDUI_MIN_CLIENT', 'v6.pre6'))
+MIN_CLIENT = (int(_min.group(1)), int(_min.group(2))) if _min else (6, 6)
 MIN_TEXT = 'v%d.pre%d' % MIN_CLIENT
 # What this network's clients need besides this server: where M's relay directory and address discovery are, and M's key.
 # Written by the operator (selfhost.sh / deploy.sh); see ROLES.md.

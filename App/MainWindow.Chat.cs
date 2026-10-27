@@ -10,6 +10,8 @@ namespace ArdUi;
 sealed partial class MainWindow
 {
     public const string ChatPath = "M4,5 L20,5 L20,15 L11,15 L7,19 L7,15 L4,15 Z";
+    // a phone shaking: the "抖一抖" button
+    public const string NudgePath = "M9,4 L15,4 L15,20 L9,20 Z M5,8 L5,16 M19,8 L19,16 M2,10 L2,14 M22,10 L22,14";
     public const string ClipPath = "M20,11 L12,19 a4.5,4.5 0 0 1 -6.4,-6.4 L13.5,4.7 a3,3 0 0 1 4.3,4.3 L9.9,16.9 a1.5,1.5 0 0 1 -2.1,-2.1 L15,7.6";
     static readonly string PasteFolder = Path.Combine(Path.GetTempPath(), "ArdUi-paste");
 
@@ -50,8 +52,16 @@ sealed partial class MainWindow
             else if (e.Key == Key.V && e.KeyModifiers.HasFlag(KeyModifiers.Control)) { e.Handled = true; await Guard(PasteIntoChat); }
         }, Avalonia.Interactivity.RoutingStrategies.Tunnel);
         attach.VerticalAlignment = VerticalAlignment.Bottom;
+        var nudge = Chrome.IconButton(NudgePath, 17, 36); ToolTip.SetTip(nudge, $"抖一抖：提醒对方看对话（{ChatChannel.NudgeSeconds} 秒内只能一次）"); nudge.VerticalAlignment = VerticalAlignment.Bottom;
+        nudge.Click += (_, _) =>
+        {
+            if (openChat is not { } chat) return;
+            if (chat.NudgeWait > TimeSpan.Zero) { Toast($"抖一抖太频繁了，请 {Math.Ceiling(chat.NudgeWait.TotalSeconds)} 秒后再试。"); return; }
+            _ = Task.Run(async () => { try { await chat.SendNudge(); } catch (Exception ex) { Diagnostics.Log("chat-nudge", ex.Message); } });
+        };
+        var tools = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Bottom, Children = { attach, nudge } };
         var composer = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), Margin = new Thickness(0, 8, 0, 0) };
-        composer.Children.Add(attach); Grid.SetColumn(chatInput, 1); chatInput.Margin = new Thickness(4, 0); composer.Children.Add(chatInput); Grid.SetColumn(send, 2); composer.Children.Add(send);
+        composer.Children.Add(tools); Grid.SetColumn(chatInput, 1); chatInput.Margin = new Thickness(4, 0); composer.Children.Add(chatInput); Grid.SetColumn(send, 2); composer.Children.Add(send);
         var card = Card(new StackPanel { Children = { head, listBox, attachTray, composer } });
         card.Background = Look.CardSolid; card.BorderBrush = Look.Line; card.Padding = new Thickness(16); card.MaxWidth = 460; card.Margin = new Thickness(14); card.VerticalAlignment = VerticalAlignment.Center;
         // files dropped on the window are staged
@@ -71,28 +81,47 @@ sealed partial class MainWindow
         CloseChat();
         openChatPeer = peerId; openChat = engine.ChatFor(peerId);
         chatTitle.Text = "与 " + label + " 对话";
-        chatList.Children.Clear(); transferViews.Clear();
-        foreach (var message in openChat.Messages.ToArray()) chatList.Children.Add(Bubble(message));
-        foreach (var transfer in openChat.ActiveTransfers) AddTransferView(transfer);
-        openChat.MessageAdded += OnChatMessage; openChat.TransferStarted += OnTransferStarted;
-        openChat.MarkRead(); chatOverlay.IsVisible = true; chatInput.Focus(); ScrollChatToEnd();
+        chatList.Children.Clear(); transferViews.Clear(); messageViews.Clear();
+        foreach (var message in openChat.Messages.ToArray()) AddMessageView(message);
+        foreach (var transfer in openChat.ActiveTransfers.Where(t => t.Incoming)) AddTransferView(transfer);   // what this side sends is in its message
+        openChat.MessageAdded += OnChatMessage; openChat.TransferStarted += OnTransferStarted; openChat.MessageChanged += OnMessageChanged;
+        openChat.MarkRead(); chatOverlay.IsVisible = true; chatInput.Focus(); ScrollChatToEnd(); ChatSeen();
     }
 
     void CloseChat()
     {
-        if (openChat != null) { openChat.MessageAdded -= OnChatMessage; openChat.TransferStarted -= OnTransferStarted; }
+        if (openChat != null) { openChat.MessageAdded -= OnChatMessage; openChat.TransferStarted -= OnTransferStarted; openChat.MessageChanged -= OnMessageChanged; }
         openChat = null; openChatPeer = null; chatOverlay.IsVisible = false;
     }
 
-    // A finished file replaces its progress bubble where it stood; anything else goes to the end.
+    // A received file replaces its progress bubble where it stood; anything else goes to the end. Each message keeps its place, so a
+    // change of its delivery (delivered, failed, sent again) redraws it there.
+    readonly Dictionary<string, ContentControl> messageViews = new();
+    void AddMessageView(ChatMessage message)
+    {
+        var host = new ContentControl { Content = Bubble(message), HorizontalAlignment = message.Kind == ChatKind.Nudge ? HorizontalAlignment.Center : message.Mine ? HorizontalAlignment.Right : HorizontalAlignment.Left };
+        messageViews[message.Id] = host;
+        if (transferViews.Remove(message.Id, out var view)) { var at = chatList.Children.IndexOf(view); chatList.Children[at] = host; }
+        else chatList.Children.Add(host);
+    }
     void OnChatMessage(ChatMessage message) => Dispatcher.UIThread.Post(() =>
     {
         if (openChat == null) return;
-        if (transferViews.Remove(message.Id, out var view)) view.Content = Bubble(message); else chatList.Children.Add(Bubble(message));
-        if (!message.Mine) openChat.MarkRead(); ScrollChatToEnd();
+        AddMessageView(message);
+        if (message.Kind == ChatKind.Nudge && !message.Mine) ShakeWindow();   // the conversation is open: the window itself shakes
+        if (!message.Mine) { openChat.MarkRead(); ChatSeen(); } ScrollChatToEnd();
+    });
+    // the conversation is on screen: the other side may be told what was read (unless receipts are off)
+    void ChatSeen()
+    {
+        if (openChat != null && chatOverlay.IsVisible && IsVisible && WindowState != WindowState.Minimized) openChat.Seen(!Motion.NoReadReceipts);
+    }
+    void OnMessageChanged(ChatMessage message) => Dispatcher.UIThread.Post(() =>
+    {
+        if (openChat != null && messageViews.TryGetValue(message.Id, out var host)) host.Content = Bubble(message);
     });
 
-    void OnTransferStarted(ChatTransfer transfer) => Dispatcher.UIThread.Post(() => { if (openChat != null) { AddTransferView(transfer); ScrollChatToEnd(); } });
+    void OnTransferStarted(ChatTransfer transfer) => Dispatcher.UIThread.Post(() => { if (openChat != null && transfer.Incoming) { AddTransferView(transfer); ScrollChatToEnd(); } });
 
     void ScrollChatToEnd() => Dispatcher.UIThread.Post(() => chatScroll.ScrollToEnd(), DispatcherPriority.Background);
 
@@ -141,18 +170,22 @@ sealed partial class MainWindow
         if (openChat == null) return;
         var text = chatInput.Text ?? ""; var files = staged.ToArray();
         if (text.Trim().Length == 0 && files.Length == 0) return;
+        if (text.Trim().Length > ChatChannel.MaxText) { Say($"一条消息最多 {ChatChannel.MaxText} 个字符。"); return; }
         chatInput.Text = ""; staged.Clear(); RebuildTray();
-        try { if (text.Trim().Length != 0) await openChat.SendText(text); }
-        catch { chatInput.Text = text; staged.AddRange(files); RebuildTray(); throw; }   // nothing is lost when the link is down
+        // the message shows at once; whether it got through is shown on it (a failed one can be sent again from there)
+        var chat = openChat;
+        if (text.Trim().Length != 0) _ = Task.Run(async () => { try { await chat.SendText(text); } catch (Exception ex) { Diagnostics.Log("chat-send", ex.Message); } });
         foreach (var path in files)
         {
             try
             {
                 var transfer = openChat.StartSend(path);
-                if (path.StartsWith(PasteFolder, StringComparison.OrdinalIgnoreCase)) _ = transfer.Completion.ContinueWith(_ => DeleteIfPasted(path));
+                // a pasted picture is kept until it got through (a failed one may be sent again)
+                if (path.StartsWith(PasteFolder, StringComparison.OrdinalIgnoreCase)) _ = transfer.Completion.ContinueWith(_ => { if (transfer.State == TransferState.Done) DeleteIfPasted(path); });
             }
             catch (Exception ex) when (ex is IOException or InvalidOperationException) { Say(ex.Message); }
         }
+        await Task.CompletedTask;
     }
 
     // Files copied in Explorer and pictures copied from anywhere are staged; anything else is pasted as text.
@@ -220,8 +253,40 @@ sealed partial class MainWindow
     }
 
     // ---- the bubbles -------------------------------------------------------------------------------------------------
+    // "抖一抖" in the conversation: a quiet line in the middle, with its delivery when this side sent it.
+    Control NudgeLine(ChatMessage message)
+    {
+        var who = message.Mine ? "你" : openChatPeer != null ? LabelOf(openChatPeer) : "对方";
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center };
+        row.Children.Add(Look.Icon(NudgePath, 13, Look.Accent));
+        row.Children.Add(new TextBlock { [Loc.KeepProperty] = !message.Mine, Text = who + " 发送了抖一抖", FontSize = 12, Foreground = Look.Muted, VerticalAlignment = VerticalAlignment.Center });
+        row.Children.Add(new TextBlock { Text = message.At.ToLocalTime().ToString("HH:mm"), FontSize = 10, Foreground = Look.Muted, VerticalAlignment = VerticalAlignment.Center });
+        if (message.Mine && message.Delivery == Delivery.Sending) row.Children.Add(new TextBlock { Text = "发送中…", FontSize = 10, Foreground = Look.Muted, VerticalAlignment = VerticalAlignment.Center });
+        if (message.Mine && message.Delivery == Delivery.Delivered) row.Children.Add(new TextBlock { Text = message.Read ? "✓✓ 已读" : "✓ 已送达", FontSize = 10, Foreground = Look.Muted, VerticalAlignment = VerticalAlignment.Center });
+        if (message.Mine && message.Delivery == Delivery.Failed)
+        {
+            var failed = new TextBlock { Text = "未送达", FontSize = 10, FontWeight = FontWeight.SemiBold, Foreground = Brush.Parse("#B3432B"), VerticalAlignment = VerticalAlignment.Center };
+            ToolTip.SetTip(failed, message.Error);
+            var retry = new Button { Content = "重试", FontSize = 11, MinHeight = 22, Padding = new Thickness(10, 1), VerticalAlignment = VerticalAlignment.Center };
+            retry.Click += (_, _) => openChat?.Retry(message.Id);
+            row.Children.Add(failed); row.Children.Add(retry);
+        }
+        return new Border { Child = row, Padding = new Thickness(12, 5), CornerRadius = new CornerRadius(12), Background = new SolidColorBrush(Color.FromArgb(150, 255, 255, 255)), HorizontalAlignment = HorizontalAlignment.Center };
+    }
+
+    // the main window shakes side to side for a moment (a nudge arrived while its conversation is open)
+    void ShakeWindow()
+    {
+        if (!Motion.Enabled || WindowState != WindowState.Normal) return;
+        var origin = Position; int[] steps = [-10, 10, -8, 8, -6, 6, -3, 3, 0]; var at = 0;
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(40) };
+        timer.Tick += (_, _) => { Position = new PixelPoint(origin.X + steps[at++], origin.Y); if (at >= steps.Length) { timer.Stop(); Position = origin; } };
+        timer.Start();
+    }
+
     Control Bubble(ChatMessage message)
     {
+        if (message.Kind == ChatKind.Nudge) return NudgeLine(message);
         var mine = message.Mine;
         var ink = mine ? Brushes.White : Look.Ink;
         var content = new StackPanel { Spacing = 4 };
@@ -246,13 +311,65 @@ sealed partial class MainWindow
                 content.Children.Add(row);
                 break;
         }
-        content.Children.Add(new TextBlock { Text = message.At.ToLocalTime().ToString("HH:mm"), FontSize = 10, Foreground = mine ? Brush.Parse("#F3D4C8") : Look.Muted, HorizontalAlignment = HorizontalAlignment.Right });
+        if (mine && message.Transfer is { State: TransferState.Active } sending) content.Children.Add(SendingProgress(sending));
+        content.Children.Add(Footer(message));
         return new Border
         {
             Child = content, Padding = new Thickness(12, 8), CornerRadius = new CornerRadius(14), MaxWidth = 330,
             Background = mine ? Look.Accent : Look.CardSolid, BorderBrush = mine ? Brushes.Transparent : Look.Line, BorderThickness = new Thickness(1),
             HorizontalAlignment = mine ? HorizontalAlignment.Right : HorizontalAlignment.Left,
         };
+    }
+
+    // Time, and for what this side sends: sending… / delivered / not delivered with "重试".
+    Control Footer(ChatMessage message)
+    {
+        var soft = message.Mine ? Brush.Parse("#F3D4C8") : Look.Muted;
+        var time = new TextBlock { Text = message.At.ToLocalTime().ToString("HH:mm"), FontSize = 10, Foreground = soft, VerticalAlignment = VerticalAlignment.Center };
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, HorizontalAlignment = HorizontalAlignment.Right, Children = { time } };
+        if (!message.Mine) return row;
+        switch (message.Delivery)
+        {
+            case Delivery.Sending:
+                row.Children.Add(new TextBlock { Text = "发送中…", FontSize = 10, Foreground = soft, VerticalAlignment = VerticalAlignment.Center });
+                break;
+            case Delivery.Delivered:
+                row.Children.Add(new TextBlock { Text = message.Read ? "✓✓ 已读" : "✓ 已送达", FontSize = 10, FontWeight = message.Read ? FontWeight.SemiBold : FontWeight.Normal, Foreground = message.Read ? Brushes.White : soft, VerticalAlignment = VerticalAlignment.Center });
+                break;
+            case Delivery.Failed:
+                var failed = new TextBlock { Text = "未送达", FontSize = 10, FontWeight = FontWeight.SemiBold, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
+                ToolTip.SetTip(failed, message.Error);
+                var retry = new Button { Content = "重试", FontSize = 11, MinHeight = 22, Padding = new Thickness(10, 1), Background = Brushes.White, Foreground = Look.Accent, VerticalAlignment = VerticalAlignment.Center };
+                retry.Click += (_, _) => openChat?.Retry(message.Id);
+                row.Children.Add(failed); row.Children.Add(retry);
+                break;
+        }
+        return row;
+    }
+
+    // A file this side is sending: its progress inside its own message, and a way to stop it.
+    Control SendingProgress(ChatTransfer transfer)
+    {
+        var done = new ColumnDefinition(new GridLength(0, GridUnitType.Star)); var rest = new ColumnDefinition(new GridLength(1, GridUnitType.Star));
+        var bar = new Grid { Height = 5, Margin = new Thickness(0, 4, 0, 2) };
+        bar.ColumnDefinitions.Add(done); bar.ColumnDefinitions.Add(rest);
+        var track = new Border { Background = Brush.Parse("#55FFFFFF"), CornerRadius = new CornerRadius(3) }; Grid.SetColumnSpan(track, 2);
+        bar.Children.Add(track); bar.Children.Add(new Border { Background = Brushes.White, CornerRadius = new CornerRadius(3) });
+        var detail = new TextBlock { FontSize = 11, Foreground = Brush.Parse("#F3D4C8"), TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+        var stop = new Button { Content = "取消", FontSize = 11, MinHeight = 22, Padding = new Thickness(8, 1), Background = Brush.Parse("#33FFFFFF"), Foreground = Brushes.White };
+        stop.Click += (_, _) => transfer.Cancel();
+        var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        row.Children.Add(detail); Grid.SetColumn(stop, 1); stop.Margin = new Thickness(8, 0, 0, 0); row.Children.Add(stop);
+        void Update()
+        {
+            var fraction = Math.Clamp(transfer.Fraction, 0, 1);
+            done.Width = new GridLength(fraction, GridUnitType.Star); rest.Width = new GridLength(1 - fraction, GridUnitType.Star);
+            var left = transfer.Remaining; var speed = transfer.BytesPerSecond;
+            detail.Text = $"{fraction * 100:F0}%  ·  {SizeText(transfer.Transferred)} / {SizeText(transfer.Size)}" + (speed > 0 ? "  ·  " + SpeedText(speed) : "") + (left != null ? "  ·  剩余 " + TimeLeft(left.Value) : "");
+        }
+        Update();
+        transfer.Changed += () => Dispatcher.UIThread.Post(Update);
+        return new StackPanel { Width = 250, Children = { bar, row } };
     }
 
     static Bitmap? TryBitmap(string? path)
@@ -301,6 +418,7 @@ sealed partial class MainWindow
         chat.MessageAdded += message => Dispatcher.UIThread.Post(() =>
         {
             if (message.Mine || openChatPeer == peerId || island != null && !Motion.NoIsland) return;   // the island announces it
+            if (message.Kind == ChatKind.Nudge) { Toast(label + " 发送了抖一抖"); return; }
             var preview = message.Kind == ChatKind.Text ? message.Text : (message.Kind == ChatKind.Image ? "[图片] " : "[文件] ") + message.FileName;
             Toast(label + "：" + (preview.Length > 30 ? preview[..30] + "…" : preview));
         });

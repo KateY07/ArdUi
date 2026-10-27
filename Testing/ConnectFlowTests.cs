@@ -41,12 +41,12 @@ static class ConnectFlowTests
         Check(ConnectFlow.NormaliseCode("ＡＢＣ１２３") == null, "full-width letters are not a code");
         Check(ConnectFlow.NormaliseCode("设备A7B2K9") == "A7B2K9", "non-ASCII characters are ignored");
         Check(Kind(new IOException("客户端版本过旧，请升级到 ArdUi v5.pre1 或更高版本。")) == ConnectFailure.Outdated, "an outdated client is told to upgrade");
-        Check(ClientVersion.Allowed("v6.pre2") && ClientVersion.Allowed("v6.pre12") && ClientVersion.Allowed("v7.pre1") && !ClientVersion.Allowed("v6.pre1") && !ClientVersion.Allowed("v5.pre5"), "v6.pre2 and newer are allowed: older ones do not name the session ArdFerry");
+        Check(ClientVersion.Allowed("v6.pre6") && ClientVersion.Allowed("v6.pre12") && ClientVersion.Allowed("v7.pre1") && !ClientVersion.Allowed("v6.pre5") && !ClientVersion.Allowed("v6.pre2") && !ClientVersion.Allowed("v5.pre5"), "v6.pre6 (v6.6) and newer are allowed: older ones read the permissions differently");
         Check(!ClientVersion.Allowed("v4.pre9") && !ClientVersion.Allowed("v3.pre17") && !ClientVersion.Allowed(null) && !ClientVersion.Allowed("") && !ClientVersion.Allowed("5.0.0-pre.1") && !ClientVersion.Allowed("v5.pre"), "older, missing and malformed versions are refused");
         Check(FrdOpened.WindowTitle("办公电脑 · K4DD0B · 远程桌面 - ArdUi") == "办公电脑 · K4DD0B · 远程桌面 - ArdUi" && FrdOpened.WindowTitle("a\r\nb\t") == "ab"
               && FrdOpened.WindowTitle(new string('x', 300))!.Length == 200 && FrdOpened.WindowTitle(" \n ") == null && FrdOpened.WindowTitle(null) == null,
             "the FRD window title is 1–200 characters without control characters, or none");
-        Check(Program.Version == "v6.5" && Program.WireVersion == "v6.pre5" && ClientVersion.Allowed(Program.WireVersion), "this build is v6.5 and announces itself as v6.pre5, the form the version gate reads");
+        Check(Program.Version == "v6.6" && Program.WireVersion == "v6.pre6" && ClientVersion.Allowed(Program.WireVersion), "this build is v6.6 and announces itself as v6.pre6, the form the version gate reads");
 
         // The relays come from M, never from config.json: a config written before v5.5 still loads, and its relay lines change nothing.
         var old = JsonSerializer.Deserialize<Settings>("{\"server\":\"https://bob.example/\",\"relay\":\"http://175.27.160.144:8080\",\"relayKey\":\"spki:00\",\"tcpPorts\":[3389],\"udpPorts\":[3389]}", Wire.Json)!;

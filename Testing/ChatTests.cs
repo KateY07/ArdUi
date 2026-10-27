@@ -15,6 +15,10 @@ static class ChatTests
             await Basics(root);
             await Tampering(root);
             await Transfers(root);
+            await Delivery(root);
+            await Nudges(root);
+            await Resume(root);
+            await Receipts(root);
             // a fast link lets the chunks grow to their largest; even then a request fits one link frame (the other side drops the link above 64 KB)
             var (fa, _) = Pair(root, "fast");
             var fast = Path.Combine(root, "fast.bin"); File.WriteAllBytes(fast, RandomNumberGenerator.GetBytes(4 * 1024 * 1024));
@@ -33,6 +37,116 @@ static class ChatTests
         a = new ChatChannel(Path.Combine(root, name, "a"), () => ToB);
         b = new ChatChannel(Path.Combine(root, name, "b"), () => ToA);
         return (a, b);
+    }
+
+    // What this side sends shows at once with its delivery; one that did not get through can be sent again under the same id, and the
+    // other side shows it once whichever attempt arrives (also when the first one arrived and only its answer was lost).
+    static async Task Delivery(string root)
+    {
+        var dir = Path.Combine(root, "delivery");
+        ChatChannel? b = null; var down = true; var answerLost = false;
+        ChatSender toB = async (m, d, ct) =>
+        {
+            if (down) throw new IOException("设备连接已断开，无法发送。");
+            var reply = await Deliver(b!, m, d, ct, 0);
+            if (answerLost) { answerLost = false; throw new TimeoutException("没有收到回执。"); }
+            return reply;
+        };
+        var a = new ChatChannel(Path.Combine(dir, "a"), () => toB);
+        b = new ChatChannel(Path.Combine(dir, "b"), () => null);
+        var shown = new List<ChatMessage>(); a.MessageAdded += shown.Add;
+        try { await a.SendText("线路断开时发出"); } catch (IOException) { }
+        Check(shown.Count == 1 && a.Messages[0].Delivery == ArdUi.Delivery.Failed && b.Messages.Count == 0, "a message that cannot go shows at once, as not delivered");
+        down = false; a.Retry(a.Messages[0].Id);
+        for (var i = 0; i < 100 && a.Messages[0].Delivery != ArdUi.Delivery.Delivered; i++) await Task.Delay(20);
+        Check(a.Messages[0].Delivery == ArdUi.Delivery.Delivered && b.Messages.Count == 1 && b.Messages[0].Id == a.Messages[0].Id, "sent again, it is delivered under the same id");
+
+        answerLost = true;
+        try { await a.SendText("回执丢了"); } catch (TimeoutException) { }
+        var lost = a.Messages.Last();
+        Check(lost.Delivery == ArdUi.Delivery.Failed && b.Messages.Count == 2, "the other side got it although this side saw no answer");
+        a.Retry(lost.Id);
+        for (var i = 0; i < 100 && lost.Delivery != ArdUi.Delivery.Delivered; i++) await Task.Delay(20);
+        Check(lost.Delivery == ArdUi.Delivery.Delivered && b.Messages.Count == 2, "sending it again does not show it twice");
+
+        var file = Path.Combine(root, "delivery.bin"); File.WriteAllBytes(file, RandomNumberGenerator.GetBytes(100_000));
+        answerLost = false;
+        var transfer = a.StartSend(file); var message = a.Messages.Last();
+        Check(message.Kind == ChatKind.File && message.Transfer == transfer, "a file shows at once as a message with its transfer");
+        await transfer.Completion;
+        Check(message.Delivery == ArdUi.Delivery.Delivered && b.Messages.Count == 3, "and is delivered when it has arrived");
+        message.Delivery = ArdUi.Delivery.Failed; a.Retry(message.Id);
+        await message.Transfer!.Completion;
+        Check(message.Delivery == ArdUi.Delivery.Delivered && b.Messages.Count == 3 && message.Transfer.Transferred == message.Size, "a file the other side already has is not sent again");
+    }
+
+    // "抖一抖": shown on both sides, at most one every NudgeSeconds from this side, and the receiving side ignores more than that too;
+    // the island keeps its bubble until it is clicked or closed.
+    static async Task Nudges(string root)
+    {
+        var (a, b) = Pair(root, "nudge");
+        await a.SendNudge();
+        Check(a.Messages.Last().Kind == ChatKind.Nudge && a.Messages.Last().Delivery == ArdUi.Delivery.Delivered && b.Messages.Count == 1 && b.Messages[0].Kind == ChatKind.Nudge && b.Unread == 1,
+            "a nudge is delivered and shows on the other side");
+        try { await a.SendNudge(); Check(false, "a second nudge right away is refused"); }
+        catch (InvalidOperationException) { Check(a.NudgeWait > TimeSpan.Zero && b.Messages.Count == 1, "a second nudge right away is refused"); }
+        await b.Handle("chat-nudge", JsonSerializer.SerializeToElement(new { id = Guid.NewGuid().ToString("N") }), CancellationToken.None);
+        Check(b.Messages.Count == 1, "and the receiving side ignores one that comes too soon anyway");
+
+        var clock = DateTimeOffset.Now; var island = new IslandModel(() => clock);
+        island.SetConnected(1);
+        island.NudgeArrived("peer", "SY0812A");
+        clock += TimeSpan.FromMinutes(10); island.Tick();
+        Check(island.BubbleVisible && island.BubbleSticky && island.BubbleText == "SY0812A 发送了抖一抖", "the island's nudge bubble does not time out");
+        island.MessageArrived("peer", "SY0812A", "你好");
+        Check(island.BubbleText == "SY0812A 发送了抖一抖", "a message meanwhile does not push it away");
+        island.DismissBubble();
+        Check(!island.BubbleVisible && !island.BubbleSticky, "closing it puts it away");
+    }
+
+    // A file whose connection broke continues from where it stopped when it is sent again, and arrives whole (checksum over all of it).
+    static async Task Resume(string root)
+    {
+        var dir = Path.Combine(root, "resume");
+        ChatChannel? b = null; var down = false; long sentAfterRetry = 0; var counting = false;
+        ChatSender toB = async (m, d, ct) =>
+        {
+            if (down) throw new IOException("设备连接已断开，无法发送。");
+            if (counting && m == "chat-file-chunk") sentAfterRetry += Convert.FromBase64String(JsonSerializer.SerializeToElement(d).GetProperty("data").GetString()!).Length;
+            await Task.Delay(3, ct);
+            return await Deliver(b!, m, d, ct, 0);
+        };
+        var a = new ChatChannel(Path.Combine(dir, "a"), () => toB);
+        b = new ChatChannel(Path.Combine(dir, "b"), () => null);
+        var data = RandomNumberGenerator.GetBytes(2 * 1024 * 1024);
+        var source = Path.Combine(root, "resume.bin"); File.WriteAllBytes(source, data);
+        ChatTransfer? incoming = null; b.TransferStarted += t => incoming = t;
+        var transfer = a.StartSend(source); var message = a.Messages.Last();
+        while (incoming == null || incoming.Transferred < data.Length / 3) await Task.Delay(10);
+        down = true; b.Close();   // the connection breaks
+        await transfer.Completion;
+        var parts = Directory.GetFiles(Path.Combine(dir, "b"), "*.part");
+        Check(message.Delivery == ArdUi.Delivery.Failed && parts.Length == 1 && new FileInfo(parts[0]).Length > 0, "a broken file keeps what arrived (as .part) and shows as not delivered");
+        down = false; counting = true; a.Retry(message.Id);
+        await message.Transfer!.Completion;
+        Check(message.Delivery == ArdUi.Delivery.Delivered && b.Messages.Count == 1 && File.ReadAllBytes(b.Messages[0].Path!).SequenceEqual(data), "sent again, it continues and arrives whole");
+        Check(sentAfterRetry > 0 && sentAfterRetry < data.Length, $"only the rest was sent again ({sentAfterRetry} of {data.Length} bytes)");
+        Check(Directory.GetFiles(Path.Combine(dir, "b"), "*.part").Length == 0, "no .part is left behind");
+    }
+
+    // Read receipts: seeing the conversation tells the other side, once, up to which message; with receipts off nothing is told.
+    static async Task Receipts(string root)
+    {
+        var (a, b) = Pair(root, "receipts");
+        await a.SendText("第一条"); await a.SendText("第二条");
+        Check(a.Messages.All(m => !m.Read), "delivered is not read yet");
+        var changed = 0; a.MessageChanged += _ => changed++;
+        b.Seen(receipts: false); await Task.Delay(100);
+        Check(a.Messages.All(m => !m.Read), "with receipts off the other side is not told");
+        b.Seen(); for (var i = 0; i < 100 && !a.Messages.All(m => m.Read); i++) await Task.Delay(20);
+        Check(a.Messages.All(m => m.Read) && changed == 2, "seeing the conversation marks what was sent as read");
+        await a.SendText("第三条"); b.Seen(); for (var i = 0; i < 100 && !a.Messages[2].Read; i++) await Task.Delay(20);
+        Check(a.Messages[2].Read, "a later message is marked read when it is seen");
     }
 
     static async Task Basics(string root)

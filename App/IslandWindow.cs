@@ -52,6 +52,9 @@ sealed class IslandWindow : Window
         view.PillDown += () => shift = 0;
         view.PillMove += Drag; view.PillUp += () => { if (!dragged) OnPillClicked(); else Remember(); };
         view.CancelClicked += t => t.Cancel();
+        // a nudge's bubble: a click opens that conversation, [x] puts it away (only for the person at the machine)
+        view.BubbleClicked += () => { if (LocalInput.RemoteDriving || model.BubblePeer is not { } peer) return; model.DismissBubble(); openChat(peer); };
+        view.BubbleClosed += () => { if (!LocalInput.RemoteDriving) model.DismissBubble(); };
         view.CallAccept += async () => { if (CallOf(model.CallPeer) is { } c) try { await c.Accept(); } catch (Exception ex) when (ex is IOException or InvalidOperationException) { Diagnostics.Log("call", ex.Message); } };
         view.CallHang += async () => { if (CallOf(model.CallPeer) is { } c) try { if (c.State == CallState.Ringing) await c.Decline(); else await c.Hangup(); } catch (Exception ex) when (ex is IOException or InvalidOperationException) { Diagnostics.Log("call", ex.Message); } };
         view.CallMute += () => { if (CallOf(model.CallPeer) is { } c) c.Muted = !c.Muted; };
@@ -122,7 +125,7 @@ sealed class IslandWindow : Window
         if (handle == 0 || !GetCursorPos(out var cursor)) return;
         var local = this.PointToClient(new PixelPoint(cursor.X, cursor.Y));
         // the pill takes the mouse only for the person at the machine: a remote controller's pointer (injected input) passes through it
-        SetThrough(LocalInput.RemoteDriving || !(view.Interactive && view.PillRect.Inflate(5).Contains(local)));
+        SetThrough(LocalInput.RemoteDriving || !(view.Interactive && (view.PillRect.Inflate(5).Contains(local) || view.BubbleRect.Contains(local))));
     }
 
     void SetThrough(bool value)
@@ -139,6 +142,7 @@ sealed class IslandWindow : Window
         engine.ChatFor(peer).MessageAdded += message => Dispatcher.UIThread.Post(() =>
         {
             if (message.Mine || chatIsOpen(peer)) return;
+            if (message.Kind == ChatKind.Nudge) { EnsureShown(); model.NudgeArrived(peer, labelOf(peer)); return; }
             var preview = message.Kind == ChatKind.Text ? message.Text : (message.Kind == ChatKind.Image ? "[图片] " : "[文件] ") + message.FileName;
             model.MessageArrived(peer, labelOf(peer), preview.Length > 120 ? preview[..120] + "…" : preview);
         });

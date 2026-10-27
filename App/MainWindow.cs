@@ -172,6 +172,7 @@ sealed partial class MainWindow : Window
                 allow.IsChecked=directory.Enabled;identityCard.IsVisible=directory.Enabled;allow.OnContent=allow.OffContent="允许被控";allow.IsEnabled=true;ready=true;directory.Start();passwordTimer.Start();UpdatePassword();Say("正在连接网络…");
             });
         };
+        Activated+=(_,_)=>ChatSeen();   // back in front: the open conversation counts as seen
         Closing+=async(_,e)=>
         {
             if(closed)return;

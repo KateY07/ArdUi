@@ -1,12 +1,22 @@
 namespace ArdUi;
 
-enum ChatKind { Text, Image, File }
+enum ChatKind { Text, Image, File, Nudge }
 
 // Sends one control request to the other side (the control channel of the session) and returns its answer.
 delegate Task<JsonElement> ChatSender(string method, object value, CancellationToken ct);
 
-// One line of the conversation. Files and images are stored on this machine; Path points at the stored copy.
-sealed record ChatMessage(string Id, bool Mine, ChatKind Kind, string Text, string? FileName, long Size, string? Path, DateTimeOffset At);
+enum Delivery { Sending, Delivered, Failed }
+
+// One line of the conversation. Files and images are stored on this machine; Path points at the stored copy (for a file this side
+// sends: the file it sends). A file is a message with data attached: what this side sends shows at once, with its delivery
+// (sending, delivered, failed and retried under the same id) and, for a file, its transfer.
+sealed record ChatMessage(string Id, bool Mine, ChatKind Kind, string Text, string? FileName, long Size, string? Path, DateTimeOffset At)
+{
+    public Delivery Delivery { get; set; } = Delivery.Delivered;
+    public bool Read { get; set; }   // a message this side sent that the other side has seen (its read receipt)
+    public string? Error { get; set; }
+    public ChatTransfer? Transfer { get; set; }
+}
 
 enum TransferState { Active, Done, Cancelled, Failed }
 
@@ -81,17 +91,25 @@ sealed class ChatChannel
     readonly HashSet<string> turnedDown = new();   // files the user refused: what is still on the way for them is dropped quietly
     // Chat never uses more than a few of the control channel's slots (FRD and path switching share it), nor much of the link.
     readonly SemaphoreSlim inflight = new(4);
+    readonly SemaphoreSlim textSlots = new(2);   // text has its own: it never waits behind the chunks of a file
+    readonly HashSet<string> seen = new();       // ids of messages and files in this conversation: a retry or a resend is shown once
     public List<ChatMessage> Messages { get; } = new();
     public int Unread { get; private set; }
     public event Action<ChatMessage>? MessageAdded;      // either direction
+    public event Action<ChatMessage>? MessageChanged;    // a message this side sends: delivered, failed, retried
+    public event Action<ChatMessage>? MessageCompleted;  // received, or delivered: what the audit records
     public event Action<ChatTransfer>? TransferStarted;  // either direction
     public event Action? Changed;
 
     public ChatChannel(string folder, Func<ChatSender?> sender) { this.folder = folder; this.sender = sender; }
 
+    // A file arriving is written to <name>.part and gets its name when it is complete and checked. When the connection breaks, what
+    // arrived is kept (paused) and the sender's retry continues from there; a file turned down or failing its check is thrown away.
+    readonly Dictionary<string, Incoming> paused = new();
     sealed class Incoming
     {
         public required string Path, Name; public required ChatKind Kind; public required long Size; public required ChatTransfer Transfer;
+        public string Part => Path + ".part";
         public FileStream? Stream; public long Written; public int Next; public IncrementalHash? Sha;
         public readonly Dictionary<int, byte[]> Pending = new();
     }
@@ -99,10 +117,33 @@ sealed class ChatChannel
     public ChatTransfer[] ActiveTransfers { get { lock (gate) return transfers.Values.Where(t => t.State == TransferState.Active).ToArray(); } }
     public void MarkRead() { if (Unread == 0) return; Unread = 0; Changed?.Invoke(); }
 
+    // Read receipts: while this conversation is on screen, the other side is told the last of its messages seen here (one small
+    // message when that changes, not one per message). Off when the person turned receipts off in the settings.
+    string? reportedRead;
+    public void Seen(bool receipts = true)
+    {
+        string? last; lock (gate) last = Messages.LastOrDefault(m => !m.Mine)?.Id;
+        if (!receipts || last == null || last == reportedRead) return;
+        reportedRead = last;
+        _ = Task.Run(async () =>
+        {
+            try { await Ask("chat-read", new { upTo = last }, CancellationToken.None, textSlots); }
+            catch (Exception ex) { if (reportedRead == last) reportedRead = null; Diagnostics.Log("chat-read", ex.Message); }   // told again next time
+        });
+    }
+
     void Add(ChatMessage message, bool received)
     {
-        lock (gate) { Messages.Add(message); if (received) Unread++; }
+        lock (gate) { Messages.Add(message); seen.Add(message.Id); if (received) Unread++; }
         MessageAdded?.Invoke(message); Changed?.Invoke();
+        if (message.Delivery == Delivery.Delivered) MessageCompleted?.Invoke(message);
+    }
+
+    void Mark(ChatMessage message, Delivery delivery, string? error = null)
+    {
+        message.Delivery = delivery; message.Error = error;
+        MessageChanged?.Invoke(message); Changed?.Invoke();
+        if (delivery == Delivery.Delivered) MessageCompleted?.Invoke(message);
     }
 
     // ---- names -----------------------------------------------------------------------------------------------------
@@ -133,27 +174,66 @@ sealed class ChatChannel
         Directory.CreateDirectory(folder);
         var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
         var path = System.IO.Path.Combine(folder, stamp + "_" + name);
-        for (var i = 2; File.Exists(path); i++) path = System.IO.Path.Combine(folder, $"{stamp}_{i}_{name}");
+        for (var i = 2; File.Exists(path) || File.Exists(path + ".part"); i++) path = System.IO.Path.Combine(folder, $"{stamp}_{i}_{name}");
         return path;
     }
 
     // ---- sending ---------------------------------------------------------------------------------------------------
-    async Task<JsonElement> Ask(string method, object value, CancellationToken ct)
+    async Task<JsonElement> Ask(string method, object value, CancellationToken ct, SemaphoreSlim? slots = null)
     {
         var send = sender() ?? throw new IOException("设备连接已断开，无法发送。");
-        await inflight.WaitAsync(ct);
+        slots ??= inflight;
+        await slots.WaitAsync(ct);
         try { return await send(method, value, ct); }
-        finally { inflight.Release(); }
+        finally { slots.Release(); }
     }
 
+    // The message shows at once as sending; this returns when it was delivered and throws when it was not (it then shows as failed
+    // and can be sent again with Retry).
     public async Task SendText(string text, CancellationToken ct = default)
     {
         text = (text ?? "").Trim();
         if (text.Length == 0) return;
         if (text.Length > MaxText) throw new InvalidOperationException($"一条消息最多 {MaxText} 个字符。");
-        var id = Guid.NewGuid().ToString("N");
-        await Ask("chat-text", new { id, text }, ct);
-        Add(new ChatMessage(id, true, ChatKind.Text, text, null, 0, null, DateTimeOffset.Now), false);
+        var message = new ChatMessage(Guid.NewGuid().ToString("N"), true, ChatKind.Text, text, null, 0, null, DateTimeOffset.Now) { Delivery = Delivery.Sending };
+        Add(message, false);
+        await DeliverText(message, ct);
+    }
+
+    async Task DeliverText(ChatMessage message, CancellationToken ct)
+    {
+        try
+        {
+            if (message.Kind == ChatKind.Nudge) await Ask("chat-nudge", new { id = message.Id }, ct, textSlots);
+            else await Ask("chat-text", new { id = message.Id, text = message.Text }, ct, textSlots);
+            Mark(message, Delivery.Delivered);
+        }
+        catch (Exception ex) { Mark(message, Delivery.Failed, ex is OperationCanceledException ? "已取消" : ex.Message); throw; }
+    }
+
+    // "抖一抖": gets the other side's attention (its island shakes and keeps a note until it is seen). At most one every NudgeSeconds,
+    // on this side and, against anyone who changes that, on the receiving side too.
+    public const int NudgeSeconds = 10;
+    DateTimeOffset lastNudgeSent = DateTimeOffset.MinValue, lastNudgeReceived = DateTimeOffset.MinValue;
+    public TimeSpan NudgeWait { get { var left = lastNudgeSent + TimeSpan.FromSeconds(NudgeSeconds) - DateTimeOffset.Now; return left > TimeSpan.Zero ? left : TimeSpan.Zero; } }
+    public async Task SendNudge(CancellationToken ct = default)
+    {
+        if (NudgeWait > TimeSpan.Zero) throw new InvalidOperationException($"抖一抖太频繁了，请 {Math.Ceiling(NudgeWait.TotalSeconds)} 秒后再试。");
+        lastNudgeSent = DateTimeOffset.Now;
+        var message = new ChatMessage(Guid.NewGuid().ToString("N"), true, ChatKind.Nudge, "", null, 0, null, DateTimeOffset.Now) { Delivery = Delivery.Sending };
+        Add(message, false);
+        await DeliverText(message, ct);
+    }
+
+    // Sends a message that did not get through once more, under the same id (the other side shows it once, whichever attempt arrives).
+    public void Retry(string id)
+    {
+        ChatMessage? message; lock (gate) message = Messages.FirstOrDefault(m => m.Id == id && m.Mine && m.Delivery == Delivery.Failed);
+        if (message == null) return;
+        Mark(message, Delivery.Sending);
+        if (message.Kind is ChatKind.Text or ChatKind.Nudge) { _ = Task.Run(async () => { try { await DeliverText(message, CancellationToken.None); } catch { } }); return; }
+        if (message.Path == null || !File.Exists(message.Path)) { Mark(message, Delivery.Failed, "原文件已不存在，无法重发"); return; }
+        Begin(message, message.Path);
     }
 
     // Starts a transfer and returns at once; it goes on in the background (the transfer reports its progress and can be cancelled).
@@ -165,12 +245,21 @@ sealed class ChatChannel
         if (info.Length > MaxFile) throw new InvalidOperationException($"文件超过 {MaxFile / 1024 / 1024 / 1024} GB。");
         var name = SafeName(info.Name);
         var kind = LooksLikeImage(name) && info.Length <= MaxImage ? ChatKind.Image : ChatKind.File;
-        var id = Guid.NewGuid().ToString("N");
+        var message = new ChatMessage(Guid.NewGuid().ToString("N"), true, kind, "", name, info.Length, path, DateTimeOffset.Now) { Delivery = Delivery.Sending };
+        var transfer = Begin(message, path, add: true);
+        return transfer;
+    }
+
+    // A file message on its way (first time or again): its transfer is attached to it and drives its delivery.
+    ChatTransfer Begin(ChatMessage message, string path, bool add = false)
+    {
         var cts = new CancellationTokenSource();
-        var transfer = new ChatTransfer(id, name, kind, info.Length, false, () => cts.Cancel());
-        lock (gate) { transfers[id] = transfer; outgoing[id] = cts; }
+        var transfer = new ChatTransfer(message.Id, message.FileName!, message.Kind, message.Size, false, () => cts.Cancel());
+        lock (gate) { transfers[message.Id] = transfer; outgoing[message.Id] = cts; }
+        message.Transfer = transfer;
+        if (add) Add(message, false); else { MessageChanged?.Invoke(message); Changed?.Invoke(); }
         TransferStarted?.Invoke(transfer);
-        _ = Task.Run(() => SendCore(transfer, path, cts));
+        _ = Task.Run(() => SendCore(message, transfer, path, cts));
         return transfer;
     }
 
@@ -183,17 +272,33 @@ sealed class ChatChannel
         if (transfer.State != TransferState.Done) throw new IOException(transfer.Error ?? (transfer.State == TransferState.Cancelled ? "已取消。" : "发送失败。"));
     }
 
-    async Task SendCore(ChatTransfer transfer, string path, CancellationTokenSource cts)
+    async Task SendCore(ChatMessage message, ChatTransfer transfer, string path, CancellationTokenSource cts)
     {
         var ct = cts.Token;
         try
         {
-            await Ask("chat-file-begin", new { id = transfer.Id, kind = transfer.Kind.ToString(), name = transfer.Name, size = transfer.Size }, ct);
+            var begun = await Ask("chat-file-begin", new { id = transfer.Id, kind = transfer.Kind.ToString(), name = transfer.Name, size = transfer.Size, resume = true }, ct);
+            // the other side already has it (an earlier attempt arrived, only its answer did not): nothing to send again
+            if (begun.ValueKind == JsonValueKind.Object && begun.TryGetProperty("have", out var have) && have.ValueKind == JsonValueKind.True)
+            { transfer.Finish(TransferState.Done); Mark(message, Delivery.Delivered); return; }
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16, useAsync: true);
             using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            // the other side kept what arrived before the connection broke: continue from there (the checksum still covers the whole file)
+            var offset = begun.ValueKind == JsonValueKind.Object && begun.TryGetProperty("offset", out var at) && at.TryGetInt64(out var kept) && kept > 0 && kept < transfer.Size ? kept : 0;
+            if (offset > 0)
+            {
+                var skip = new byte[1 << 20];
+                for (var done = 0L; done < offset;)
+                {
+                    var read = await stream.ReadAsync(skip.AsMemory(0, (int)Math.Min(skip.Length, offset - done)), ct);
+                    if (read == 0) throw new IOException("文件在发送中变短了。");
+                    sha.AppendData(skip, 0, read); done += read;
+                }
+                transfer.Report(offset);
+            }
             // How much is on the wire adapts to the link: a transfer must never queue up so much that the session's own keep-alive and
             // probes wait behind it (that makes the path look dead). Few, small chunks while acknowledgements are slow; more, bigger ones when fast.
-            var acked = 0L; var seq = 0; var window = 2; var chunkSize = 16 * 1024; var clock = Stopwatch.StartNew();
+            var acked = offset; var seq = 0; var window = 2; var chunkSize = 16 * 1024; var clock = Stopwatch.StartNew();
             var pending = new Queue<(Task Ack, int Size, long Started)>();
             async Task Settle()
             {
@@ -216,15 +321,16 @@ sealed class ChatChannel
             while (pending.Count != 0) await Settle();
             await Ask("chat-file-end", new { id = transfer.Id, sha256 = Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant() }, ct);
             transfer.Finish(TransferState.Done);
-            Add(new ChatMessage(transfer.Id, true, transfer.Kind, "", transfer.Name, transfer.Size, path, DateTimeOffset.Now), false);
+            Mark(message, Delivery.Delivered);
         }
         catch (OperationCanceledException)
         {
             // stopped here (by the user), or because the other side stopped it: either way it is over
             try { using var brief = new CancellationTokenSource(TimeSpan.FromSeconds(3)); await Ask("chat-file-cancel", new { id = transfer.Id }, brief.Token); } catch (Exception) { }
             transfer.Finish(TransferState.Cancelled, "已取消");
+            Mark(message, Delivery.Failed, transfer.Error ?? "已取消");
         }
-        catch (Exception ex) { transfer.Finish(TransferState.Failed, ex.Message); }
+        catch (Exception ex) { transfer.Finish(TransferState.Failed, ex.Message); Mark(message, Delivery.Failed, ex.Message); }
         finally { lock (gate) outgoing.Remove(transfer.Id); cts.Dispose(); }
     }
 
@@ -237,7 +343,36 @@ sealed class ChatChannel
             {
                 var text = data.GetProperty("text").GetString() ?? "";
                 if (text.Length == 0 || text.Length > MaxText) throw new IOException("消息长度无效。");
-                Add(new ChatMessage(data.GetProperty("id").GetString() ?? Guid.NewGuid().ToString("N"), false, ChatKind.Text, text, null, 0, null, DateTimeOffset.Now), true);
+                var id = data.GetProperty("id").GetString() ?? Guid.NewGuid().ToString("N");
+                lock (gate) if (seen.Contains(id)) return Task.FromResult<object>(new { ok = true });   // sent again: already here
+                Add(new ChatMessage(id, false, ChatKind.Text, text, null, 0, null, DateTimeOffset.Now), true);
+                return Task.FromResult<object>(new { ok = true });
+            }
+            case "chat-nudge":
+            {
+                var id = data.GetProperty("id").GetString() ?? Guid.NewGuid().ToString("N");
+                lock (gate)
+                {
+                    if (seen.Contains(id)) return Task.FromResult<object>(new { ok = true });
+                    // too soon after the last one: taken, but not shown again
+                    if (DateTimeOffset.Now - lastNudgeReceived < TimeSpan.FromSeconds(NudgeSeconds)) { seen.Add(id); return Task.FromResult<object>(new { ok = true }); }
+                    lastNudgeReceived = DateTimeOffset.Now;
+                }
+                Add(new ChatMessage(id, false, ChatKind.Nudge, "", null, 0, null, DateTimeOffset.Now), true);
+                return Task.FromResult<object>(new { ok = true });
+            }
+            case "chat-read":
+            {
+                // the other side has seen everything this side sent up to this message
+                var upTo = data.GetProperty("upTo").GetString() ?? "";
+                List<ChatMessage> now = new();
+                lock (gate)
+                {
+                    var at = Messages.FindIndex(m => m.Id == upTo && m.Mine);
+                    for (var i = 0; i <= at; i++) if (Messages[i].Mine && !Messages[i].Read && Messages[i].Delivery == Delivery.Delivered) { Messages[i].Read = true; now.Add(Messages[i]); }
+                }
+                foreach (var message in now) MessageChanged?.Invoke(message);
+                if (now.Count != 0) Changed?.Invoke();
                 return Task.FromResult<object>(new { ok = true });
             }
             case "chat-file-begin": return Task.FromResult(Begin(data));
@@ -255,9 +390,35 @@ sealed class ChatChannel
         var size = data.GetProperty("size").GetInt64();
         var name = SafeName(data.GetProperty("name").GetString());
         if (size <= 0 || size > MaxFile || kind == ChatKind.Image && size > MaxImage) throw new IOException("文件大小超出限制。");
+        var resume = data.TryGetProperty("resume", out var asked) && asked.ValueKind == JsonValueKind.True;
         Incoming file; ChatTransfer transfer;
         lock (gate)
         {
+            if (seen.Contains(id)) return new { ok = true, have = true };   // already received: the sender stops here
+            if (paused.Remove(id, out var stopped))
+            {
+                if (resume && stopped.Size == size && stopped.Name == name && File.Exists(stopped.Part) && !incoming.ContainsKey(id) && incoming.Count < MaxIncoming)
+                {
+                    // what arrived before stays: the checksum is brought up to it and the file continues where it stopped
+                    var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                    using (var existing = File.OpenRead(stopped.Part)) { var buffer = new byte[1 << 20]; int read; while ((read = existing.Read(buffer)) > 0) sha.AppendData(buffer, 0, read); }
+                    var written = new FileInfo(stopped.Part).Length;
+                    if (written < size)
+                    {
+                        transfers.Remove(id);
+                        transfer = new ChatTransfer(id, name, kind, size, true, () => RejectIncoming(id));
+                        file = new Incoming { Path = stopped.Path, Name = name, Kind = kind, Size = size, Transfer = transfer, Stream = new FileStream(stopped.Part, FileMode.Append, FileAccess.Write, FileShare.None), Sha = sha, Written = written };
+                        incoming[id] = file; transfers[id] = transfer; receivedThisSession += size - written;
+                        transfer.Report(written);
+                        TransferStarted?.Invoke(transfer);
+                        return new { ok = true, offset = written };
+                    }
+                    sha.Dispose();
+                }
+                try { File.Delete(stopped.Part); } catch (IOException) { }
+            }
+            // an earlier attempt of the same file that broke off is replaced by this one
+            if (transfers.TryGetValue(id, out var earlier) && earlier.State != TransferState.Active && !incoming.ContainsKey(id)) transfers.Remove(id);
             if (incoming.Count >= MaxIncoming || incoming.ContainsKey(id) || transfers.ContainsKey(id)) throw new IOException("正在接收的文件过多。");
             // what one session may put on this disk, counting every file it announced (finished or not)
             if (receivedThisSession + size > MaxPerSession) throw new IOException($"本次连接接收的文件已达上限（{MaxPerSession / 1024 / 1024 / 1024} GB），请重新连接后再发送。");
@@ -267,8 +428,7 @@ sealed class ChatChannel
             if (free < size + promised + 1024L * 1024 * 1024) throw new IOException("接收方磁盘空间不足。");
             var path = Unique(name);
             transfer = new ChatTransfer(id, name, kind, size, true, () => RejectIncoming(id));
-            file = new Incoming { Path = path, Name = name, Kind = kind, Size = size, Transfer = transfer, Stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None), Sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256) };
-            MarkFromInternet(path);
+            file = new Incoming { Path = path, Name = name, Kind = kind, Size = size, Transfer = transfer, Stream = new FileStream(path + ".part", FileMode.Create, FileAccess.Write, FileShare.None), Sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256) };
             incoming[id] = file; transfers[id] = transfer; receivedThisSession += size;
         }
         TransferStarted?.Invoke(transfer);
@@ -320,12 +480,15 @@ sealed class ChatChannel
         lock (file) { file.Stream!.Dispose(); actual = Convert.ToHexString(file.Sha!.GetHashAndReset()).ToLowerInvariant(); file.Sha.Dispose(); }
         if (file.Written != file.Size || file.Pending.Count != 0 || actual != hash)
         {
-            try { File.Delete(file.Path); } catch (IOException) { }
+            try { File.Delete(file.Part); } catch (IOException) { }
             file.Transfer.Finish(TransferState.Failed, "文件校验失败，已丢弃");
             throw new IOException("文件校验失败，已丢弃。");
         }
+        var final = File.Exists(file.Path) ? Unique(file.Name) : file.Path;   // the name was taken meanwhile
+        File.Move(file.Part, final);
+        MarkFromInternet(final);
         file.Transfer.Finish(TransferState.Done);
-        Add(new ChatMessage(id, false, file.Kind, "", file.Name, file.Size, file.Path, DateTimeOffset.Now), true);
+        Add(new ChatMessage(id, false, file.Kind, "", file.Name, file.Size, final, DateTimeOffset.Now), true);
         return new { ok = true };
     }
 
@@ -348,13 +511,15 @@ sealed class ChatChannel
         _ = Task.Run(async () => { try { using var brief = new CancellationTokenSource(TimeSpan.FromSeconds(3)); await Ask("chat-file-cancel", new { id }, brief.Token); } catch (Exception) { } });
     }
 
-    void Abort(string id, TransferState state, string reason)
+    // keep: the connection broke, what arrived stays for the sender's retry; otherwise it is thrown away.
+    void Abort(string id, TransferState state, string reason, bool keep = false)
     {
         Incoming? file;
         lock (gate) { incoming.Remove(id, out file); }
         if (file == null) return;
-        lock (file) { file.Stream?.Dispose(); file.Sha?.Dispose(); }
-        try { File.Delete(file.Path); } catch (IOException) { }
+        lock (file) { file.Stream?.Dispose(); file.Sha?.Dispose(); file.Pending.Clear(); }
+        if (keep && file.Written > 0) lock (gate) paused[id] = file;
+        else try { File.Delete(file.Part); } catch (IOException) { }
         file.Transfer.Finish(state, reason);
     }
 
@@ -367,7 +532,7 @@ sealed class ChatChannel
             ids = incoming.Keys.ToArray(); sending = outgoing.Values.ToArray(); receivedThisSession = 0; turnedDown.Clear();
             foreach (var over in transfers.Where(p => p.Value.State != TransferState.Active).Select(p => p.Key).ToArray()) transfers.Remove(over);
         }
-        foreach (var id in ids) Abort(id, TransferState.Failed, "连接已断开");
+        foreach (var id in ids) Abort(id, TransferState.Failed, "连接已断开（已收到的部分保留，对方重试时继续）", keep: true);
         foreach (var cts in sending) { try { cts.Cancel(); } catch (ObjectDisposedException) { } }
     }
 }
