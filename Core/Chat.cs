@@ -279,6 +279,7 @@ sealed class ChatChannel
     async Task SendCore(ChatMessage message, ChatTransfer transfer, string path, CancellationTokenSource cts)
     {
         var ct = cts.Token;
+        var stoppedByThem = false;
         try
         {
             var begun = await Ask("chat-file-begin", new { id = transfer.Id, kind = transfer.Kind.ToString(), name = transfer.Name, size = transfer.Size, resume = true }, ct);
@@ -304,10 +305,12 @@ sealed class ChatChannel
             // How much is on the wire adapts to the link: a transfer must never queue up so much that the session's own keep-alive and
             // probes wait behind it (that makes the path look dead). Few, small chunks while acknowledgements are slow; more, bigger ones when fast.
             var acked = offset; var seq = 0; var window = 2; var chunkSize = 16 * 1024; var clock = Stopwatch.StartNew();
-            var pending = new Queue<(Task Ack, int Size, long Started)>();
+            var pending = new Queue<(Task<JsonElement> Ack, int Size, long Started)>();
             async Task Settle()
             {
-                var (ack, size, started) = pending.Dequeue(); await ack; acked += size; transfer.Report(acked);
+                var (ack, size, started) = pending.Dequeue();
+                if (TurnedDown(await ack)) { stoppedByThem = true; cts.Cancel(); ct.ThrowIfCancellationRequested(); }
+                acked += size; transfer.Report(acked);
                 var latency = clock.ElapsedMilliseconds - started;
                 if (latency > 1500) { window = 1; chunkSize = Math.Max(8 * 1024, chunkSize / 2); }
                 else if (latency > 700) window = Math.Max(1, window - 1);
@@ -329,7 +332,8 @@ sealed class ChatChannel
             }
             while (pending.Count != 0) await Settle();
             var sha256 = Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant();
-            await Ask("chat-file-end", attempt == null ? new { id = transfer.Id, sha256 } : (object)new { id = transfer.Id, sha256, attempt }, ct);
+            var ended = await Ask("chat-file-end", attempt == null ? new { id = transfer.Id, sha256 } : (object)new { id = transfer.Id, sha256, attempt }, ct);
+            if (TurnedDown(ended)) { stoppedByThem = true; cts.Cancel(); ct.ThrowIfCancellationRequested(); }
             transfer.Finish(TransferState.Done);
             Mark(message, Delivery.Delivered);
         }
@@ -337,7 +341,7 @@ sealed class ChatChannel
         {
             // stopped here (by the user), or because the other side stopped it: either way it is over
             try { using var brief = new CancellationTokenSource(TimeSpan.FromSeconds(3)); await Ask("chat-file-cancel", new { id = transfer.Id }, brief.Token); } catch (Exception) { }
-            transfer.Finish(TransferState.Cancelled, "已取消");
+            transfer.Finish(TransferState.Cancelled, cts.IsCancellationRequested && stoppedByThem ? "对方已取消接收" : "已取消");
             Mark(message, Delivery.Failed, transfer.Error ?? "已取消");
         }
         catch (Exception ex)
@@ -470,7 +474,7 @@ sealed class ChatChannel
         Incoming file;
         lock (gate)
         {
-            if (turnedDown.Contains(id)) return new { ok = true };
+            if (turnedDown.Contains(id)) return new { ok = true, cancelled = true };
             file = incoming.GetValueOrDefault(id) ?? throw new IOException("没有这个文件的传输。");
             if (OtherRound(data, file)) return new { ok = true };
         }
@@ -503,7 +507,7 @@ sealed class ChatChannel
         Incoming file;
         lock (gate)
         {
-            if (turnedDown.Contains(id)) return new { ok = true };
+            if (turnedDown.Contains(id)) return new { ok = true, cancelled = true };
             file = incoming.GetValueOrDefault(id) ?? throw new IOException("没有这个文件的传输。");
             if (OtherRound(data, file)) return new { ok = true };
             incoming.Remove(id);
@@ -523,6 +527,9 @@ sealed class ChatChannel
         Add(new ChatMessage(id, false, file.Kind, "", file.Name, file.Size, final, DateTimeOffset.Now), true);
         return new { ok = true };
     }
+
+    static bool TurnedDown(JsonElement reply) =>
+        reply.ValueKind == JsonValueKind.Object && reply.TryGetProperty("cancelled", out var no) && no.ValueKind == JsonValueKind.True;
 
     // A sender that names rounds (since v6.7) and names another one than this transfer's; one that names none is taken as it is.
     static bool OtherRound(JsonElement data, Incoming file) =>
