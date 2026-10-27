@@ -114,7 +114,7 @@ sealed partial class MainWindow : Window
         var capsule=Chrome.Capsule(new StackPanel{Orientation=Orientation.Horizontal,Spacing=12,Margin=new Thickness(12,2),Children={titleLogo,machine,Chrome.Divider(),netDot,netText,Chrome.Divider(),accountLabel}});
         // who this device is: "匿名用户" or the signed-in user; a click leads to the account in the settings
         accountLabel.Cursor=new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand);ToolTip.SetTip(accountLabel,"账号：点击登录或管理");
-        accountLabel.PointerPressed+=(_,e)=>{e.Handled=true;ShowSettings(true);selectSettingsTab?.Invoke(0);};
+        accountLabel.PointerPressed+=(_,e)=>{e.Handled=true;OpenAccount();};
         capsule.HorizontalAlignment=HorizontalAlignment.Left;capsule.Cursor=new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand);
         ToolTip.SetTip(capsule,"本机设备 ID；点击复制");
         capsule.PointerPressed+=async(_,e)=>
@@ -147,7 +147,7 @@ sealed partial class MainWindow : Window
             Children={new Logo(72){Animate=true,HorizontalAlignment=HorizontalAlignment.Center},T_("正在连接网络…")}};
         connectingOverlay.IsVisible=!previewMode;
         titleBar=bar;SetupAttention(!previewMode&&Motion.Enabled);
-        Content=new Grid{Children={Chrome.Backdrop(!previewMode),scrim,pageArea,connectingOverlay,bar,inviteOverlay,BuildChat(),BuildCallBanner(),BuildUpdate(),approvalOverlay,toastHost}};
+        Content=new Grid{Children={Chrome.Backdrop(!previewMode),scrim,pageArea,connectingOverlay,bar,inviteOverlay,BuildChat(),BuildCallBanner(),BuildUpdate(),BuildAccountOverlay(),approvalOverlay,toastHost}};
         ToolTip.SetTip(endpoint,"本机永久 EndpointId，用于首次连接时核对身份。");
         Opened += async (_,_) =>
         {
@@ -171,6 +171,7 @@ sealed partial class MainWindow : Window
                 directory.ConfirmSession=async(pair,ct)=>await Dispatcher.UIThread.InvokeAsync(()=>ConfirmSession(pair,ct));
                 directory.Changed+=RequestRefresh;
                 directory.Notice+=message=>Dispatcher.UIThread.Post(()=>Say(message));
+                directory.LoginNeeded+=()=>Dispatcher.UIThread.Post(()=>OpenAccount("连接其他设备需要先登录。没有账号可以注册，由管理员审核通过后使用。"));
                 StartIsland();StartUpdater(settings);
                 allow.IsChecked=directory.Enabled;identityCard.IsVisible=directory.Enabled;allow.OnContent=allow.OffContent="允许被控";allow.IsEnabled=true;ready=true;directory.Start();passwordTimer.Start();UpdatePassword();Say("正在连接网络…");
             });

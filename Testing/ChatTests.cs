@@ -24,6 +24,15 @@ static class ChatTests
             var fast = Path.Combine(root, "fast.bin"); File.WriteAllBytes(fast, RandomNumberGenerator.GetBytes(4 * 1024 * 1024));
             await fa.SendFile(fast);
             Check(largest > ChatChannel.Chunk && largest <= OverlaySession.MaxControlBody, $"every request stays within one link frame ({largest} bytes at most, limit {OverlaySession.MaxControlBody})");
+            // bytes whose base64 is all '+' (FB EF BE …), which JSON writes as \u002B each: still within one frame, and the file arrives whole
+            largest = 0;
+            var (pa, pb) = Pair(root, "plus");
+            var plus = Path.Combine(root, "plus.bin"); var pattern = new byte[600 * 1024];
+            for (var i = 0; i < pattern.Length; i++) pattern[i] = (i % 3) switch { 0 => 0xFB, 1 => 0xEF, _ => 0xBE };
+            File.WriteAllBytes(plus, pattern);
+            await pa.SendFile(plus);
+            Check(largest <= OverlaySession.MaxControlBody - 1000 && File.ReadAllBytes(pb.Messages.Last().Path!).SequenceEqual(pattern),
+                $"data that is all '+' in base64 is cut smaller and still arrives ({largest} bytes at most)");
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { } }
         return failures == 0 ? 0 : 1;
@@ -132,6 +141,51 @@ static class ChatTests
         Check(message.Delivery == ArdUi.Delivery.Delivered && b.Messages.Count == 1 && File.ReadAllBytes(b.Messages[0].Path!).SequenceEqual(data), "sent again, it continues and arrives whole");
         Check(sentAfterRetry > 0 && sentAfterRetry < data.Length, $"only the rest was sent again ({sentAfterRetry} of {data.Length} bytes)");
         Check(Directory.GetFiles(Path.Combine(dir, "b"), "*.part").Length == 0, "no .part is left behind");
+
+        // the sender gives up while this side still thinks the file is under way (it never heard): a retry continues all the same
+        var dir2 = Path.Combine(root, "resume-stale");
+        ChatChannel? d = null; var cut = false; long sent2 = 0; var counting2 = false;
+        ChatSender toD = async (m, data2, ct) =>
+        {
+            if (cut && m == "chat-file-chunk") throw new IOException("控制请求超时。");
+            if (counting2 && m == "chat-file-chunk") sent2 += Convert.FromBase64String(JsonSerializer.SerializeToElement(data2).GetProperty("data").GetString()!).Length;
+            await Task.Delay(3, ct);
+            return await Deliver(d!, m, data2, ct, 0);
+        };
+        var c = new ChatChannel(Path.Combine(dir2, "c"), () => toD);
+        d = new ChatChannel(Path.Combine(dir2, "d"), () => null);
+        ChatTransfer? arriving = null; d.TransferStarted += t => arriving = t;
+        var t2 = c.StartSend(source); var m2 = c.Messages.Last();
+        while (arriving == null || arriving.Transferred < data.Length / 2) await Task.Delay(10);
+        cut = true; await t2.Completion;   // the sender's side fails; the receiver is not told and still shows it as arriving
+        Check(m2.Delivery == ArdUi.Delivery.Failed && arriving.State == TransferState.Active, "a sender that gave up leaves the receiver waiting");
+        cut = false; counting2 = true; c.Retry(m2.Id);
+        await m2.Transfer!.Completion;
+        Check(m2.Delivery == ArdUi.Delivery.Delivered && d.Messages.Count == 1 && File.ReadAllBytes(d.Messages[0].Path!).SequenceEqual(data) && sent2 < data.Length,
+            $"its retry continues from what arrived ({sent2} of {data.Length} bytes sent again)");
+
+        // the receiving ArdUi was restarted meanwhile (nothing remembered): the retry still continues from the kept .part
+        var dir3 = Path.Combine(root, "resume-restart");
+        ChatChannel? f = null; var cut3 = false; long sent3 = 0; var counting3 = false;
+        ChatSender toF = async (m, data3, ct) =>
+        {
+            if (cut3) throw new IOException("设备连接已断开，无法发送。");
+            if (counting3 && m == "chat-file-chunk") sent3 += Convert.FromBase64String(JsonSerializer.SerializeToElement(data3).GetProperty("data").GetString()!).Length;
+            await Task.Delay(3, ct);
+            return await Deliver(f!, m, data3, ct, 0);
+        };
+        var e3 = new ChatChannel(Path.Combine(dir3, "e"), () => toF);
+        f = new ChatChannel(Path.Combine(dir3, "f"), () => null);
+        ChatTransfer? arriving3 = null; f.TransferStarted += t => arriving3 = t;
+        var t3 = e3.StartSend(source); var m3 = e3.Messages.Last();
+        while (arriving3 == null || arriving3.Transferred < data.Length / 2) await Task.Delay(10);
+        cut3 = true; await t3.Completion;
+        f.Close();
+        f = new ChatChannel(Path.Combine(dir3, "f"), () => null);   // restarted: a new channel over the same folder
+        cut3 = false; counting3 = true; e3.Retry(m3.Id);
+        await m3.Transfer!.Completion;
+        Check(m3.Delivery == ArdUi.Delivery.Delivered && File.ReadAllBytes(f.Messages[0].Path!).SequenceEqual(data) && sent3 < data.Length
+              && Directory.GetFiles(Path.Combine(dir3, "f"), "*.part").Length == 0, $"after a restart the retry continues from the kept .part ({sent3} of {data.Length} bytes sent again)");
     }
 
     // Read receipts: seeing the conversation tells the other side, once, up to which message; with receipts off nothing is told.

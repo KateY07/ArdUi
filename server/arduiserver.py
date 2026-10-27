@@ -26,7 +26,7 @@ CODE = re.compile(r'[A-Z0-9]{6}\Z')
 ENDPOINT = re.compile(r'[0-9a-f]{64}\Z')
 TICKET = re.compile(r'[0-9a-f]{32}\Z')
 COMPUTER_NAME = re.compile(r'[^\x00-\x1f\x7f]{1,64}\Z')
-VERSION = 'v6.7'
+VERSION = 'v6.8'
 # Network probe (see probe_udp.py): this server only mints short-lived tokens, each bound to the caller's IP address.
 PROBE_KEY = os.environ.get('ARDUI_PROBE_KEY', DB + '.probe-key')
 PROBE_HOST = os.environ.get('ARDUI_PROBE_HOST', '')
@@ -278,11 +278,16 @@ def initialize():
           admin INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS device_users(
           endpoint TEXT PRIMARY KEY, user INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, since INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS login_requests(key TEXT PRIMARY KEY, endpoint TEXT NOT NULL, expires INTEGER NOT NULL, user INTEGER);
         CREATE TABLE IF NOT EXISTS admin_sessions(token TEXT PRIMARY KEY, user INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires INTEGER NOT NULL);
         ''')
         # Computer name shown to controllers that hold a signed grant; added after the first release.
         if 'name' not in {row[1] for row in db.execute('PRAGMA table_info(devices)')}:
             db.execute("ALTER TABLE devices ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+        # self-registration: an e-mail address, and "pending" until an administrator approves the account
+        columns = {row[1] for row in db.execute('PRAGMA table_info(users)')}
+        if 'email' not in columns: db.execute("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+        if 'pending' not in columns: db.execute("ALTER TABLE users ADD COLUMN pending INTEGER NOT NULL DEFAULT 0")
 
     os.chmod(DB, 0o600)
 
@@ -617,7 +622,8 @@ def ferry_page(view):
     return FERRY_PAGE.replace('__DATA__', data)
 
 # ---- accounts -----------------------------------------------------------------------------------------------------------------------
-# Users exist only because an administrator made them (the first one on the server: arduiserver.py --add-user NAME --admin). A device
+# Users are made by an administrator (the first one on the server: arduiserver.py --add-user NAME --admin), or register themselves
+# (name, e-mail, password) and wait until an administrator approves them; until then they cannot sign in. A device
 # signs in with a user's name and password and is then that user's. Only a signed-in device may start a session (control another
 # device): M refuses an anonymous controller's connection request, so its traffic never reaches this network's ArdFerry nodes. The
 # controlled side never needs an account.
@@ -634,14 +640,17 @@ def set_password(db, user, password):
     salt = secrets.token_bytes(16)
     db.execute('UPDATE users SET salt=?, hash=? WHERE id=?', (salt, password_hash(check_password(password), salt), user))
 
-def add_user(name, password=None, admin=False):
+EMAIL = re.compile(r'[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,63}\Z')
+
+def add_user(name, password=None, admin=False, email='', pending=False):
     if not isinstance(name, str) or not USER_NAME.fullmatch(name): raise ApiError(400, '用户名需要 2 到 40 个字符（字母、数字、汉字、. _ @ -）。')
+    if not isinstance(email, str) or email and not EMAIL.fullmatch(email): raise ApiError(400, '邮箱地址无效。')
     password = password or secrets.token_urlsafe(12)
     salt = secrets.token_bytes(16)
     with database() as db:
         try:
-            db.execute('INSERT INTO users(name,salt,hash,admin,created) VALUES(?,?,?,?,?)',
-                       (name, salt, password_hash(check_password(password), salt), int(admin), int(time.time())))
+            db.execute('INSERT INTO users(name,salt,hash,admin,created,email,pending,disabled) VALUES(?,?,?,?,?,?,?,?)',
+                       (name, salt, password_hash(check_password(password), salt), int(admin), int(time.time()), email, int(pending), int(pending)))
         except sqlite3.IntegrityError: raise ApiError(409, '用户名已存在。')
     return password
 
@@ -650,8 +659,12 @@ def verify_user(db, name, password):
     import hmac
     if row is None or not isinstance(password, str) or not hmac.compare_digest(password_hash(password, row['salt']), row['hash']):
         raise ApiError(403, '用户名或密码不正确。')
+    if row['pending']: raise ApiError(403, '账号正在等待管理员审核，通过后即可登录。')
     if row['disabled']: raise ApiError(403, '该账号已被停用，请联系管理员。')
     return row
+
+LOGIN_REQUEST_SECONDS = 600
+def login_key(token): return hashlib.sha256(token.encode()).hexdigest()
 
 def member_of(db, endpoint):
     """The active user a device is signed in as (None: anonymous)."""
@@ -672,6 +685,29 @@ def account(path, endpoint, data, ip, now):
             row = verify_user(db, name, data.get('password'))
             db.execute('INSERT INTO device_users VALUES(?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user=excluded.user, since=excluded.since', (endpoint, row['id'], now))
         return {'username': row['name'], 'admin': bool(row['admin'])}
+    if path == '/api/v1/account/login-start':
+        # signing in happens on the account page in a browser: this device gets a one-time request (10 minutes) to open there
+        limit('login-start:' + endpoint, 10, 600)
+        token = secrets.token_urlsafe(24)
+        with database() as db:
+            registered(db, endpoint)
+            db.execute('DELETE FROM login_requests WHERE expires<?', (now,))
+            db.execute('INSERT INTO login_requests VALUES(?,?,?,NULL)', (login_key(token), endpoint, now + LOGIN_REQUEST_SECONDS))
+        return {'token': token, 'url': '/api/account?login=' + token, 'expires': now + LOGIN_REQUEST_SECONDS}
+    if path == '/api/v1/account/login-wait':
+        # held until the browser signed this device in (or WAIT_SECONDS): then the device knows its user
+        token = data.get('token') if isinstance(data.get('token'), str) else ''
+        key = 'login:' + login_key(token); version = news(key)
+        def answer():
+            with database() as db:
+                row = db.execute('SELECT * FROM login_requests WHERE key=? AND endpoint=?', (login_key(token), endpoint)).fetchone()
+                if row is None or row['expires'] < int(time.time()): raise ApiError(410, '登录请求已过期，请重新登录。')
+                if row['user'] is None: return None
+                user = member_of(db, endpoint)
+            return {'username': user['name'] if user else None, 'admin': bool(user and user['admin'])}
+        result = answer()
+        if result is not None: return result
+        raise Wait(key, version, lambda: answer() or {'pending': True})
     if path == '/api/v1/account/logout':
         with database() as db: db.execute('DELETE FROM device_users WHERE endpoint=?', (endpoint,))
         return {'username': None}
@@ -686,9 +722,144 @@ def account(path, endpoint, data, ip, now):
         return {'ok': True}
     return None
 
+# ---- the account page -----------------------------------------------------------------------------------------------------------
+# /api/account, opened in a browser: sign a device in (it opened the page with ?login=<its one-time request>; the page says which
+# device it is, so nobody signs a stranger's device into their account by following a link), register (the account then waits for
+# an administrator), and change a password. The JSON calls need X-ArdUi-Web: 1 (no other site's form can send that) and are rate limited.
+def account_web(path, environ, start_response):
+    method = environ['REQUEST_METHOD']
+    if path in ('/api/account', '/api/account/') and method == 'GET':
+        body = ACCOUNT_PAGE.encode()
+        start_response('200 OK', [('Content-Type', 'text/html; charset=utf-8'), ('Content-Length', str(len(body))), ('Cache-Control', 'no-store'),
+                                  ('X-Content-Type-Options', 'nosniff'), ('X-Frame-Options', 'DENY'), ('Referrer-Policy', 'no-referrer'),
+                                  ('Content-Security-Policy', "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'")])
+        return [body]
+    if environ.get('HTTP_X_ARDUI_WEB') != '1': raise ApiError(403, '请求缺少网页标记。')
+    ip = environ.get('HTTP_X_REAL_IP') or environ.get('REMOTE_ADDR', 'unknown')
+    now = int(time.time())
+    if path == '/api/account/device' and method == 'GET':
+        import urllib.parse
+        token = urllib.parse.parse_qs(environ.get('QUERY_STRING', '')).get('login', [''])[0]
+        limit('web-device:' + ip, 60, 600)
+        with database() as db:
+            row = db.execute('SELECT devices.code, devices.name, login_requests.expires, login_requests.user FROM login_requests JOIN devices ON devices.endpoint=login_requests.endpoint WHERE key=?', (login_key(token),)).fetchone()
+        if row is None or row['expires'] < now: raise ApiError(410, '这个登录链接已过期，请在 ArdUi 里重新点“登录”。')
+        return admin_reply(start_response, 200, {'code': row['code'], 'computer': row['name'], 'done': row['user'] is not None})
+    try: length = int(environ.get('CONTENT_LENGTH') or 0)
+    except ValueError: raise ApiError(400, '无效内容长度。')
+    if not 0 < length <= 8192 or method != 'POST': raise ApiError(400, '请求无效。')
+    try: data = json.loads(environ['wsgi.input'].read(length))
+    except ValueError: raise ApiError(400, '请求格式无效。')
+    if not isinstance(data, dict): raise ApiError(400, '请求格式无效。')
+    if path == '/api/account/login':
+        limit('web-login:' + ip, 10, 600); limit('login-user:' + str(data.get('name')).lower()[:40], 10, 600)
+        token = data.get('login') if isinstance(data.get('login'), str) else ''
+        with database() as db:
+            db.execute('BEGIN IMMEDIATE')
+            request = db.execute('SELECT * FROM login_requests WHERE key=?', (login_key(token),)).fetchone()
+            if request is None or request['expires'] < now: raise ApiError(410, '这个登录链接已过期，请在 ArdUi 里重新点“登录”。')
+            if request['user'] is not None: raise ApiError(409, '这个登录链接已经用过了。')
+            user = verify_user(db, data.get('name'), data.get('password'))
+            db.execute('UPDATE login_requests SET user=? WHERE key=?', (user['id'], login_key(token)))
+            db.execute('INSERT INTO device_users VALUES(?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user=excluded.user, since=excluded.since', (request['endpoint'], user['id'], now))
+        notify('login:' + login_key(token))   # after the commit: the device's waiting look sees it
+        return admin_reply(start_response, 200, {'name': user['name']})
+    if path == '/api/account/register':
+        # anyone may ask for an account; it stays pending (cannot sign in) until an administrator approves it
+        limit('signup:' + ip, 5, 3600)
+        add_user(data.get('name'), check_password(data.get('password')), email=(data.get('email') or '').strip(), pending=True)
+        return admin_reply(start_response, 200, {'pending': True})
+    if path == '/api/account/password':
+        limit('web-password:' + ip, 10, 600); limit('login-user:' + str(data.get('name')).lower()[:40], 10, 600)
+        with database() as db:
+            user = verify_user(db, data.get('name'), data.get('old'))
+            set_password(db, user['id'], data.get('new'))
+        return admin_reply(start_response, 200, {'ok': True})
+    raise ApiError(404, '接口不存在。')
+
+ACCOUNT_PAGE = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>账号 · ArdUi</title>
+<style>
+:root{--bg:#fafaf8;--card:#fff;--line:#ecebe6;--text:#1f1e1d;--muted:#8a877f;--accent:#c96442;--hover:#f6f5f1;--ok:#2f7d4f;--bad:#b3261e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 "Segoe UI","Microsoft YaHei UI",system-ui,sans-serif}
+.box{max-width:400px;margin:60px auto;padding:0 20px}
+header{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.logo{width:36px;height:36px;border-radius:10px;background:var(--accent);color:#fff;display:grid;place-items:center;font-weight:700}
+h1{font-size:19px;margin:0;font-weight:600}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px}
+.tabs{display:flex;gap:6px;margin-bottom:16px}
+.tabs button{border-radius:16px;padding:5px 14px}
+.tabs button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+input{width:100%;font:inherit;border:1px solid var(--line);border-radius:9px;padding:9px 11px;background:#fff}
+input:focus{outline:none;border-color:var(--accent)}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:9px;padding:8px 14px;cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;width:100%;margin-top:16px;padding:10px}
+.device{background:#fbeee8;border-radius:10px;padding:10px 12px;margin-bottom:6px;font-size:13px}
+.device b{letter-spacing:1px}
+.msg{margin-top:14px;font-size:13px;min-height:1em}
+.msg.ok{color:var(--ok)} .msg.bad{color:var(--bad)}
+.note{color:var(--muted);font-size:12px;margin-top:14px}
+.done{text-align:center;padding:16px 0}
+.done .big{font-size:40px;color:var(--ok)}
+</style></head><body>
+<div class="box">
+ <header><div class="logo">A</div><div><h1>ArdUi 账号</h1></div></header>
+ <div class="card">
+  <div class="tabs"><button id="tLogin" class="on">登录</button><button id="tRegister">注册</button><button id="tPassword">修改密码</button></div>
+  <form id="fLogin">
+   <div class="device" id="device" hidden></div>
+   <label>用户名</label><input id="lName" autocomplete="username" required>
+   <label>密码</label><input id="lPassword" type="password" autocomplete="current-password" required>
+   <button class="primary" id="lGo">登录这台设备</button>
+   <div class="note" id="lNote">请从 ArdUi 里点“在浏览器中登录”打开本页，这样才知道要登录哪台设备。</div>
+  </form>
+  <form id="fRegister" hidden>
+   <label>用户名（2–40 个字符）</label><input id="rName" autocomplete="username" required maxlength="40">
+   <label>邮箱</label><input id="rEmail" type="email" autocomplete="email" required maxlength="254">
+   <label>密码（至少 8 个字符）</label><input id="rPassword" type="password" autocomplete="new-password" required minlength="8">
+   <label>再输入一次密码</label><input id="rPassword2" type="password" autocomplete="new-password" required minlength="8">
+   <button class="primary">注册</button>
+   <div class="note">注册后需要管理员审核，通过后才能登录。被控的一方不需要账号。</div>
+  </form>
+  <form id="fPassword" hidden>
+   <label>用户名</label><input id="pName" autocomplete="username" required>
+   <label>当前密码</label><input id="pOld" type="password" autocomplete="current-password" required>
+   <label>新密码（至少 8 个字符）</label><input id="pNew" type="password" autocomplete="new-password" required minlength="8">
+   <button class="primary">修改密码</button>
+  </form>
+  <div class="done" id="done" hidden><div class="big">✓</div><div id="doneText"></div><div class="note">可以关闭这个页面，回到 ArdUi。</div></div>
+  <div class="msg" id="msg"></div>
+ </div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const login=new URLSearchParams(location.search).get('login');
+function say(t,ok){$('msg').textContent=t;$('msg').className='msg '+(ok?'ok':'bad')}
+async function api(method,path,body){const r=await fetch('/api/account'+path,{method,headers:{'X-ArdUi-Web':'1','Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
+function tab(name){for(const n of ['Login','Register','Password']){$('f'+n).hidden=n!==name;$('t'+n).classList.toggle('on',n===name)}say('',true)}
+$('tLogin').onclick=e=>{e.preventDefault();tab('Login')};$('tRegister').onclick=e=>{e.preventDefault();tab('Register')};$('tPassword').onclick=e=>{e.preventDefault();tab('Password')};
+if(location.hash==='#register')tab('Register');if(location.hash==='#password')tab('Password');
+async function device(){if(!login){$('lGo').disabled=true;return}
+  try{const d=await api('GET','/device?login='+encodeURIComponent(login));
+   $('device').hidden=false;$('device').innerHTML='正在登录设备 <b>'+d.code+'</b>'+(d.computer?'（'+d.computer.replace(/[&<>"']/g,'')+'）':'')+'。<br>请确认这是你自己的设备。';
+   $('lNote').textContent='登录后，这台设备可以连接其他设备。';if(d.done)finish('这台设备已经登录。')}
+  catch(x){$('lGo').disabled=true;say(x.message,false)}}
+function finish(text){for(const n of ['Login','Register','Password'])$('f'+n).hidden=true;document.querySelector('.tabs').hidden=true;$('done').hidden=false;$('doneText').textContent=text;say('',true)}
+$('fLogin').onsubmit=async e=>{e.preventDefault();try{const r=await api('POST','/login',{login,name:$('lName').value.trim(),password:$('lPassword').value});finish('已登录为 '+r.name+'。')}catch(x){say(x.message,false)}};
+$('fRegister').onsubmit=async e=>{e.preventDefault();if($('rPassword').value!==$('rPassword2').value){say('两次输入的密码不一致。',false);return}
+  try{await api('POST','/register',{name:$('rName').value.trim(),email:$('rEmail').value.trim(),password:$('rPassword').value});$('lName').value=$('rName').value.trim();
+   finish('注册成功，正在等待管理员审核。通过后在 ArdUi 里点“在浏览器中登录”即可。')}catch(x){say(x.message,false)}};
+$('fPassword').onsubmit=async e=>{e.preventDefault();try{await api('POST','/password',{name:$('pName').value.trim(),old:$('pOld').value,new:$('pNew').value});$('pOld').value=$('pNew').value='';say('密码已修改。',true)}catch(x){say(x.message,false)}};
+device();
+</script></body></html>"""
+
 # ---- the administration page ------------------------------------------------------------------------------------------------------
-# /api/admin: administrators make users (a name is required), reset passwords, stop users (which takes away their right to start
-# sessions), and change their own password. The page signs in with an administrator's name and password; the session is an HttpOnly, Secure,
+# /api/admin: administrators approve or refuse self-registered accounts, make users (a name is required), reset passwords, stop users
+# (which takes away their right to start sessions), and change their own password. The page signs in with an administrator's name and password; the session is an HttpOnly, Secure,
 # SameSite=Strict cookie limited to /api/admin, and every request that reads or changes anything must carry X-ArdUi-Admin: 1 (a
 # page on another site cannot add that header without this server allowing it, which it never does).
 ADMIN_SESSION_SECONDS = 12 * 3600
@@ -748,7 +919,7 @@ def admin_api(path, environ, start_response):
         return admin_reply(start_response, 200, {'name': me['name']})
     if path == '/api/admin/users' and method == 'GET':
         with database() as db:
-            rows = db.execute('SELECT users.id, users.name, users.admin, users.disabled, users.created, '
+            rows = db.execute('SELECT users.id, users.name, users.email, users.pending, users.admin, users.disabled, users.created, '
                               'count(device_users.endpoint) AS devices, max(devices.seen) AS seen '
                               'FROM users LEFT JOIN device_users ON device_users.user=users.id LEFT JOIN devices ON devices.endpoint=device_users.endpoint '
                               'GROUP BY users.id ORDER BY users.name COLLATE NOCASE').fetchall()
@@ -756,7 +927,7 @@ def admin_api(path, environ, start_response):
     if path == '/api/admin/users' and method == 'POST':
         limit('admin-change:' + str(me['id']), 120, 600)
         password = data.get('password') or None
-        made = add_user(data.get('name'), password, bool(data.get('admin')))
+        made = add_user(data.get('name'), password, bool(data.get('admin')), (data.get('email') or '').strip())
         return admin_reply(start_response, 200, {'name': data.get('name'), 'password': None if password else made})
     match = re.fullmatch(r'/api/admin/users/(\d{1,9})', path)
     if match and method in ('POST', 'DELETE'):
@@ -771,6 +942,7 @@ def admin_api(path, environ, start_response):
             if method == 'DELETE':
                 db.execute('DELETE FROM users WHERE id=?', (user,))
             else:
+                if data.get('approve'): db.execute('UPDATE users SET pending=0, disabled=0 WHERE id=?', (user,))
                 for field in ('disabled', 'admin'):
                     if field in data: db.execute(f'UPDATE users SET {field}=? WHERE id=?', (int(bool(data[field])), user))
                 if data.get('resetPassword'):
@@ -988,6 +1160,8 @@ def application(environ,start_response):
                 start_response('200 OK',[('Content-Type','text/html; charset=utf-8'),('Content-Length',str(len(body))),('Cache-Control','no-store'),('X-Content-Type-Options','nosniff')])
                 return [body]
             result=view
+        elif path=='/api/account' or path.startswith('/api/account/'):
+            return account_web(path,environ,start_response)
         elif path=='/api/admin' or path.startswith('/api/admin/') and not path.startswith('/api/admin/upload'):
             return admin_api(path,environ,start_response)
         elif path=='/api/v1/release' and environ['REQUEST_METHOD']=='GET':
@@ -1098,11 +1272,12 @@ td.ops{text-align:right;white-space:nowrap} td.ops button{padding:3px 10px;font-
  <div id="app" hidden>
   <header><div class="logo">A</div><div><h1>ArdUi 管理</h1><div class="sub" id="who"></div></div>
    <div class="bar"><button id="logout">退出登录</button></div></header>
+  <div class="card" id="pendingCard" hidden><h2>待审核 <span class="tag" id="pendingCount"></span></h2><table><thead><tr><th>用户名</th><th>邮箱</th><th>申请时间</th><th></th></tr></thead><tbody id="pending"></tbody></table></div>
   <div class="card"><h2>新建用户</h2>
-   <div class="row"><input id="nn" placeholder="用户名（必填）" maxlength="40"><input id="np" type="password" placeholder="初始密码（留空自动生成）"><label class="muted"><input type="checkbox" id="na"> 管理员</label><button class="primary" id="nb">创建</button></div>
+   <div class="row"><input id="nn" placeholder="用户名（必填）" maxlength="40"><input id="ne" placeholder="邮箱（可选）" maxlength="254"><input id="np" type="password" placeholder="初始密码（留空自动生成）"><label class="muted"><input type="checkbox" id="na"> 管理员</label><button class="primary" id="nb">创建</button></div>
    <div id="made"></div>
   </div>
-  <div class="card"><h2>用户</h2><table><thead><tr><th>用户名</th><th>设备</th><th>最近在线</th><th>创建</th><th></th></tr></thead><tbody id="users"></tbody></table>
+  <div class="card"><h2>用户</h2><table><thead><tr><th>用户名</th><th>邮箱</th><th>设备</th><th>最近在线</th><th>创建</th><th></th></tr></thead><tbody id="users"></tbody></table>
    <p class="muted" id="limits"></p></div>
   <div class="card"><h2>修改我的密码</h2><div class="row"><input id="po" type="password" placeholder="当前密码"><input id="pn" type="password" placeholder="新密码（至少 8 个字符）"><button id="pb">修改</button></div></div>
  </div>
@@ -1117,14 +1292,20 @@ async function api(method,path,body){const r=await fetch('/api/admin'+path,{meth
   const j=await r.json().catch(()=>({}));if(r.status===401){show(false);throw new Error(j.error||'请先登录')}if(!r.ok)throw new Error(j.error||r.status);return j}
 function show(app){$('login').hidden=app;$('app').hidden=!app}
 async function load(){const me=await api('GET','/me');$('who').textContent='已登录：'+me.name;$('limits').textContent='只有已登录的设备可以连接（控制）其他设备；未登录的设备（匿名用户）只能被控。被控的一方不需要账号。停用用户即收回其连接权限。';
-  const d=await api('GET','/users');$('users').innerHTML=d.users.map(u=>'<tr><td>'+esc(u.name)+(u.admin?'<span class="tag on">管理员</span>':'')+(u.disabled?'<span class="tag off">已停用</span>':'')+'</td><td>'+u.devices+'</td><td>'+day(u.seen)+'</td><td>'+day(u.created)+'</td>'+
+  const d=await api('GET','/users');const waiting=d.users.filter(u=>u.pending);
+  $('pendingCard').hidden=!waiting.length;$('pendingCount').textContent=waiting.length;
+  $('pending').innerHTML=waiting.map(u=>'<tr><td>'+esc(u.name)+'</td><td>'+esc(u.email||'—')+'</td><td>'+day(u.created)+'</td><td class="ops"><button class="primary" data-a="approve" data-i="'+u.id+'">通过</button><button class="danger" data-a="refuse" data-i="'+u.id+'">拒绝</button></td></tr>').join('');
+  $('users').innerHTML=d.users.filter(u=>!u.pending).map(u=>'<tr><td>'+esc(u.name)+(u.admin?'<span class="tag on">管理员</span>':'')+(u.disabled?'<span class="tag off">已停用</span>':'')+'</td><td>'+esc(u.email||'—')+'</td><td>'+u.devices+'</td><td>'+day(u.seen)+'</td><td>'+day(u.created)+'</td>'+
    '<td class="ops"><button data-a="reset" data-i="'+u.id+'">重置密码</button>'+
    (u.id===d.me?'':'<button data-a="admin" data-v="'+(u.admin?0:1)+'" data-i="'+u.id+'">'+(u.admin?'取消管理员':'设为管理员')+'</button><button data-a="disable" data-v="'+(u.disabled?0:1)+'" data-i="'+u.id+'">'+(u.disabled?'启用':'停用')+'</button><button class="danger" data-a="delete" data-i="'+u.id+'">删除</button>')+'</td></tr>').join('');show(true)}
 $('lb').onclick=async()=>{try{await api('POST','/login',{name:$('ln').value.trim(),password:$('lp').value});$('lp').value='';await load()}catch(x){toast(x.message)}};
 $('lp').onkeydown=e=>{if(e.key==='Enter')$('lb').click()};
 $('logout').onclick=async()=>{try{await api('POST','/logout')}catch(x){}show(false)};
-$('nb').onclick=async()=>{try{const r=await api('POST','/users',{name:$('nn').value.trim(),password:$('np').value||null,admin:$('na').checked});
-  $('made').innerHTML='<div class="note">已创建 <b>'+esc(r.name)+'</b>'+(r.password?'，初始密码：<b>'+esc(r.password)+'</b>（只显示这一次，请转告用户并让其登录后修改）':'')+'</div>';$('nn').value=$('np').value='';$('na').checked=false;load()}catch(x){toast(x.message)}};
+$('nb').onclick=async()=>{try{const r=await api('POST','/users',{name:$('nn').value.trim(),email:$('ne').value.trim(),password:$('np').value||null,admin:$('na').checked});
+  $('made').innerHTML='<div class="note">已创建 <b>'+esc(r.name)+'</b>'+(r.password?'，初始密码：<b>'+esc(r.password)+'</b>（只显示这一次，请转告用户并让其登录后修改）':'')+'</div>';$('nn').value=$('ne').value=$('np').value='';$('na').checked=false;load()}catch(x){toast(x.message)}};
+$('pending').onclick=async e=>{const b=e.target.closest('button');if(!b)return;const id=b.dataset.i;
+  try{if(b.dataset.a==='approve'){await api('POST','/users/'+id,{approve:true});toast('已通过，该用户现在可以登录')}
+   else{if(!confirm('拒绝并删除这个注册申请？'))return;await api('DELETE','/users/'+id);toast('已拒绝')}load()}catch(x){toast(x.message)}};
 $('users').onclick=async e=>{const b=e.target.closest('button');if(!b)return;const id=b.dataset.i,a=b.dataset.a,v=b.dataset.v==='1';
   try{if(a==='delete'){if(!confirm('删除这个用户？它的设备会变回匿名用户。'))return;await api('DELETE','/users/'+id)}
    else if(a==='reset'){if(!confirm('重置密码？该用户的设备会被登出。'))return;const r=await api('POST','/users/'+id,{resetPassword:true});$('made').innerHTML='<div class="note">新密码：<b>'+esc(r.password)+'</b>（只显示这一次）</div>'}

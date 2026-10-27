@@ -223,6 +223,30 @@ sealed class DirectoryClient : IAsyncDisposable
         if (username.Length == 0 || string.IsNullOrEmpty(password)) throw new InvalidOperationException("请输入用户名和密码。");
         Apply(await Call<AccountReply>("/api/v1/account/login", new { username, password }, ct));
     }
+    public event Action? LoginNeeded;   // a connection the person started needs this device signed in
+    // Signing in (and registering) happens on this M's account page in a browser: the device gets a one-time request, the page is
+    // opened with it, and the device waits until the person signed it in there (or the request ran out).
+    sealed record LoginStart(string Token, string Url, long Expires);
+    public async Task<(string Token, Uri Page, DateTimeOffset Until)> StartWebLogin(CancellationToken ct = default)
+    {
+        var start = await Call<LoginStart>("/api/v1/account/login-start", new { }, ct);
+        if (!Regex.IsMatch(start.Token, @"\A[A-Za-z0-9_-]{16,64}\z") || !start.Url.StartsWith("/api/account?login=", StringComparison.Ordinal))
+            throw new InvalidDataException("服务器返回的登录请求无效。");
+        return (start.Token, new Uri(http.BaseAddress!, start.Url), DateTimeOffset.FromUnixTimeSeconds(start.Expires));
+    }
+    public async Task<bool> WaitWebLogin(string token, DateTimeOffset until, CancellationToken ct = default)
+    {
+        while (DateTimeOffset.UtcNow < until)
+        {
+            ct.ThrowIfCancellationRequested();
+            var reply = await Call<JsonElement>("/api/v1/account/login-wait", new { token }, ct);   // held by M until something happens
+            if (reply.TryGetProperty("username", out var name) && name.ValueKind == JsonValueKind.String)
+            { Apply(new AccountReply(name.GetString(), reply.TryGetProperty("admin", out var admin) && admin.ValueKind == JsonValueKind.True)); return true; }
+        }
+        return false;
+    }
+    // The account page (registering: "#register", changing the password: "#password").
+    public Uri AccountPage(string part = "") => new(http.BaseAddress!, "/api/account" + part);
     public async Task Logout(CancellationToken ct = default) => Apply(await Call<AccountReply>("/api/v1/account/logout", new { }, ct));
     public async Task ChangePassword(string old, string password, CancellationToken ct = default)
     {
@@ -564,7 +588,14 @@ sealed class DirectoryClient : IAsyncDisposable
     {
         machine=Wire.Machine(machine);
         using var operation=await connects.Enter(machine,ct);
-        await ConnectOnceCore(machine,password,enrolling,operation.Token,background);
+        try{await ConnectOnceCore(machine,password,enrolling,operation.Token,background);}
+        catch(Exception ex)when(ex.Message.Contains("请先登录",StringComparison.Ordinal))
+        {
+            // anonymous (or no longer signed in, as M says): the person is asked to sign in, not a background reconnect
+            if(!ex.Message.StartsWith(LoginFirst,StringComparison.Ordinal)){Username=null;AccountsKnown=true;Changed?.Invoke();}
+            if(!background)LoginNeeded?.Invoke();
+            throw;
+        }
         operation.Commit(()=>
         {
             lock(engine.State.Peers)

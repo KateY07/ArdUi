@@ -123,3 +123,54 @@ assert panel('DELETE', f'/api/admin/users/{me}', cookie=cookie)[0] == 400 and pa
 assert panel('DELETE', f"/api/admin/users/{carol['id']}", cookie=cookie)[0] == 200 and anonymous.call('/api/v1/account', {})[1]['username'] is None
 assert panel('POST', '/api/admin/logout', cookie=cookie)[0] == 200 and panel('GET', '/api/admin/me', cookie=cookie)[0] == 401
 print('PASS: the panel makes users (name required), resets passwords (signing them out), deletes; not itself')
+
+# the account page in a browser: register (pending until an administrator approves), sign a device in, change the password
+def web(method, path, data=None, marked=True, query=''):
+    import io
+    body = json.dumps(data).encode() if data is not None else b''
+    out = {}
+    environ = {'REQUEST_METHOD': method, 'PATH_INFO': path, 'QUERY_STRING': query, 'CONTENT_LENGTH': str(len(body)), 'wsgi.input': io.BytesIO(body),
+               'REMOTE_ADDR': '203.0.113.' + str(secrets.randbelow(200) + 1)}
+    if marked: environ['HTTP_X_ARDUI_WEB'] = '1'
+    reply = b''.join(arduiserver.application(environ, lambda status, headers: out.update(status=status, headers=dict(headers))))
+    return int(out['status'].split()[0]), (json.loads(reply) if out['headers'].get('Content-Type', '').startswith('application/json') else reply)
+
+
+status, page = web('GET', '/api/account', marked=False)
+assert status == 200 and b'ArdUi' in page
+assert web('POST', '/api/account/register', {'name': 'dave', 'email': 'dave@example.com', 'password': 'dave-password-1'}, marked=False)[0] == 403
+assert web('POST', '/api/account/register', {'name': 'dave', 'email': 'not-an-email', 'password': 'dave-password-1'})[0] == 400
+assert web('POST', '/api/account/register', {'name': 'dave', 'email': 'dave@example.com', 'password': 'short'})[0] == 400
+assert web('POST', '/api/account/register', {'name': 'dave', 'email': 'dave@example.com', 'password': 'dave-password-1'}) == (200, {'pending': True})
+assert web('POST', '/api/account/register', {'name': 'Dave', 'email': 'x@example.com', 'password': 'dave-password-1'})[0] == 409
+print('PASS: anyone may register on the account page (name, e-mail, password); names stay unique')
+
+newcomer = Device(); assert newcomer.call('/api/v1/register', {})[0] == 200
+status, start = newcomer.call('/api/v1/account/login-start', {})
+assert status == 200 and start['url'].startswith('/api/account?login='), start
+token = start['token']
+status, shown = web('GET', '/api/account/device', query='login=' + token)
+assert status == 200 and shown['code'] == newcomer.call('/api/v1/register', {})[1]['code'] and not shown['done'], shown
+assert newcomer.call('/api/v1/account/login-wait', {'token': token}) == (200, {'pending': True})
+status, answer = web('POST', '/api/account/login', {'login': token, 'name': 'dave', 'password': 'dave-password-1'})
+assert status == 403 and '等待管理员审核' in answer['error'], answer
+print('PASS: a pending account cannot sign a device in')
+
+status, _, headers = panel('POST', '/api/admin/login', {'name': 'boss', 'password': 'boss-password-1'})
+cookie = headers['Set-Cookie'].split(';')[0]
+dave = next(u for u in panel('GET', '/api/admin/users', cookie=cookie)[1]['users'] if u['name'] == 'dave')
+assert dave['pending'] == 1 and dave['email'] == 'dave@example.com'
+assert panel('POST', f"/api/admin/users/{dave['id']}", {'approve': True}, cookie=cookie)[0] == 200
+assert web('POST', '/api/account/login', {'login': 'wrong-token', 'name': 'dave', 'password': 'dave-password-1'})[0] == 410
+assert web('POST', '/api/account/login', {'login': token, 'name': 'dave', 'password': 'dave-password-1'}) == (200, {'name': 'dave'})
+assert newcomer.call('/api/v1/account/login-wait', {'token': token}) == (200, {'username': 'dave', 'admin': False})
+assert newcomer.call('/api/v1/account', {})[1]['username'] == 'dave'
+assert web('POST', '/api/account/login', {'login': token, 'name': 'dave', 'password': 'dave-password-1'})[0] == 409
+assert anonymous.call('/api/v1/account/login-wait', {'token': token})[0] == 410
+print('PASS: once approved, signing in on the page signs the waiting device in; the link works once, for that device only')
+
+assert web('POST', '/api/account/password', {'name': 'dave', 'old': 'wrong-password', 'new': 'dave-password-2'})[0] == 403
+assert web('POST', '/api/account/password', {'name': 'dave', 'old': 'dave-password-1', 'new': 'dave-password-2'})[0] == 200
+start2 = newcomer.call('/api/v1/account/login-start', {})[1]
+assert web('POST', '/api/account/login', {'login': start2['token'], 'name': 'dave', 'password': 'dave-password-2'})[0] == 200
+print('PASS: the password is changed on the page')

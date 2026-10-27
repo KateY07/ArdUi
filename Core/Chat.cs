@@ -78,6 +78,7 @@ sealed class ChatChannel
     // A control request travels as ONE frame of the session's link, and the receiving side drops the whole link when a frame is over
     // 64 KB. A chunk is therefore small enough that its base64 JSON stays well under that (36 KB raw -> about 49 KB on the wire).
     public const int MaxText = 8000, Chunk = 36 * 1024, MaxIncoming = 3, Window = 6, MaxReorder = 16;
+    const int MaxChunkJson = 52000;   // the chunk's data as written in JSON, leaving room under the 60 000-byte control message
     public const long MaxPerSession = 10L * 1024 * 1024 * 1024;   // all files one session may send to this machine
     long receivedThisSession;
     static readonly string[] ImageExtensions = [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"];
@@ -110,6 +111,9 @@ sealed class ChatChannel
     {
         public required string Path, Name; public required ChatKind Kind; public required long Size; public required ChatTransfer Transfer;
         public string Part => Path + ".part";
+        // each round of a transfer (the first, and every continuation) has its own name: pieces of an earlier round that arrive late
+        // (they were already on their way when it failed) are let go instead of being written into this one
+        public string Attempt = Guid.NewGuid().ToString("N");
         public FileStream? Stream; public long Written; public int Next; public IncrementalHash? Sha;
         public readonly Dictionary<int, byte[]> Pending = new();
     }
@@ -285,6 +289,7 @@ sealed class ChatChannel
             using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             // the other side kept what arrived before the connection broke: continue from there (the checksum still covers the whole file)
             var offset = begun.ValueKind == JsonValueKind.Object && begun.TryGetProperty("offset", out var at) && at.TryGetInt64(out var kept) && kept > 0 && kept < transfer.Size ? kept : 0;
+            var attempt = begun.ValueKind == JsonValueKind.Object && begun.TryGetProperty("attempt", out var named) && named.ValueKind == JsonValueKind.String ? named.GetString() : null;
             if (offset > 0)
             {
                 var skip = new byte[1 << 20];
@@ -311,15 +316,20 @@ sealed class ChatChannel
             while (true)
             {
                 var buffer = new byte[chunkSize];
-                var n = await stream.ReadAsync(buffer, ct);
-                if (n == 0) break;
+                var read = await stream.ReadAsync(buffer, ct);
+                if (read == 0) break;
+                // A chunk travels as base64 inside JSON, where each '+' is written as \u002B (six characters): data that turns into many
+                // of them (some byte patterns are nothing else) is cut smaller, so the request still fits one link frame; the rest goes next.
+                var n = read; var data = Convert.ToBase64String(buffer, 0, n);
+                while (n > 1024 && data.Length + 5 * data.Count(c => c == '+') > MaxChunkJson) { n = n * 3 / 4; data = Convert.ToBase64String(buffer, 0, n); }
+                if (n < read) stream.Seek(n - read, SeekOrigin.Current);
                 sha.AppendData(buffer, 0, n);
-                var data = Convert.ToBase64String(buffer, 0, n);
-                pending.Enqueue((Ask("chat-file-chunk", new { id = transfer.Id, seq = seq++, data }, ct), n, clock.ElapsedMilliseconds));
+                pending.Enqueue((Ask("chat-file-chunk", attempt == null ? new { id = transfer.Id, seq = seq++, data } : (object)new { id = transfer.Id, seq = seq++, data, attempt }, ct), n, clock.ElapsedMilliseconds));
                 while (pending.Count >= window) await Settle();
             }
             while (pending.Count != 0) await Settle();
-            await Ask("chat-file-end", new { id = transfer.Id, sha256 = Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant() }, ct);
+            var sha256 = Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant();
+            await Ask("chat-file-end", attempt == null ? new { id = transfer.Id, sha256 } : (object)new { id = transfer.Id, sha256, attempt }, ct);
             transfer.Finish(TransferState.Done);
             Mark(message, Delivery.Delivered);
         }
@@ -330,7 +340,11 @@ sealed class ChatChannel
             transfer.Finish(TransferState.Cancelled, "已取消");
             Mark(message, Delivery.Failed, transfer.Error ?? "已取消");
         }
-        catch (Exception ex) { transfer.Finish(TransferState.Failed, ex.Message); Mark(message, Delivery.Failed, ex.Message); }
+        catch (Exception ex)
+        {
+            FileLog.Write("对话", $"发送文件 {transfer.Name} 失败（已发 {transfer.Transferred} / {transfer.Size} 字节）：{ex.GetType().Name}: {ex.Message}");
+            transfer.Finish(TransferState.Failed, ex.Message); Mark(message, Delivery.Failed, ex.Message);
+        }
         finally { lock (gate) outgoing.Remove(transfer.Id); cts.Dispose(); }
     }
 
@@ -391,10 +405,25 @@ sealed class ChatChannel
         var name = SafeName(data.GetProperty("name").GetString());
         if (size <= 0 || size > MaxFile || kind == ChatKind.Image && size > MaxImage) throw new IOException("文件大小超出限制。");
         var resume = data.TryGetProperty("resume", out var asked) && asked.ValueKind == JsonValueKind.True;
+        // the sender starts this file again while it still looks under way here (the sender gave up, this side never heard): what
+        // arrived so far is kept as if the connection had broken, and the new attempt continues from there
+        bool stale; lock (gate) stale = resume && incoming.ContainsKey(id);
+        if (stale) Abort(id, TransferState.Failed, "发送方重新开始了这次传输", keep: true);
         Incoming file; ChatTransfer transfer;
         lock (gate)
         {
             if (seen.Contains(id)) return new { ok = true, have = true };   // already received: the sender stops here
+            // after a restart nothing is remembered: the newest unfinished copy of this file (<time>_<name>.part, smaller than the file)
+            // is taken up again; the checksum at the end still decides whether the result is the sender's file
+            if (resume && !paused.ContainsKey(id) && !incoming.ContainsKey(id) && Directory.Exists(folder))
+            {
+                var kept = new DirectoryInfo(folder).EnumerateFiles("*_" + name + ".part").Where(f => f.Length > 0 && f.Length < size)
+                    .Where(f => incoming.Values.All(i => !string.Equals(i.Part, f.FullName, StringComparison.OrdinalIgnoreCase)))
+                    .OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
+                if (kept != null)
+                    paused[id] = new Incoming { Path = kept.FullName[..^".part".Length], Name = name, Kind = kind, Size = size, Written = kept.Length,
+                                                Transfer = new ChatTransfer(id, name, kind, size, true, () => { }) };
+            }
             if (paused.Remove(id, out var stopped))
             {
                 if (resume && stopped.Size == size && stopped.Name == name && File.Exists(stopped.Part) && !incoming.ContainsKey(id) && incoming.Count < MaxIncoming)
@@ -411,7 +440,7 @@ sealed class ChatChannel
                         incoming[id] = file; transfers[id] = transfer; receivedThisSession += size - written;
                         transfer.Report(written);
                         TransferStarted?.Invoke(transfer);
-                        return new { ok = true, offset = written };
+                        return new { ok = true, offset = written, attempt = file.Attempt };
                     }
                     sha.Dispose();
                 }
@@ -432,7 +461,7 @@ sealed class ChatChannel
             incoming[id] = file; transfers[id] = transfer; receivedThisSession += size;
         }
         TransferStarted?.Invoke(transfer);
-        return new { ok = true };
+        return new { ok = true, attempt = file.Attempt };
     }
 
     object Chunked(JsonElement data)
@@ -443,6 +472,7 @@ sealed class ChatChannel
         {
             if (turnedDown.Contains(id)) return new { ok = true };
             file = incoming.GetValueOrDefault(id) ?? throw new IOException("没有这个文件的传输。");
+            if (OtherRound(data, file)) return new { ok = true };
         }
         try
         {
@@ -474,7 +504,9 @@ sealed class ChatChannel
         lock (gate)
         {
             if (turnedDown.Contains(id)) return new { ok = true };
-            file = incoming.GetValueOrDefault(id) ?? throw new IOException("没有这个文件的传输。"); incoming.Remove(id);
+            file = incoming.GetValueOrDefault(id) ?? throw new IOException("没有这个文件的传输。");
+            if (OtherRound(data, file)) return new { ok = true };
+            incoming.Remove(id);
         }
         string actual;
         lock (file) { file.Stream!.Dispose(); actual = Convert.ToHexString(file.Sha!.GetHashAndReset()).ToLowerInvariant(); file.Sha.Dispose(); }
@@ -491,6 +523,10 @@ sealed class ChatChannel
         Add(new ChatMessage(id, false, file.Kind, "", file.Name, file.Size, final, DateTimeOffset.Now), true);
         return new { ok = true };
     }
+
+    // A sender that names rounds (since v6.7) and names another one than this transfer's; one that names none is taken as it is.
+    static bool OtherRound(JsonElement data, Incoming file) =>
+        data.TryGetProperty("attempt", out var round) && round.ValueKind == JsonValueKind.String && round.GetString() != file.Attempt;
 
     // The other side stopped a transfer: whichever way it was going, it ends here too.
     object Cancelled(JsonElement data)
@@ -520,6 +556,7 @@ sealed class ChatChannel
         lock (file) { file.Stream?.Dispose(); file.Sha?.Dispose(); file.Pending.Clear(); }
         if (keep && file.Written > 0) lock (gate) paused[id] = file;
         else try { File.Delete(file.Part); } catch (IOException) { }
+        FileLog.Write("对话", $"接收文件 {file.Name} 结束：{reason}（已收 {file.Written} / {file.Size} 字节{(keep ? "，保留以便续传" : "")}）");
         file.Transfer.Finish(state, reason);
     }
 
