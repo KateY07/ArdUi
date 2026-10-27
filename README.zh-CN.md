@@ -29,7 +29,9 @@ ArdUi 基于 [ARD](https://github.com/KateY07/ard2)（Iroh）建立点对点的�
 | 功能 | 说明 |
 | --- | --- |
 | 6 位编号连接 | 输入对方的编号和一次性密码，核对完整设备指纹后，由被控端同意授权。之后凭设备身份重连，不用再输密码。 |
-| 逐设备授权 | 被控端为每台控制设备单独开放 FRD、RDP、对话、文件、通话；支持“仅接受这一次”；可随时撤销或断开。 |
+| 账号 | 只有登录的设备可以连接（控制）其他设备；未登录时显示“匿名用户”，只能被控。登录、注册、修改密码都在服务器的账号网页中完成，注册的账号由管理员审核。 |
+| 逐设备授权 | 被控端为每台控制设备单独开放 FRD、RDP、对话（含文件、图片和通话）、共享文件夹；支持“仅接受这一次”；可随时撤销或断开。 |
+| 共享文件夹 | 在浏览器中浏览、上传（可续传）、下载对方的共享文件夹（WebDAV，仅限直连）；删除的内容进回收文件夹；每次操作记入被控端审计。 |
 | 远程桌面 | 通过 [FRD](https://github.com/KateY07/frd) 查看和控制已登录的桌面，也可使用 RDP。 |
 | 对话与文件传输 | 文字、图片、文件（最大 2 GB），显示速度与进度，可取消，传输时仍可聊天。 |
 | 审计录屏 | 对方使用屏幕时，在被控端本地录制（10 帧/秒，保存为分片 MP4），最多占用 10 GB，循环覆盖。使用 Windows 自带的 H.264 编码器，不依赖 FFmpeg。录屏默认开启、不可关闭，被控端首页会显示“录屏中”。 |
@@ -78,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/KateY07/ArdUi/main/selfhost.sh | su
 - 面向公网的进程拿不到 M 的密钥；只有 `arduiserver-control` 和 HTTPS 前端持有（见 [ROLES.md](ROLES.md)）。
 - ArdFerry 节点用你的 M 提供的一键脚本加入：Linux 上 `curl -fsSL https://你的域名/ardferry.sh | sudo bash`，Windows 上 `& ([scriptblock]::Create((irm https://你的域名/ardferry.ps1)))`。任何人也可以用 `f.visnova.cn` 以同样方式为官方网络增加 ArdFerry。
 - `--no-m` 只装设备目录（客户端能登记，但连不上）。
-- **账号**：只有登录的设备可以连接（控制）其他设备，被控不需要账号。部署后在服务器上创建第一个管理员：`sudo -u arduiserver python3 /opt/arduiserver/arduiserver.py --add-user 名字 --admin`（打印一次初始密码），再到 `https://你的域名/api/admin` 登录管理页面创建其他用户。
+- **账号**：只有登录的设备可以连接（控制）其他设备，被控不需要账号。部署后在服务器上创建第一个管理员：`sudo -u arduiserver /opt/arduiserver/venv/bin/python /opt/arduiserver/arduiserver.py --add-user 名字 --admin`（打印一次初始密码），再到 `https://你的域名/api/admin` 登录管理页面创建用户、审核注册申请。用户在 `https://你的域名/api/account` 注册、登录设备和修改密码。
 
 已验证：整个脚本（含 Caddy）在断网的 systemd 容器（OpenCloudOS 9）里跑通，包括各服务以独立用户运行在加固沙箱中、HTTPS、HTTP 跳转、签名 API 调用、重复运行、IP 地址、卸载；在一台公网服务器上真实签发了 Let's Encrypt IP 证书，ArdUi 客户端对它完成了完整的端到端测试。尚未验证：在全新服务器上为域名签发真实证书。
 
