@@ -12,6 +12,7 @@ import re
 import secrets
 import sqlite3
 import string
+import sys
 import tempfile
 import threading
 import time
@@ -871,6 +872,73 @@ async def _waited(wait, environ):
         return b''.join(json_reply(status, result, lambda line, headers: reply.update(status=line, headers=headers)))
     return await loop.run_in_executor(_pool, again), reply
 
+# ---- one-time uploads ------------------------------------------------------------------------------------------------------------
+# The operator brings a release file (the ArdUi installer, the M package) to this M from any machine with a fast connection, without
+# that machine being able to log in here: a one-time token, made on this server (python3 arduiserver.py --upload-token), allows one
+# PUT /api/v1/admin/upload/<token>/<file> within an hour. The token is gone after that request, whatever its outcome. The file goes
+# into <data>/incoming only (this service cannot write anywhere else); the operator checks it and puts it in place.
+UPLOAD_TOKEN = os.path.join(os.path.dirname(os.path.abspath(DB)), 'upload.token')
+UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(DB)), 'incoming')
+UPLOAD_NAMES = re.compile(r'ArdUi-v\d{1,3}\.(?:pre)?\d{1,3}_setup\.exe|ardui-m-linux-x86_64\.tar\.gz')
+UPLOAD_LIMIT = 64 << 20
+UPLOAD_SECONDS = 3600
+
+def make_upload_token():
+    token = secrets.token_hex(32)
+    fd = os.open(UPLOAD_TOKEN + '.tmp', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as out: out.write(f'{token} {int(time.time()) + UPLOAD_SECONDS}\n')
+    os.replace(UPLOAD_TOKEN + '.tmp', UPLOAD_TOKEN)
+    return token
+
+def take_upload_token(given):
+    """True once for the current token (and not after it expired); the token is removed by any attempt that names a token."""
+    try:
+        with open(UPLOAD_TOKEN) as source: token, until = source.read().split()
+    except (OSError, ValueError):
+        return False
+    try: os.remove(UPLOAD_TOKEN)
+    except OSError: pass
+    import hmac
+    return hmac.compare_digest(token.encode(), given.encode()) and time.time() < int(until)
+
+async def upload(scope, receive, send):
+    async def answer(status, text):
+        body = json.dumps({'ok': status == 200, 'message': text}, ensure_ascii=False).encode()
+        await send({'type': 'http.response.start', 'status': status, 'headers': [(b'content-type', b'application/json; charset=utf-8'), (b'content-length', str(len(body)).encode())]})
+        await send({'type': 'http.response.body', 'body': body})
+    headers = {k.decode('latin-1').lower(): v.decode('latin-1') for k, v in scope['headers']}
+    ip = headers.get('x-real-ip') or (scope.get('client') or ('', 0))[0]
+    loop = asyncio.get_running_loop()
+    parts = scope['path'][len('/api/v1/admin/upload/'):].split('/')
+    try: await loop.run_in_executor(_pool, limit, 'upload:' + ip, 10, 3600)
+    except ApiError as ex: return await answer(ex.status, ex.message)
+    if scope['method'] != 'PUT' or len(parts) != 2 or not re.fullmatch(r'[0-9a-f]{64}', parts[0]) or not UPLOAD_NAMES.fullmatch(parts[1]):
+        return await answer(404, '接口不存在。')
+    if not await loop.run_in_executor(_pool, take_upload_token, parts[0]):
+        return await answer(403, '上传令牌无效或已用过。')
+    want = headers.get('x-sha256', '').lower()
+    if not re.fullmatch(r'[0-9a-f]{64}', want): return await answer(400, '缺少 X-Sha256。')
+    os.makedirs(UPLOAD_DIR, mode=0o700, exist_ok=True)
+    target = os.path.join(UPLOAD_DIR, parts[1]); temp = target + '.part'
+    digest = hashlib.sha256(); size = 0
+    try:
+        with open(temp, 'wb') as out:
+            while True:
+                message = await receive()
+                if message['type'] == 'http.disconnect': raise IOError('上传中断。')
+                chunk = message.get('body', b''); size += len(chunk)
+                if size > UPLOAD_LIMIT: raise IOError('文件过大。')
+                digest.update(chunk); out.write(chunk)
+                if not message.get('more_body'): break
+        if digest.hexdigest() != want: raise IOError('SHA-256 不一致，已丢弃。')
+        os.replace(temp, target)
+    except IOError as ex:
+        try: os.remove(temp)
+        except OSError: pass
+        return await answer(400, str(ex))
+    print(f'one-time upload: {parts[1]} {size} bytes sha256={want} from {ip}', flush=True)
+    await answer(200, f'已收到 {parts[1]}（{size} 字节），等待管理员放置。')
+
 async def asgi(scope, receive, send):
     global _news_loop
     if scope['type'] == 'lifespan':
@@ -885,6 +953,8 @@ async def asgi(scope, receive, send):
     if scope['type'] != 'http':
         return
     _news_loop = asyncio.get_running_loop()
+    if scope['path'].startswith('/api/v1/admin/upload/'):
+        return await upload(scope, receive, send)   # streamed to disk, not held in memory
     body = bytearray()
     while True:
         message = await receive()
@@ -921,6 +991,9 @@ async def asgi(scope, receive, send):
         if isinstance(payload, FileChunks): payload.close()
 
 initialize()
+if __name__=='__main__' and sys.argv[1:] == ['--upload-token']:
+    print(make_upload_token())   # as the service's user: sudo -u arduiserver python3 arduiserver.py --upload-token
+    raise SystemExit
 if __name__=='__main__':
     # Local integration tests only (no waiting: WSGI asks again at once); production runs uvicorn with asgi behind Caddy.
     from wsgiref.simple_server import make_server
