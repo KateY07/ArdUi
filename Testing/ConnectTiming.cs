@@ -27,6 +27,10 @@ static class ConnectTiming
         while ((directory.Ferries?.Latest.Count ?? 0) == 0 && ready.Elapsed < TimeSpan.FromSeconds(60)) await Task.Delay(200);
         Console.WriteLine($"client running; ArdFerry measured after {ready.Elapsed.TotalSeconds:F1} s");
         var totals = new List<double>();
+        // each round starts from no session: a plain disconnect lets the device's auto-reconnect bring the session back at once (the
+        // next round then finds it up and has no stages to time), so a round ends with a pause; the setting is restored at the end
+        Peer? Peer() { lock (engine.State.Peers) return engine.State.Peers.FirstOrDefault(p => p.Code == code); }
+        var autoConnect = Peer()?.AutoConnect;
         for (var round = 1; round <= count; round++)
         {
             lock (stages) stages.Clear();
@@ -48,9 +52,10 @@ static class ConnectTiming
                                   $"signal {Span(ConnectStage.Signal, ConnectStage.Link)} | link {Span(ConnectStage.Link, ConnectStage.Done)}");
             }
             catch (Exception ex) { Console.WriteLine($"FAIL round {round} after {watch.Elapsed.TotalSeconds:F2} s: {ex.Message}"); }
-            foreach (var id in engine.Outgoing.Keys.ToArray()) await engine.Disconnect(id);
+            if (Peer() is { } peer) await directory.Pause(peer); else foreach (var id in engine.Outgoing.Keys.ToArray()) await engine.Disconnect(id);
             await Task.Delay(TimeSpan.FromSeconds(3));
         }
+        if (Peer() is { } again && autoConnect is { } before) { again.AutoConnect = before; engine.State.Save(); }
         if (totals.Count > 0) Console.WriteLine($"SUMMARY {totals.Count}/{count} connected; average {totals.Average():F2} s, min {totals.Min():F2} s, max {totals.Max():F2} s");
         await Task.Delay(1500);   // the log writer flushes on its own pace
         return totals.Count == count ? 0 : 1;
